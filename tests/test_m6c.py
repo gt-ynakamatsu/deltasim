@@ -264,7 +264,7 @@ class TestCaseFilterWildcard:
         assert names == {"test_a", "test_b"}
 
     def test_filter_excludes_fully(self, tmp_path):
-        """全ケースが除外された場合も cases=[] の TestResult を返すこと"""
+        """全ケースが除外された場合は E_NO_CASE ERROR を返すこと (§14.1)"""
         import yaml, deltasim.api as ds
 
         spec = {
@@ -278,8 +278,9 @@ class TestCaseFilterWildcard:
         result = ds.test([os.path.join(EXAMPLES, "counter.sv")], spec_path,
                          filter_cases=["no_match"])
         assert result is not None, "TestResult は常に返すこと"
+        assert result.status == "ERROR"   # §14.1
+        assert any(e.code == "E_NO_CASE" for e in result.errors)
         assert len(result.cases) == 0
-        assert result.status == "PASS"
 
 
 class TestGenYAMLFormat:

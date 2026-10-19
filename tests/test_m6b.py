@@ -178,7 +178,7 @@ class TestElapsedMsSeparation:
 
 class TestCaseFilter:
     def test_matching_case_runs(self):
-        """--case に一致するケースは実行されること"""
+        """--case に一致するケースは実行されること（legacy: 名前=ファイル語幹）"""
         from click.testing import CliRunner
         from deltasim.cli import main
         runner = CliRunner()
@@ -186,7 +186,7 @@ class TestCaseFilter:
             "test",
             os.path.join(EXAMPLES, "counter.sv"),
             "--spec", os.path.join(EXAMPLES, "counter_spec.yaml"),
-            "--case", "counter",  # module name = "counter"
+            "--case", "counter_spec",  # legacy: filename stem = "counter_spec"
         ])
         assert result.exit_code == 0, result.output
 
@@ -202,10 +202,7 @@ class TestCaseFilter:
             "--case", "other_module",  # does not match "counter"
         ])
         # Filtered out → exit 0 (no failure, just skipped)
-        assert result.exit_code == 0, result.output
-        # Should mention skip/filter in stderr
-        assert "フィルタ" in result.output or "skip" in result.output.lower() \
-            or "スキップ" in result.output
+        assert result.exit_code != 0, result.output  # §14.1: 非0終了
 
     def test_non_matching_case_excluded_via_api(self):
         """api.test(filter_cases=['other']) が空チェックの TestResult を返すこと（除外）"""
@@ -213,16 +210,13 @@ class TestCaseFilter:
         result = ds.test(
             [os.path.join(EXAMPLES, "counter.sv")],
             spec=os.path.join(EXAMPLES, "counter_spec.yaml"),
-            filter_cases=["other_module"],  # does not match "counter_spec"
+            filter_cases=["other_module"],  # does not match
         )
-        # §12.1: 除外ケースは結果に含まれない = checks=[], cases=[] の TestResult
         assert result is not None, "test() は常に TestResult を返すこと"
-        assert len(result.checks) == 0, \
-            f"フィルタアウトされたケースは checks=[] のはずだが {len(result.checks)} 件ある"
-        assert len(result.cases) == 0, \
-            f"フィルタアウトされたケースは cases=[] のはずだが {len(result.cases)} 件ある"
-        # PASS ステータス（失敗なし）
-        assert result.status == "PASS"
+        assert len(result.cases) == 0
+        assert result.status == "ERROR"  # §14.1
+        assert any(e.code == "E_NO_CASE" for e in result.errors)
+        assert len(result.cases) == 0
 
     def test_matching_case_via_api(self):
         """api.test(filter_cases=['counter']) がケースを実行すること"""
@@ -230,9 +224,9 @@ class TestCaseFilter:
         result = ds.test(
             [os.path.join(EXAMPLES, "counter.sv")],
             spec=os.path.join(EXAMPLES, "counter_spec.yaml"),
-            filter_cases=["counter"],
+            filter_cases=["counter_spec"],  # legacy: filename stem
         )
-        assert result is not None, "filter_cases=['counter'] でケースが除外された"
+        assert result is not None, "filter_cases=['counter_spec'] でケースが除外された"
         assert result.status == "PASS"
 
     def test_no_filter_runs_all(self):
@@ -252,7 +246,7 @@ class TestCaseFilter:
         result = ds.test(
             [os.path.join(EXAMPLES, "counter.sv")],
             spec=os.path.join(EXAMPLES, "counter_spec.yaml"),
-            filter_cases=["other", "counter"],  # "counter" matches
+            filter_cases=["other", "counter_spec"],  # "counter_spec" matches
         )
         assert result is not None
         assert result.status == "PASS"

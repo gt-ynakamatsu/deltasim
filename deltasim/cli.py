@@ -257,20 +257,16 @@ def test_cmd(sv_files, top, spec, params, junit, json_out, vcd, seed,
     )
 
     # §12.1: フィルタアウトされたケースは checks が空の TestResult として返る
-    if result is not None and result.checks == [] and filter_cases:
-        click.echo(
-            f"[deltasim test] ケース '{Path(spec).stem}' は --case フィルタに"
-            f" 一致しないため除外されました（結果に含まれません）",
-            err=True,
-        )
-
-    # §12.1: フィルタアウトされたケースは checks が空の TestResult として返る
-    if result is not None and result.checks == [] and filter_cases:
-        click.echo(
-            f"[deltasim test] ケース '{Path(spec).stem}' は --case フィルタに"
-            f" 一致しないため除外されました（結果に含まれません）",
-            err=True,
-        )
+    # §14.1: E_NO_CASE の場合も JSON を正しく出力してから非 0 終了
+    if result is not None and result.status == "ERROR":
+        # Write JSON before exit (stdout は汚染しない)
+        if json_out:
+            Path(json_out).write_text(result.to_json(), encoding="utf-8")
+            click.echo(f"[deltasim test] JSON: {json_out}", err=True)
+        for err in result.errors:
+            click.echo(f"ERROR ({err.code}): {err.message}", err=True)
+        print_results_v2(result, verbose=verbose, color=not no_color)
+        sys.exit(1)
 
     # Terminal output
     print_results_v2(result, verbose=verbose, color=not no_color)

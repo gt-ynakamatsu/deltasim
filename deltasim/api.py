@@ -305,6 +305,19 @@ def test(
     run_cases = [c for c in all_cases if _matches(c.name)]
     # Cases that don't match are excluded entirely (not in result)
 
+    # §14.1: all cases excluded → ERROR
+    if filter_cases and len(run_cases) == 0:
+        patterns_str = ", ".join(filter_cases)
+        result.status = "ERROR"
+        result.errors.append(ErrorInfo(
+            severity="error",
+            message=f"--case フィルタ {patterns_str!r} に一致するケースがありません",
+            code="E_NO_CASE",
+        ))
+        result.elapsed_ms = (time.time() - t0) * 1000
+        _emit("finish", status="ERROR", elapsed_ms=result.elapsed_ms)
+        return result
+
     _emit("progress", phase="sim", cycle=0, total_cycles=scenario.sim.cycles, time_ns=0)
 
     # Run each case
@@ -344,6 +357,7 @@ def test(
               name=case_result.name,
               status=case_result.status,
               elapsed_ms=case_result.elapsed_ms,
+              message=case_result.message,
               cancelled=case_result.cancelled)
 
     result.status = overall_status
@@ -389,9 +403,10 @@ def _run_one_case(
             ev = ProgressEvent(type=type_, **kw)
             on_progress(ev.to_dict())
 
-    # SKIP
+    # §14.3 SKIP — message = skip_reason または "skipped"
     if case.skip:
         cr.status = "SKIP"
+        cr.message = case.skip_reason if case.skip_reason else "skipped"
         if case.skip_reason:
             cr.log.append(case.skip_reason)
         cr.elapsed_ms = (time.time() - case_t0) * 1000
@@ -435,8 +450,10 @@ def _run_one_case(
                 model.reset()
         except Exception as e:
             cr.status = "ERROR"
-            cr.errors.append(_exc_to_error(e, "E006",
-                                           message=f"参照モデルの読み込み失敗: {e}"))
+            err = _exc_to_error(e, "E006",
+                                message=f"参照モデルの読み込み失敗: {e}")
+            cr.errors.append(err)
+            cr.message = err.message   # §14.3 ERROR message
             cr.elapsed_ms = (time.time() - case_t0) * 1000
             return cr
 
@@ -555,7 +572,8 @@ def _run_one_case(
             cr.log.append("cancelled")
     except Exception as e:
         overall_status = "ERROR"
-        cr.errors.append(_exc_to_error(e, "E005"))
+        err = _exc_to_error(e, "E005")
+        cr.errors.append(err)
     finally:
         if vcd_obj:
             vcd_obj.close()
@@ -570,6 +588,14 @@ def _run_one_case(
     cr.log = engine._result.log if engine._result else []
     # §13.1: case elapsed_ms = this case's execution time
     cr.elapsed_ms = (time.time() - case_t0) * 1000
+
+    # §14.3: message フィールド設定
+    if cr.cancelled and cr.status == "SKIP":
+        cr.message = "cancelled"
+    elif cr.status == "ERROR" and cr.errors:
+        cr.message = cr.errors[0].message
+    # PASS/FAIL: §14 では未定義 → 空文字列のまま（docs/api.md に記載）
+
     return cr
 
 
