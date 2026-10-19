@@ -108,8 +108,8 @@ class TestRunTest:
         })
         assert res.status_code == 200
         data = res.json()
-        # M5 API: schema_version は文字列 "1"
-        assert str(data["schema_version"]) == "1"
+        # PR#7: schema_version は文字列 "2"
+        assert str(data["schema_version"]) in ("1", "2")  # バージョン非依存
         # M5 API: checks フィールド（cases ではない）
         assert "checks" in data or "summary" in data
         assert "summary" in data
@@ -841,17 +841,19 @@ class TestM5ApiCompat:
         assert data["cancelled"] is False
 
     def test_schema_version_string(self, client):
-        """M5 API: schema_version は文字列 '1'"""
+        """PR#7: schema_version は文字列（現在 '2'）"""
         res = client.post("/api/test", json={
             "sv_files": [COUNTER_SV],
             "spec": COUNTER_SPEC,
         })
         assert res.status_code == 200
         data = res.json()
-        assert str(data["schema_version"]) == "1"
+        # PR#7 で "2" に更新。文字列であることを確認
+        assert isinstance(data["schema_version"], str)
+        assert data["schema_version"] == "2"
 
     def test_checks_have_4state_values(self, client):
-        """§12.4: シグナルチェックの expected/actual は 4 値文字列（0/1/x/z）。
+        """§12.4 (PR#7): expected/actual は 4 値文字列（0/1/x/z 小文字統一）。
         expr チェックの expected はPython式文字列なので除外する。"""
         res = client.post("/api/test", json={
             "sv_files": [MUX2_SV],
@@ -860,8 +862,43 @@ class TestM5ApiCompat:
         assert res.status_code == 200
         data = res.json()
         for chk in data.get("checks", []):
-            # source=spec かつ signal が "<expr>" でないものだけチェック
             if chk.get("source") == "spec" and chk.get("signal") not in ("<expr>", ""):
                 for v in (chk.get("expected", ""), chk.get("actual", "")):
                     assert all(c in "01xz" for c in str(v).lower()), \
                         f"4 値文字列でない値: {v!r} (check: {chk['name']})"
+
+    def test_z_x_distinction_in_vcd(self):
+        """§12.4 (PR#7): VCDパーサが Z='z' と X='x' を区別すること"""
+        import tempfile, os
+        from deltasim.gui.vcd_reader import read_vcd
+
+        vcd = "$timescale 1ns $end\n$var wire 1 ! sig $end\n$enddefinitions $end\n"
+        vcd += "$dumpvars\nx!\n$end\n#5\n1!\n#10\nz!\n#15\nx!\n"
+        with tempfile.NamedTemporaryFile(suffix=".vcd", delete=False, mode="w") as f:
+            f.write(vcd)
+            path = f.name
+        try:
+            data = read_vcd(path)
+            changes = data["signals"]["sig"]["changes"]
+            values = [v for _, v in changes]
+            assert "x" in values, f"X 値が見つかりません: {changes}"
+            assert "z" in values, f"Z 値が見つかりません: {changes}"
+            # Z と X が区別されていること
+            assert values.count("x") != values.count("z") or \
+                   (any(v == "z" for v in values) and any(v == "x" for v in values))
+        finally:
+            os.unlink(path)
+
+    def test_summary_elapsed_ms(self, client):
+        """§12.5 (PR#7): summary.elapsed_ms が存在すること（全体の実時間）"""
+        res = client.post("/api/test", json={
+            "sv_files": [COUNTER_SV],
+            "spec": COUNTER_SPEC,
+        })
+        assert res.status_code == 200
+        data = res.json()
+        assert "summary" in data
+        s = data["summary"]
+        assert "elapsed_ms" in s, "summary.elapsed_ms が存在しません"
+        assert isinstance(s["elapsed_ms"], (int, float))
+        assert s["elapsed_ms"] >= 0

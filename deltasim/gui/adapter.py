@@ -1,21 +1,14 @@
-"""GUI アダプタ層 — M5 公開 API (deltasim.api) の薄いラッパー。
+"""GUI アダプタ層 — M5/PR#7 公開 API (deltasim.api) の薄いラッパー。
 
-M5 公開 API に対応した差し替え版。
-- load / test / run はすべて deltasim.api に委譲する
-- 内部関数（parse_file, elaborate, TestRunner）の直接呼び出しはゼロ
-- 進捗コールバック: deltasim.api の on_progress (type フィールド) を SSE イベント (event フィールド) へ変換
-- キャンセル: CancelToken を使用、mid-cycle での真のキャンセルが可能
-- 構造化エラー: ErrorInfo をそのままフロントへ返す
+PR#7（マイルストーン6）で解消した §12 の暫定コードをすべて削除:
+  - case_done 集約バッファ → API が §12.2 準拠（シナリオ単位で1回発火）
+  - truncated_at の warning fallback → result.truncated_at フィールドを直接参照
+  - Z/X の区別 → val_to_4state が "z"/"x" を正しく返す
+  - summary.elapsed_ms → TestResult.to_dict() が summary キーを返す
 
-仕様書 §2 との整合確認（docs/api.md 参照）:
-  - schema_version は文字列 "1"
-  - test() は TestResult.checks を返す（cases ではない）
-  - 進捗イベントのフィールド名は `type`（GUI SSE では `event` に変換）
-  - Z/X は現状どちらも val_to_4state が "x" を返す（仕様書 §2.8 未決事項 #4）
-
-未実装・M5以降の課題:
-  - $scope 階層パスの VCD: 現在フラット展開（未決事項 #6）
-  - Simulator.force() の NBA 抑制精度（未決事項 #5）
+残課題（reports/api.md の未決事項として管理）:
+  - §未決事項 #5: Simulator.force() の NBA 抑制精度
+  - §未決事項 #6: 階層シグナルパス（$scope フラット展開のまま）
 """
 
 from __future__ import annotations
@@ -26,28 +19,11 @@ from typing import Callable, Dict, List, Optional
 
 
 # ---------------------------------------------------------------------------
-# 公開型（後方互換のため残す）
+# 定数
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = "1"  # str に変更（M5 contract）
-
-
-class AdapterError(Exception):
-    """アダプタ層からのエラー（未使用になったが後方互換のため残す）"""
-
-    def __init__(self, message: str, *, file: Optional[str] = None,
-                 line: Optional[int] = None, column: Optional[int] = None,
-                 severity: str = "error", code: Optional[str] = None):
-        super().__init__(message)
-        self.file = file
-        self.line = line
-        self.column = column
-        self.severity = severity
-        self.code = code
-
-    def to_dict(self) -> dict:
-        return {"file": self.file, "line": self.line, "column": self.column,
-                "severity": self.severity, "message": str(self), "code": self.code}
+# PR#7 で SCHEMA_VERSION = "2" に更新
+SCHEMA_VERSION = "2"
 
 
 # ---------------------------------------------------------------------------
@@ -55,13 +31,12 @@ class AdapterError(Exception):
 # ---------------------------------------------------------------------------
 
 def _progress_to_sse(ev: dict, callback: Optional[Callable]) -> None:
-    """deltasim.api の進捗 dict（type フィールド）を SSE dict（event フィールド）に変換して callback に渡す。"""
+    """deltasim.api の進捗 dict（type フィールド）を SSE dict（event フィールド）に変換。"""
     if callback is None:
         return
     sse = dict(ev)
-    # type → event フィールドに変換（GUI SSE 形式）
     sse["event"] = sse.pop("type", "progress")
-    # total_cycles → total へエイリアス（GUI が期待するフィールド）
+    # total_cycles → total エイリアス（GUI が期待するフィールド名）
     if "total_cycles" in sse:
         sse["total"] = sse["total_cycles"]
     try:
@@ -80,17 +55,7 @@ def load(
     *,
     param_overrides: Optional[Dict[str, int]] = None,
 ) -> dict:
-    """RTL ファイルをパース・エラボレーションしてモジュール情報を返す。
-
-    Returns
-    -------
-    {
-        "module": str,
-        "ports": [{"name": str, "direction": str, "width": int, "signed": bool}, ...],
-        "params": {name: value, ...},
-        "errors": [...],  # ErrorInfo.to_dict() のリスト
-    }
-    """
+    """RTL ファイルをパース・エラボレーションしてモジュール情報を返す。"""
     import deltasim.api as ds
 
     di = ds.load([str(f) for f in files], top=top, params=param_overrides or {})
@@ -127,19 +92,14 @@ def test(
     on_progress: Optional[Callable[[dict], None]] = None,
     cancel_event=None,  # threading.Event | None
 ) -> dict:
-    """テストを実行して結果 JSON を返す（M5 公開 API 使用版）。
+    """テストを実行して結果 JSON を返す（M5/PR#7 公開 API 使用版）。
 
-    §12 対応:
-      - cancelled=True の場合、未実行ケースは SKIP として summary に加算
-      - truncated_at フィールドがあれば透過して返す（§12.3）
-      - case_done イベントはケース単位で送る（§12.2）
-        ※ M5 API は個別 check ごとに case_done を発火するため、
-          同一シナリオ名をバッファして最後にまとめる変換を行う
-          （API が §12.2 準拠になったら変換コードを削除）
-
-    仕様書との差異（→ 報告済み）:
-      - M5 API の case_done は個別 check 単位で発火（§12.2 は "ケース単位で1回"）
-      - truncated_at は M5 TestResult に未定義（§12.3 の warning/truncated_at は未実装）
+    PR#7 で確定した §12 の各点:
+      §12.1 SKIP: cancelled=True 時、result.cancelled フィールドを使用
+      §12.2 case_done: API がシナリオ単位で1回発火（暫定バッファ不要）
+      §12.3 truncated_at: result.truncated_at フィールドを直接参照
+      §12.4 Z/X: val_to_4state が "z"/"x" を正しく返す（暫定コード不要）
+      §12.5 summary.elapsed_ms: TestResult.to_dict() が summary キーを返す
     """
     import deltasim.api as ds
     from deltasim.result import CancelToken
@@ -153,44 +113,7 @@ def test(
             token.cancel()
         threading.Thread(target=_watch, daemon=True).start()
 
-    # case_done バッファ（§12.2: ケース単位で1回）
-    # M5 API が個別 check ごとに case_done を発火するため、
-    # シナリオ名（= spec ファイル stem）単位にまとめてから発火する暫定実装
-    _case_buf: dict = {}
-    _scenario_name = Path(spec_path).stem
-
     def _progress(ev: dict) -> None:
-        ev_type = ev.get("type", "")
-
-        if ev_type == "case_done":
-            # 個別 check を蓄積、シナリオ全体の状態として合算
-            check_status = ev.get("status", "PASS")
-            buf = _case_buf.setdefault(_scenario_name, {"status": "PASS", "checks": []})
-            buf["checks"].append(ev)
-            # 最低1件 FAIL → FAIL, ERROR が混じれば ERROR
-            if check_status in ("ERROR",):
-                buf["status"] = "ERROR"
-            elif check_status == "FAIL" and buf["status"] != "ERROR":
-                buf["status"] = "FAIL"
-            # ケース単位の SSE は finish 後に発火するのでここでは何もしない
-            return
-
-        if ev_type == "finish":
-            # finish の前にケース単位 case_done を発火（§12.2 準拠）
-            for name, buf in _case_buf.items():
-                sse_ev = {
-                    "event": "case_done",
-                    "name": name,
-                    "status": buf["status"],
-                    "checks": buf["checks"],
-                }
-                if on_progress:
-                    try:
-                        on_progress(sse_ev)
-                    except Exception:
-                        pass
-            _case_buf.clear()
-
         _progress_to_sse(ev, on_progress)
 
     result = ds.test(
@@ -204,37 +127,25 @@ def test(
         cancel=token,
     )
 
-    checks_dicts = [c.to_dict() for c in result.checks]
-
-    # §12.1: キャンセル時の未実行ケース → SKIP（現状は checks が途中までなので概算）
+    # summary 構築（PR#7: result.to_dict() が summary を持つ）
     n_pass  = sum(1 for c in result.checks if c.status == "PASS")
     n_fail  = sum(1 for c in result.checks if c.status == "FAIL")
     n_error = sum(1 for c in result.checks if c.status == "ERROR")
     n_skip  = sum(1 for c in result.checks if c.status == "SKIP")
     total   = len(result.checks)
 
-    # §12.1: キャンセルされた場合は summary に cancelled_count を追記
     if result.status == "ERROR" and total == 0:
         n_error = 1
         total   = 1
 
-    # §12.3: truncated_at — M5 TestResult に未実装のためフォールバックで None
-    # API が truncated_at を実装したら result から取得する
-    truncated_at = getattr(result, "truncated_at", None)
-    # warning イベントを errors から探す
-    for err in result.errors:
-        if err.severity == "warning" and "truncated" in err.message.lower():
-            if truncated_at is None:
-                truncated_at = err.message  # 時刻が含まれる場合はパース
-
     return {
-        "schema_version": result.schema_version,
+        "schema_version": result.schema_version,   # PR#7: "2"
         "module": result.module,
         "status": result.status,
         "seed": result.seed,
         "elapsed_ms": result.elapsed_ms,
         "cancelled": result.cancelled,
-        "checks": checks_dicts,
+        "checks": [c.to_dict() for c in result.checks],
         "log": result.log,
         "errors": [e.to_dict() for e in result.errors],
         "summary": {
@@ -243,10 +154,11 @@ def test(
             "fail": n_fail,
             "error": n_error,
             "skip": n_skip,
+            "elapsed_ms": result.elapsed_ms,  # §12.5: 全体の実時間
             "cancelled": result.cancelled,
         },
         "vcd_path": vcd_path,
-        "truncated_at": truncated_at,  # §12.3: None = 上限未到達
+        "truncated_at": result.truncated_at,  # §12.3: PR#7 で TestResult フィールドに昇格
     }
 
 
@@ -266,10 +178,10 @@ def run(
     on_progress: Optional[Callable[[dict], None]] = None,
     keep_changes: bool = False,
 ) -> dict:
-    """シミュレーションを実行して結果を返す（M5 公開 API 使用版）。"""
+    """シミュレーションを実行して結果を返す（M5/PR#7 公開 API 使用版）。"""
     import deltasim.api as ds
 
-    def _progress(ev: dict):
+    def _progress(ev: dict) -> None:
         _progress_to_sse(ev, on_progress)
 
     result = ds.run(
@@ -299,21 +211,16 @@ def run(
 
 
 # ---------------------------------------------------------------------------
-# get_signal_changes(): メモリ上の信号変化を取得
+# get_signal_changes_from_run(): メモリ上の信号変化を取得
 # ---------------------------------------------------------------------------
 
 def get_signal_changes_from_run(
-    run_result_obj,  # dict from run() with _run_result key
+    run_result_obj: dict,
     signal: str,
     start_ns: int = 0,
     end_ns: Optional[int] = None,
 ) -> list:
-    """run() 結果から信号変化リストを取得（VCDファイル不要）。
-
-    Returns
-    -------
-    [{"time_ns": int, "value": str}, ...]
-    """
+    """run() 結果から信号変化リストを取得（VCDファイル不要）。"""
     raw = run_result_obj.get("_run_result")
     if raw is None:
         return []

@@ -439,10 +439,12 @@ async function runTest() {
       }
 
       const s = result.summary;
+      const totalMs = s.elapsed_ms ?? result.elapsed_ms ?? 0;
       const cls = s.fail > 0 ? "fail" : s.error > 0 ? "error" : "pass";
       const msg = `完了: ${s.pass} PASS / ${s.fail} FAIL / ${s.error} ERROR`
         + (s.skip > 0 ? ` / ${s.skip} SKIP` : "")
-        + (result.cancelled ? " [キャンセル]" : "");
+        + (result.cancelled ? " [キャンセル]" : "")
+        + `  ${(totalMs / 1000).toFixed(2)}s`;
       setStatus(msg, cls);
       log(`✓ ${msg}`, cls === "pass" ? "log-pass" : "log-fail");
       setProgress(100);

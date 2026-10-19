@@ -305,12 +305,12 @@ class LoadRequest(BaseModel):
 
 @app.post("/api/load")
 async def api_load(req: LoadRequest):
-    from deltasim.gui.adapter import load, AdapterError
+    from deltasim.gui.adapter import load
 
     try:
         result = load(req.files, req.top, param_overrides=req.params)
-    except AdapterError as e:
-        raise HTTPException(status_code=422, detail=e.to_dict())
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=str(e))
 
     return result
 
@@ -436,7 +436,7 @@ class TestRequest(BaseModel):
 @app.post("/api/test")
 async def api_test(req: TestRequest):
     """テストを同期実行して結果 JSON を返す（後方互換）。"""
-    from deltasim.gui.adapter import test, AdapterError
+    from deltasim.gui.adapter import test
 
     try:
         result = await asyncio.to_thread(
@@ -448,8 +448,8 @@ async def api_test(req: TestRequest):
             vcd_path=req.vcd_out,
             param_overrides=req.params,
         )
-    except AdapterError as e:
-        raise HTTPException(status_code=500, detail=e.to_dict())
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
     return result
 
@@ -528,7 +528,7 @@ class RunRequest(BaseModel):
 
 @app.post("/api/run")
 async def api_run(req: RunRequest):
-    from deltasim.gui.adapter import run, AdapterError
+    from deltasim.gui.adapter import run
 
     try:
         result = await asyncio.to_thread(
@@ -541,8 +541,8 @@ async def api_run(req: RunRequest):
             half_period=req.half_period,
             reset_cycles=req.reset_cycles,
         )
-    except AdapterError as e:
-        raise HTTPException(status_code=500, detail=e.to_dict())
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
     # _run_result は内部オブジェクトなので除外して返す
     return {k: v for k, v in result.items() if k != "_run_result"}
