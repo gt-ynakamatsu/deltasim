@@ -1,36 +1,34 @@
 # deltasim 公開 API 仕様 (docs/api.md)
 
-> **注意**: このドキュメントは GUI 仕様書 v0.1 §2「ロジックとGUIの取り決め（インターフェース契約）」に忠実に基づきます。  
-> 独自拡張は行いません。変更時は仕様担当に相談のうえ両係へ周知してください。
+> **注意**: このドキュメントは GUI 仕様書 v0.1 §2「インターフェース契約」に忠実に基づきます。  
+> 独自拡張は行いません。変更時は仕様担当に相談のうえ両係へ周知してください。  
+> `docs/api.md` は契約の内容を忠実に記述し、独自拡張しません。
 
 ---
 
 ## 概要
 
-`deltasim` のコアロジックは `deltasim.api` モジュールとして公開されます。  
-GUI は **このモジュールだけ** を使い、シミュレーション処理をコア側に委譲します。  
-CLI で可能なことはすべて API でも可能です（CLI は API のラッパー）。
-
 ```python
 import deltasim.api as ds
 ```
 
+CLI で可能なことはすべて API でも可能です（CLI は API のラッパー）。
+
 ---
 
-## §2.1 公開関数 (§2.1)
+## §2.1 公開関数
 
-### `load(files, top, params, catalog) → LoadResult`
+### `load(files_or_design, top, params) → DesignInfo`
 
-RTL ファイルを解析・エラボレートします。
+RTL ファイルを解析・エラボレートし設計オブジェクトを返します。
 
 | 引数 | 型 | 説明 |
 |------|----|------|
-| `files` | `list[str \| Path]` | SV ファイルパスのリスト |
+| `files_or_design` | `list[str\|Path]` または `DesignInfo` | SV ファイルパスのリスト、または既にロード済みの DesignInfo |
 | `top` | `str \| None` | トップモジュール名 (省略時は最初のモジュール) |
 | `params` | `dict[str, int] \| None` | パラメータ上書き |
-| `catalog` | `dict \| None` | 既解析のモジュールカタログ |
 
-**戻り値** `LoadResult`:
+**戻り値** `DesignInfo`:
 
 ```json
 {
@@ -38,56 +36,61 @@ RTL ファイルを解析・エラボレートします。
   "status": "PASS",
   "module": "counter",
   "ports": [
-    {"name": "clk", "direction": "input", "width": 1, "signed": false}
+    {"name": "clk",   "direction": "input",  "width": 1, "signed": false},
+    {"name": "rst_n", "direction": "input",  "width": 1, "signed": false},
+    {"name": "count", "direction": "output", "width": 8, "signed": false}
   ],
   "params": {"WIDTH": 8},
-  "signals": [...],
+  "signals": [
+    {"name": "clk",   "width": 1, "direction": "input",  "signed": false},
+    {"name": "count", "width": 8, "direction": "output", "signed": false}
+  ],
+  "hierarchy": {
+    "name": "counter", "module": "counter",
+    "signals": ["clk", "rst_n", "count"],
+    "children": []
+  },
   "errors": []
 }
 ```
 
 ---
 
-### `gen(files, top, params, out_dir, tb_path, spec_path) → dict`
+### `gen(files_or_design, top, params, out_dir, tb_path, spec_path) → dict`
 
 テストベンチ SV と YAML スペックスケルトンを生成します。
 
-**戻り値**:
-
-```json
-{
-  "schema_version": "1",
-  "status": "PASS",
-  "module": "counter",
-  "tb_path": "./counter_tb.sv",
-  "spec_path": "./counter_spec.yaml"
-}
-```
+- `out_dir` が `None` かつ `tb_path` / `spec_path` が `None` の場合:  
+  **文字列を返します** → `{'tb_sv': str, 'spec_yaml': str}`
+- `out_dir` を指定した場合:  
+  **ファイルを書き込みます** → `{'tb_path': str, 'spec_path': str}`
 
 ---
 
-### `test(files, spec, *, top, params, seed, vcd, on_progress, cancel) → TestResult`
+### `test(files_or_design, spec, *, top, params, seed, vcd, on_progress, cancel) → TestResult`
 
 YAML スペックに従ってシミュレーションを実行し、結果を返します。
 
 | 引数 | 型 | 説明 |
 |------|----|------|
-| `files` | `list[str \| Path]` | RTL SV ファイル |
+| `files_or_design` | `list[str\|Path]` または `DesignInfo` | RTL または設計オブジェクト |
 | `spec` | `str \| Path` | YAML スペックファイル |
-| `top` | `str \| None` | トップモジュール (spec の `top:` より優先) |
+| `top` | `str \| None` | トップモジュール |
 | `params` | `dict \| None` | パラメータ上書き |
 | `seed` | `int \| None` | 乱数シード上書き |
 | `vcd` | `str \| None` | VCD 出力パス |
-| `on_progress` | `callable \| None` | 進捗コールバック (§2.4 参照) |
+| `on_progress` | `callable \| None` | 進捗コールバック (§2.4) |
 | `cancel` | `CancelToken \| None` | キャンセルトークン |
 
 **戻り値** `TestResult` (§2.2 参照)
 
 ---
 
-### `run(files, *, top, params, cycles, vcd, reset_cycles, half_period, keep_changes, on_progress, cancel) → RunResult`
+### `run(files_or_design, *, top, params, cycles, vcd, reset_cycles, half_period, keep_changes, on_progress, cancel) → RunResult`
 
 スペックなしでシミュレーションを実行します。
+
+`keep_changes=True` を指定すると信号変化が記録され `RunResult.get_signal_changes()` で取得できます。
 
 **戻り値** `RunResult`:
 
@@ -99,6 +102,7 @@ YAML スペックに従ってシミュレーションを実行し、結果を返
   "cycles": 100,
   "time_ns": 1000,
   "cancelled": false,
+  "elapsed_ms": 12.3,
   "vcd_path": "out.vcd",
   "log": [],
   "errors": []
@@ -107,9 +111,20 @@ YAML スペックに従ってシミュレーションを実行し、結果を返
 
 ---
 
+### `test_events(files, spec, ...) → Generator[dict]`
+
+`test()` と同じですが、進捗イベントをジェネレータとして yield します。
+
+```python
+for ev in ds.test_events(["counter.sv"], "spec.yaml"):
+    print(ev["type"], ev.get("phase"))
+```
+
+---
+
 ## §2.2 結果 JSON 構造
 
-`test()` の戻り値および `deltasim test --json out.json` の出力は **同じ構造** です。
+`test()` の戻り値と `deltasim test --json out.json` の出力は **同一構造** です。
 
 ```json
 {
@@ -119,7 +134,7 @@ YAML スペックに従ってシミュレーションを実行し、結果を返
   "seed": 42,
   "elapsed_ms": 12.3,
   "cancelled": false,
-  "log": ["PASS: count = 10"],
+  "log": [],
   "checks": [
     {
       "name": "count@cycle11[spec]",
@@ -131,6 +146,7 @@ YAML スペックに従ってシミュレーションを実行し、結果を返
       "actual": "00000001",
       "source": "spec",
       "seed": 42,
+      "elapsed_ms": 0.5,
       "message": null
     }
   ],
@@ -138,14 +154,21 @@ YAML スペックに従ってシミュレーションを実行し、結果を返
 }
 ```
 
-### `status` フィールド
+### `status` の値
 
 | 値 | 意味 |
 |----|------|
 | `"PASS"` | 全チェック合格 |
 | `"FAIL"` | 1 件以上のチェック不合格 |
-| `"ERROR"` | 解析・エラボレーション・シミュレーションエラー |
-| `"SKIP"` | スキップ（将来拡張用） |
+| `"ERROR"` | パース/エラボ/シミュエラー |
+| `"SKIP"` | スキップ (将来拡張用) |
+
+### CLI でのJSON出力
+
+```bash
+deltasim test counter.sv --spec counter_spec.yaml --json result.json
+deltasim test counter.sv --spec counter_spec.yaml --json-events  # JSON Lines
+```
 
 ---
 
@@ -175,16 +198,16 @@ YAML スペックに従ってシミュレーションを実行し、結果を返
 
 ## §2.4 進捗イベント
 
-`on_progress` コールバックには以下の dict が渡されます。  
-`--json-events` フラグを使うと CLI が JSON Lines として stdout に出力します。
+`on_progress` コールバックには以下のイベント dict が渡されます。  
+`deltasim test --json-events` で JSON Lines として標準出力に出力されます。
 
-### `start` イベント
+### `start`
 
 ```json
 {"type": "start", "phase": "parse", "timestamp_ms": 1000}
 ```
 
-### `progress` イベント
+### `progress`
 
 ```json
 {
@@ -197,20 +220,23 @@ YAML スペックに従ってシミュレーションを実行し、結果を返
 }
 ```
 
-`phase` は `"parse"` → `"elab"` → `"sim"` → `"check"` の順に遷移します。
+`phase` は `"parse"` → `"elab"` → `"sim"` → `"check"` の順。
 
-### `case_done` イベント
+### `case_done`
 
 ```json
 {
   "type": "case_done",
   "name": "count@cycle11[spec]",
   "status": "PASS",
+  "signal": "count",
+  "expected": "00000001",
+  "actual": "00000001",
   "timestamp_ms": 1010
 }
 ```
 
-### `finish` イベント
+### `finish`
 
 ```json
 {
@@ -224,46 +250,139 @@ YAML スペックに従ってシミュレーションを実行し、結果を返
 
 ### キャンセル
 
-`cancel.cancel()` を呼ぶと次の進捗チェック時に中断します。  
-`TestResult.cancelled == True` となり、**途中結果** (`checks`) が含まれます。
+```python
+from deltasim.result import CancelToken
+token = CancelToken()
+result = ds.test(..., cancel=token)
+# 別スレッドで token.cancel() を呼ぶ
+# → result.cancelled == True、途中結果を含む
+```
 
 ---
 
-## §2.5 対話デバッグ Simulator (M5 以降)
-
-`Simulator` クラスは M5 で実装予定です。
+## §2.5 対話デバッグ Simulator
 
 ```python
-# 予定インタフェース
-sim.step(n)               # n サイクル進める
-sim.run(until=time_ns)    # 指定時刻まで実行
-sim.get(signal)           # 信号値を取得
-sim.set(signal, value)    # 信号を設定
-sim.force(signal, value)  # 信号を強制固定
-sim.release(signal)       # force を解除
-sim.add_breakpoint(...)   # ブレークポイント追加
-sim.remove_breakpoint(...) # ブレークポイント削除
+sim = ds.Simulator(["counter.sv"], reset_cycles=10)
+```
+
+または `DesignInfo` を渡すことも可能:
+
+```python
+di = ds.load(["counter.sv"])
+sim = ds.Simulator(di)
+```
+
+### メソッド一覧
+
+| メソッド | 戻り値 | 説明 |
+|---------|--------|------|
+| `step(n=1)` | `SimSnapshot` | n サイクル進める |
+| `step_delta()` | `SimSnapshot` | 1 デルタサイクル評価 |
+| `run_until(time_ns)` | `SimSnapshot` | 指定時刻まで実行 |
+| `get(signal)` | `int \| None` | 信号値を取得 (None = X/Z) |
+| `set(signal, value)` | — | 信号を設定 (1 クロックのみ) |
+| `force(signal, value)` | — | 信号を強制固定 |
+| `release(signal)` | — | force を解除 |
+| `list_signals()` | `list[dict]` | 全信号を階層パス付きで返す |
+| `add_breakpoint(expr)` | `int` | Python 式ブレークポイント追加 |
+| `remove_breakpoint(id)` | — | ブレークポイント削除 |
+| `list_breakpoints()` | `list[dict]` | ブレークポイント一覧 |
+| `reset()` | — | シミュレーションを初期状態に |
+| `snapshot()` | `dict` | 現在の信号状態辞書を返す |
+| `get_signal_changes(sig, start, end)` | `list[SignalChange]` | 変化リスト取得 |
+
+### プロパティ
+
+| プロパティ | 型 | 説明 |
+|-----------|-----|------|
+| `time_ns` | `int` | 現在のシミュレーション時刻 (ns) |
+| `cycle` | `int` | 現在のクロックサイクル数 |
+
+### 使用例
+
+```python
+sim = ds.Simulator(["counter.sv"], reset_cycles=2)
+
+# ブレークポイントを設定してラン
+bp = sim.add_breakpoint("count == 10")
+snap = sim.step(100)  # count==10 でブレーク
+
+print(snap.time_ns, snap.breakpoint_hit)
+sim.remove_breakpoint(bp)
+
+# 信号一覧（階層パス付き）
+for s in sim.list_signals():
+    print(f"{s['path']}: {s['value']}")
+
+# 強制固定
+sim.force("rst_n", 0)
+sim.step(3)          # リセット中
+sim.release("rst_n")
+```
+
+### `SimSnapshot` 構造
+
+```json
+{
+  "schema_version": "1",
+  "time_ns": 110,
+  "signals": {"clk": 1, "rst_n": 1, "count": 10},
+  "changes": [["count", 10]],
+  "breakpoint_hit": 0
+}
+```
+
+### CLI デバッグモード
+
+```bash
+deltasim sim counter.sv --top counter --reset-cycles 2
+```
+
+プロンプト例:
+
+```
+sim> step 10
+t=100ns  cycle=10
+sim> get count
+count = 10  (0xA)  (00001010)
+sim> bp count == 15
+bp [0] 追加: count == 15
+sim> step 100
+[bp 0 hit]  t=150ns
+sim> signals
+  clk     1b (input)  = 1
+  rst_n   1b (input)  = 1
+  count   8b (output) = 00001111
 ```
 
 ---
 
 ## §2.6 信号変化 API
 
-`RunResult.get_signal_changes(signal, start_ns, end_ns)` で信号変化リストを取得します。
+`run(keep_changes=True)` または `Simulator(keep_changes=True)` で変化を記録します。
 
 ```python
-result = ds.run(["counter.sv"], keep_changes=True, cycles=100)
+# run() で記録
+result = ds.run(["counter.sv"], cycles=100, keep_changes=True)
 changes = result.get_signal_changes("count", start_ns=50, end_ns=100)
-# [SignalChange(time_ns=55, value="00000001"), ...]
+
+# Simulator で記録
+sim = ds.Simulator(["counter.sv"], keep_changes=True)
+sim.step(20)
+changes = sim.get_signal_changes("count")
 ```
 
-大規模波形は `start_ns` / `end_ns` で範囲を絞って取得できます。
-
-### `SignalChange` 構造
+**戻り値** `list[SignalChange]`:
 
 ```json
-{"time_ns": 55, "value": "00000001"}
+[
+  {"time_ns": 55, "value": "00000001"},
+  {"time_ns": 65, "value": "00000010"}
+]
 ```
+
+大規模波形は `start_ns` / `end_ns` で範囲を指定して取得できます。
 
 ---
 
@@ -274,32 +393,41 @@ changes = result.get_signal_changes("count", start_ns=50, end_ns=100)
 | 1 ビット | `"0"` / `"1"` / `"x"` / `"z"` |
 | N ビット | `"01xz10"` (MSB 先頭、長さ = N) |
 
-- `x` = 不定 (Unknown)  
-- `z` = ハイインピーダンス  
+- `x` = 不定 (Unknown)
+- `z` = ハイインピーダンス
 - 表示基数 (2/8/10/16進、符号付き) への変換は GUI 側で行います
+
+変換ヘルパー:
+
+```python
+from deltasim.result import val_to_4state, val_from_4state
+
+val_to_4state(5, 8)     # → "00000101"
+val_to_4state(None, 8)  # → "xxxxxxxx"
+val_from_4state("00000101")  # → 5
+val_from_4state("0x01xxxx")  # → None  (X ビットあり)
+```
 
 ---
 
-## §2.8 GUI エントリポイント (M5)
+## §2.8 GUI エントリポイント (M6 以降)
 
 ```bash
 pip install deltasim[gui]
-deltasim gui          # 127.0.0.1:8765 で起動
-deltasim gui --port 8080 --host 0.0.0.0
+deltasim gui
 ```
 
 GUI は FastAPI で公開 API を包む薄い層です。  
-コア（`deltasim[core]`）は FastAPI に依存しません。
+コア (`deltasim` 単体) は FastAPI に依存しません。
 
 ---
 
-## 未決事項・曖昧点 (要確認)
+## 未決事項 (要仕様担当確認)
 
-以下の点は仕様書に明記されていないため、実装者が独断で決定せず報告します。
-
-1. **`SKIP` ステータスの発生条件**: テストが条件付きでスキップされる場合（例: シードが与えられていないランダムケース）の扱いが未定。
-2. **`case_done` の発行タイミング**: すべてのチェックに対して発行するのか、サイクル完了時に一括発行するのか未定。
-3. **`run()` の signal change DB の最大サイズ**: 大規模シミュレーション時のメモリ上限ポリシーが未定。
-4. **`get_signal_changes` の Z 値エンコード**: `"z"` を返すか `"x"` で統合するか未定（現在は `None` を `"x"` として扱っている）。
-5. **`Simulator` M5 キャンセル**: 対話デバッグ中のキャンセルポリシーが未定。
-6. **`errors` と `checks` の順序**: チェックが失敗して `ERROR` 扱いになる場合、`checks` と `errors` のどちらに入るか。
+1. **`SKIP` の発生条件**: テストが条件付きスキップになるケースが未定義。
+2. **`case_done` の粒度**: 全チェックに対して発行するか、サイクル単位かは未定。
+3. **`run()` の変化 DB 上限**: 大規模シミュレーション時のメモリ上限ポリシー未定。
+4. **Z 値と X の区別**: 現在は両方とも `None` → `"x"` として扱う。`"z"` の区別は将来対応。
+5. **`Simulator.force()` の精度**: 現在の実装では pre-posedge hook で適用するため、NBA の影響を完全に抑制できない場合がある (完全な force は将来対応)。
+6. **階層シグナルパスの VCD**: 現在は `$scope` なしのフラット展開。`top.u_add.sum` 形式は将来対応。
+7. **`test()` の elapsed_ms**: 各 check の `elapsed_ms` は概算 (チェック1件あたりの処理時間)。
