@@ -1237,9 +1237,10 @@ class SimEngine:
             prev_signals = dict(self.signals)
         else:
             # Find a signal that keeps changing for a helpful hint
+            # Check both assign_procs and comb_procs (always_comb)
             hint = ""
             if prev_signals is not None:
-                # Run one more iteration to detect what changed
+                # assign procs
                 for proc in self.design.assign_procs:
                     v, w = eval_expr(proc.rhs, self.signals, self._widths,
                                      self._params, self._ctx)
@@ -1249,6 +1250,27 @@ class SimEngine:
                     if changed_sigs:
                         hint = changed_sigs[0]
                         break
+                # comb_procs (always_comb) — if no hint yet
+                if not hint:
+                    for proc in self.design.comb_procs:
+                        ex = _Executor(self.signals, self._widths, self._params,
+                                       self._ctx, max_loop=self.max_loop,
+                                       time_ns=self._time)
+                        try:
+                            ex.execute(proc.body)
+                        except Exception:
+                            pass
+                        for lhs_name, raw_val in ex.nba_queue:
+                            if raw_val != prev_signals.get(lhs_name):
+                                hint = lhs_name
+                                break
+                        if not hint:
+                            for name, val in ex.signals.items():
+                                if val != prev_signals.get(name):
+                                    hint = name
+                                    break
+                        if hint:
+                            break
             raise DeltaLimitError(self._time, signal_hint=hint, max_delta=self.max_delta)
 
     # ------------------------------------------------------------------
