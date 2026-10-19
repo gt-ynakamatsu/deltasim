@@ -23,6 +23,7 @@ from deltasim.parser.ast_nodes import (
     SensitivityList, SensitivityItem,
     Block, IfStmt, CaseStmt, CaseItem,
     BlockingAssign, NonBlockingAssign, NullStmt, SysTaskStmt,
+    TimeDelay, ForeverStmt, RepeatStmt, WaitEventStmt, ForStmt, WhileStmt,
     NumberLiteral, FillLiteral, StringLiteral, Identifier,
     BinOp, UnaryOp, Conditional, BitSelect, PartSelect, Concat, Replicate,
     SysFunc,
@@ -114,7 +115,8 @@ class Parser:
         tok = self._consume("module")
         name = self._consume(expected_type="ID").value
         params = self._parse_param_port_list() if self._at("#") else []
-        ports = self._parse_port_list()
+        # Port list is optional (TB modules may have no ports: module foo;)
+        ports = self._parse_port_list() if self._at("(") else []
         self._consume(";")
         items = []
         while not self._at("endmodule", "EOF"):
@@ -244,12 +246,16 @@ class Parser:
     def _parse_always_item(self) -> AlwaysItem:
         keyword = self._consume().value
         sens: Optional[SensitivityList] = None
+
         if keyword in ("always", "always_ff"):
-            sens = self._parse_sensitivity_list()
+            if self._peek().value == "@":
+                sens = self._parse_sensitivity_list()
+            # else: bare always — body may start with #n or a statement
         elif keyword == "always_comb":
             sens = SensitivityList(items=[])
         elif keyword == "always_latch":
             sens = SensitivityList(items=[])
+
         body = self._parse_statement()
         return AlwaysItem(keyword=keyword, sensitivity=sens, body=body)
 
@@ -323,8 +329,125 @@ class Parser:
         # System task statement: $display, $monitor, $finish, …
         if self._at_type("SYSID"):
             return self._parse_sys_task_stmt()
+        # Time delay: #expression [statement]
+        if self._peek().value == "#":
+            return self._parse_time_delay()
+        # forever / repeat / for / while / @wait
+        if self._at("forever"):
+            return self._parse_forever()
+        if self._at("repeat"):
+            return self._parse_repeat()
+        if self._at("for"):
+            return self._parse_for_stmt()
+        if self._at("while"):
+            return self._parse_while_stmt()
+        if self._peek().value == "@":
+            return self._parse_wait_event_stmt()
         # Assignment statement (blocking or non-blocking)
         return self._parse_assign_stmt()
+
+    def _parse_time_delay(self) -> "Stmt":
+        self._consume("#")
+        delay = self._parse_expression()
+        # Optional following statement
+        if self._at(";"):
+            self._consume()
+            return TimeDelay(delay=delay, body=NullStmt())
+        if self._at("begin", "if", "forever", "repeat", "for", "while") or \
+           (not self._at("end", "endmodule", "else", "EOF") and not self._at_type("EOF")):
+            # Check if the next token starts a valid statement
+            next_v = self._peek().value
+            if next_v in ("begin", "if", "forever", "repeat", "for", "while") or \
+               self._peek().type == "ID" or next_v == "#" or \
+               self._peek().type == "SYSID" or next_v == "@":
+                body = self._parse_statement()
+                return TimeDelay(delay=delay, body=body)
+        return TimeDelay(delay=delay, body=NullStmt())
+
+    def _parse_forever(self) -> "Stmt":
+        self._consume("forever")
+        body = self._parse_statement()
+        return ForeverStmt(body=body)
+
+    def _parse_repeat(self) -> "Stmt":
+        self._consume("repeat")
+        self._consume("(")
+        count = self._parse_expression()
+        self._consume(")")
+        body = self._parse_statement()
+        return RepeatStmt(count=count, body=body)
+
+    def _parse_for_stmt(self) -> "Stmt":
+        self._consume("for")
+        self._consume("(")
+        # Init: may include type declaration (int i = 0) or just assign
+        if self._at("integer", "int", "logic", "bit", "byte"):
+            self._consume()  # skip type
+        init = self._parse_assign_stmt()  # i = 0;
+        cond = self._parse_expression()
+        self._consume(";")
+        # Update: blocking assign without trailing ;
+        lhs = self._parse_lvalue()
+        if self._at("="):
+            self._consume()
+            rhs = self._parse_expression()
+            update = BlockingAssign(lhs=lhs, rhs=rhs)
+        elif self._at("<="):
+            self._consume()
+            rhs = self._parse_expression()
+            update = NonBlockingAssign(lhs=lhs, rhs=rhs)
+        else:
+            update = NullStmt()
+        self._consume(")")
+        body = self._parse_statement()
+        return ForStmt(init=init, cond=cond, update=update, body=body)
+
+    def _parse_while_stmt(self) -> "Stmt":
+        self._consume("while")
+        self._consume("(")
+        cond = self._parse_expression()
+        self._consume(")")
+        body = self._parse_statement()
+        return WhileStmt(cond=cond, body=body)
+
+    def _parse_wait_event_stmt(self) -> "Stmt":
+        """@(sensitivity_list) [statement]"""
+        self._consume("@")
+        if self._at("*"):
+            self._consume()
+            sens = SensitivityList(items=[])
+        else:
+            self._consume("(")
+            if self._at("*"):
+                self._consume()
+                self._consume(")")
+                sens = SensitivityList(items=[])
+            else:
+                items: List[SensitivityItem] = []
+                while not self._at(")"):
+                    edge: Optional[str] = None
+                    if self._at("posedge", "negedge"):
+                        edge = self._consume().value
+                    sig = self._parse_expression()
+                    items.append(SensitivityItem(edge=edge, signal=sig))
+                    if self._at("or"):
+                        self._consume("or")
+                    elif self._try_consume(","):
+                        pass
+                    elif not self._at(")"):
+                        self._try_consume("or")
+                self._consume(")")
+                sens = SensitivityList(items=items)
+        # Optional following statement
+        body: Optional["Stmt"] = None
+        if not self._at("begin", "end", "else", "endmodule", "endcase",
+                         "forever", "repeat", "for", "while", ";", "EOF"):
+            nxt = self._peek()
+            if nxt.type in ("ID", "SYSID") or nxt.value in ("#",):
+                body = self._parse_statement()
+        elif self._at(";"):
+            self._consume()
+        return WaitEventStmt(sensitivity=sens, body=body)
 
     def _parse_block(self) -> Block:
         self._consume("begin")

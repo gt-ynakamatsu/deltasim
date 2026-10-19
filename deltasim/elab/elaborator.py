@@ -90,6 +90,7 @@ class ElabDesign:
     assign_procs: List[AssignProc]
     seq_procs: List[SeqProc]
     comb_procs: List[CombProc]
+    initial_blocks: List[object] = field(default_factory=list)  # Stmt AST nodes (M2)
 
 
 # ---------------------------------------------------------------------------
@@ -222,8 +223,9 @@ def elaborate(module: Module, param_overrides: Optional[Dict[str, int]] = None) 
     # 3. Process module body items
     # ------------------------------------------------------------------
     assign_procs: List[AssignProc] = []
-    seq_procs: List[SeqProc] = []
-    comb_procs: List[CombProc] = []
+    seq_procs_list: List[SeqProc] = []
+    comb_procs_list: List[CombProc] = []
+    initial_blocks_list: List[object] = []
 
     from deltasim.parser.ast_nodes import (
         AssignItem, AlwaysItem, InitialItem, NetDecl as AstNetDecl
@@ -248,18 +250,26 @@ def elaborate(module: Module, param_overrides: Optional[Dict[str, int]] = None) 
                 item.sensitivity is not None and
                 len(item.sensitivity.items) == 0
             ):
-                comb_procs.append(CombProc(body=item.body))
-            else:
-                if item.sensitivity is None:
-                    # always without sensitivity → treat as comb (rare)
-                    comb_procs.append(CombProc(body=item.body))
+                comb_procs_list.append(CombProc(body=item.body))
+            elif item.sensitivity is None:
+                if kw == "always":
+                    # always without sensitivity (e.g., always #5 clk = ~clk)
+                    # → treat as initial forever loop for time-driven processes
+                    from deltasim.parser.ast_nodes import ForeverStmt
+                    initial_blocks_list.append(ForeverStmt(body=item.body))
                 else:
-                    seq_procs.append(
-                        SeqProc(sensitivity=item.sensitivity, body=item.body)
-                    )
+                    # always_ff without sensitivity → comb (unusual but valid)
+                    comb_procs_list.append(CombProc(body=item.body))
+            else:
+                seq_procs_list.append(
+                    SeqProc(sensitivity=item.sensitivity, body=item.body)
+                )
 
-        elif isinstance(item, (InitialItem, AstParamDecl)):
-            pass  # ignored for simulation
+        elif isinstance(item, InitialItem):
+            initial_blocks_list.append(item.body)  # collect for M2 simulation
+
+        elif isinstance(item, AstParamDecl):
+            pass
 
     # ------------------------------------------------------------------
     # 4. Infer missing internal signal widths from assigns/body
@@ -272,6 +282,7 @@ def elaborate(module: Module, param_overrides: Optional[Dict[str, int]] = None) 
         params=params,
         signals=signals,
         assign_procs=assign_procs,
-        seq_procs=seq_procs,
-        comb_procs=comb_procs,
+        seq_procs=seq_procs_list,
+        comb_procs=comb_procs_list,
+        initial_blocks=initial_blocks_list,
     )

@@ -1,0 +1,40 @@
+version: 1
+top: counter
+
+clock:
+  signal: clk
+  period_ns: 10
+
+reset:
+  signal: rst_n
+  active_low: true
+  duration_cycles: 10
+
+sim:
+  cycles: 30
+  seed: 42
+
+# 固定刺激の例
+inputs: []
+
+# 期待値: リセット後のカウンタ値を確認
+expected:
+  # リセット中はゼロのまま
+  - at: 5
+    check: {count: 0}
+  # リセット解除後にインクリメント
+  - at: 11
+    check: {count: 1}
+  - at: 12
+    check: {count: 2}
+  - at: 20
+    check: {count: 10}
+  # Python 式チェック: cycle - 10 = count
+  - at: [11, 30]
+    expr: "count == _cycle - 10"
+
+# Python 参照モデル
+model:
+  file: counter_model.py
+  class: CounterModel
+  params: {width: 8}

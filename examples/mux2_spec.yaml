@@ -1,0 +1,29 @@
+version: 1
+top: mux2
+
+clock: {}   # 組み合わせ回路のためクロックなし
+reset: {}
+
+sim:
+  cycles: 4
+  seed: 0
+
+inputs:
+  - at: 1
+    set: {sel: 0, a: 0xAA, b: 0x55}
+  - at: 2
+    set: {sel: 1}
+  - at: 3
+    set: {a: 10, b: 20, sel: 0}
+  - at: 4
+    set: {sel: 1}
+
+expected:
+  - at: 1
+    check: {y: 0x55}
+  - at: 2
+    check: {y: 0xAA}
+  - at: 3
+    check: {y: 20}
+  - at: 4
+    check: {y: 10}
