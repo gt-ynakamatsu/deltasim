@@ -17,9 +17,10 @@ dependencies = [
 deltasim = "deltasim.cli:main"
 
 [project.optional-dependencies]
+# GUI extras — コア (deltasim 単体) は FastAPI に依存しない
 gui = [
-    "fastapi>=0.100.0",
-    "uvicorn[standard]>=0.23.0",
+    "fastapi>=0.100",
+    "uvicorn[standard]>=0.22",
     "httpx>=0.24.0",
 ]
 dev = [
@@ -33,7 +34,7 @@ where = ["."]
 include = ["deltasim*"]
 
 [tool.setuptools.package-data]
-deltasim = ["gui/static/*"]
+deltasim = ["gui/static/*", "gui/static/**/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

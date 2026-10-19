@@ -41,8 +41,9 @@ class VCDWriter:
         self._open()
 
     def _open(self) -> None:
-        os.makedirs(os.path.dirname(os.path.abspath(self._path)), exist_ok=True)
-        self._fh = open(self._path, "w", encoding="ascii")
+        from pathlib import Path
+        Path(self._path).parent.mkdir(parents=True, exist_ok=True)
+        self._fh = open(self._path, "w", encoding="ascii", newline="\n")
         self._write_header()
 
     def _write_header(self) -> None:
@@ -65,8 +66,8 @@ class VCDWriter:
         fh.write("$upscope $end\n")
         fh.write("$enddefinitions $end\n")
 
-    def record(self, time_ns: int, signals: Dict[str, int]) -> None:
-        """Record all signal changes at *time_ns*."""
+    def record(self, time_ns: int, signals: Dict[str, object]) -> None:
+        """Record all signal changes at *time_ns*. Values may be None (X)."""
         fh = self._fh
         if fh is None:
             return
@@ -75,6 +76,7 @@ class VCDWriter:
         for name, vcd_id in self._ids.items():
             val = signals.get(name, 0)
             prev = self._prev.get(name)
+            # None != 0 → change recorded; None != None → no change
             if prev != val:
                 self._prev[name] = val
                 w = self._design.signals[name].width
@@ -90,8 +92,8 @@ class VCDWriter:
         for line in changed_lines:
             fh.write(line)
 
-    def record_initial(self, time_ns: int, signals: Dict[str, int]) -> None:
-        """Write $dumpvars section with initial state."""
+    def record_initial(self, time_ns: int, signals: Dict[str, object]) -> None:
+        """Write $dumpvars section with initial state. Values may be None (X)."""
         fh = self._fh
         if fh is None:
             return
@@ -135,10 +137,13 @@ def _int_to_id(n: int) -> str:
     return "".join(reversed(result))
 
 
-def _format_value(vcd_id: str, val: int, width: int) -> str:
-    """Format a signal value as VCD text."""
+def _format_value(vcd_id: str, val, width: int) -> str:
+    """Format a signal value as VCD text. *val* may be None (= X)."""
+    if val is None:
+        if width == 1:
+            return f"x{vcd_id}\n"
+        return f"b{'x' * width} {vcd_id}\n"
     if width == 1:
         return f"{val & 1}{vcd_id}\n"
-    # Multi-bit: binary representation
     bits = bin(val & ((1 << width) - 1))[2:].zfill(width)
     return f"b{bits} {vcd_id}\n"

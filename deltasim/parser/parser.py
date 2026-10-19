@@ -24,6 +24,12 @@ from deltasim.parser.ast_nodes import (
     Block, IfStmt, CaseStmt, CaseItem,
     BlockingAssign, NonBlockingAssign, NullStmt, SysTaskStmt,
     TimeDelay, ForeverStmt, RepeatStmt, WaitEventStmt, ForStmt, WhileStmt,
+    # M3 additions
+    PortConn, InstDecl, GenVarDecl,
+    GenerateFor, GenerateIf, GenerateBlock,
+    EnumMember, EnumTypeDef, StructField, StructTypeDef, TypedefDecl, ImportDecl,
+    # M4 additions
+    MemberAccess,
     NumberLiteral, FillLiteral, StringLiteral, Identifier,
     BinOp, UnaryOp, Conditional, BitSelect, PartSelect, Concat, Replicate,
     SysFunc,
@@ -226,14 +232,296 @@ class Parser:
         if self._at("parameter", "localparam"):
             return [self._parse_param_decl_item()]
         if self._at("logic", "wire", "reg", "bit", "integer", "int",
-                    "supply0", "supply1", "tri", "wand", "wor"):
+                    "supply0", "supply1", "tri", "wand", "wor",
+                    "byte", "shortint", "longint"):
             return self._parse_net_decl()
-        # Skip unknown items (pragmas, etc.) by consuming until ';'
+        if self._at("generate"):
+            return [self._parse_generate_block()]
+        if self._at("genvar"):
+            return [self._parse_genvar_decl()]
+        if self._at("typedef"):
+            return [self._parse_typedef()]
+        if self._at("import"):
+            return [self._parse_import()]
+        # Check for module instantiation: ID [#(...)] ID (...)
+        if self._peek().type == "ID":
+            return self._try_parse_inst_decl()
         tok = self._peek()
-        # Try to skip gracefully
         if tok.type == "EOF" or tok.value == "endmodule":
             return []
-        self._error(f"unexpected token in module body: {tok.value!r}")
+        # Skip unknown tokens gracefully
+        self._consume()
+        return []
+
+    # ------------------------------------------------------------------
+    # Module instantiation  (M3)
+    # ------------------------------------------------------------------
+
+    def _try_parse_inst_decl(self):
+        """Attempt to parse a module instantiation or typedef'd net decl."""
+        # Lookahead: ID [#(...)] ID ( → instantiation
+        j = self._pos
+        # skip module name
+        j += 1
+        # skip optional #(...)
+        if j < len(self._tokens) and self._tokens[j].value == '#':
+            j += 1
+            if j < len(self._tokens) and self._tokens[j].value == '(':
+                depth, j = 1, j + 1
+                while depth and j < len(self._tokens):
+                    if self._tokens[j].value == '(':
+                        depth += 1
+                    elif self._tokens[j].value == ')':
+                        depth -= 1
+                    j += 1
+        # expect instance name (ID) then '('
+        if (j < len(self._tokens) and self._tokens[j].type == 'ID' and
+                j + 1 < len(self._tokens) and self._tokens[j + 1].value == '('):
+            return [self._parse_inst_decl()]
+        # Otherwise treat as typedef'd net decl
+        return self._parse_typedef_net_decl()
+
+    def _parse_inst_decl(self) -> InstDecl:
+        module_name = self._consume(expected_type="ID").value
+        # Optional parameter override: #(.P(v), ...) or #(v, ...)
+        param_overrides: List[Tuple[Optional[str], object]] = []
+        if self._at("#"):
+            self._consume("#")
+            self._consume("(")
+            while not self._at(")"):
+                if self._at("."):
+                    self._consume(".")
+                    pname = self._consume(expected_type="ID").value
+                    self._consume("(")
+                    pval = self._parse_expression()
+                    self._consume(")")
+                    param_overrides.append((pname, pval))
+                else:
+                    pval = self._parse_expression()
+                    param_overrides.append((None, pval))
+                if not self._try_consume(","):
+                    break
+            self._consume(")")
+        inst_name = self._consume(expected_type="ID").value
+        self._consume("(")
+        port_conns: List[PortConn] = []
+        while not self._at(")"):
+            if self._at("."):
+                self._consume(".")
+                pname = self._consume(expected_type="ID").value
+                self._consume("(")
+                sig = None if self._at(")") else self._parse_expression()
+                self._consume(")")
+                port_conns.append(PortConn(port=pname, signal=sig))
+            else:
+                sig = self._parse_expression()
+                port_conns.append(PortConn(port=None, signal=sig))
+            if not self._try_consume(","):
+                break
+        self._consume(")")
+        self._consume(";")
+        return InstDecl(module_name=module_name, inst_name=inst_name,
+                        param_overrides=param_overrides, port_conns=port_conns)
+
+    def _parse_typedef_net_decl(self):
+        """Parse typedef'd type variable declaration: type_name var_name [dims];"""
+        type_name = self._consume(expected_type="ID").value
+        names = []
+        # Might have packed dims
+        dims = None
+        if self._at("["):
+            dims = self._parse_dims()
+        if self._peek().type == "ID":
+            names.append(self._consume(expected_type="ID").value)
+            while self._try_consume(","):
+                names.append(self._consume(expected_type="ID").value)
+        self._try_consume(";")
+        if names:
+            from deltasim.parser.ast_nodes import NetDecl
+            return [NetDecl(net_type=type_name, dims=dims, names=names)]
+        return []
+
+    # ------------------------------------------------------------------
+    # generate block  (M3)
+    # ------------------------------------------------------------------
+
+    def _parse_generate_block(self) -> GenerateBlock:
+        self._consume("generate")
+        items = []
+        while not self._at("endgenerate", "EOF"):
+            items.extend(self._parse_generate_item())
+        self._consume("endgenerate")
+        return GenerateBlock(items=items)
+
+    def _parse_generate_item(self):
+        if self._at("for"):
+            return [self._parse_generate_for()]
+        if self._at("if"):
+            return [self._parse_generate_if()]
+        if self._at("begin"):
+            return self._parse_generate_begin()
+        # Regular module item
+        return self._parse_module_item()
+
+    def _parse_generate_for(self) -> GenerateFor:
+        self._consume("for")
+        self._consume("(")
+        # init: [genvar] i = expr
+        if self._at("genvar"):
+            self._consume()
+        var = self._consume(expected_type="ID").value
+        self._consume("=")
+        init = self._parse_expression()
+        self._consume(";")
+        cond = self._parse_expression()
+        self._consume(";")
+        # update: i++ or i = i + 1
+        update = self._parse_expression()
+        if self._at("="):
+            # i = expr form
+            self._consume("=")
+            rhs = self._parse_expression()
+            update = BinOp("=", update, rhs)  # hack: store as BinOp
+        self._consume(")")
+        body = self._parse_generate_begin_items()
+        return GenerateFor(var=var, init=init, cond=cond, update=update, body=body)
+
+    def _parse_generate_if(self) -> GenerateIf:
+        self._consume("if")
+        self._consume("(")
+        cond = self._parse_expression()
+        self._consume(")")
+        then_items = self._parse_generate_begin_items()
+        else_items = None
+        if self._try_consume("else"):
+            else_items = self._parse_generate_begin_items()
+        return GenerateIf(cond=cond, then_items=then_items, else_items=else_items)
+
+    def _parse_generate_begin_items(self):
+        if self._at("begin"):
+            return self._parse_generate_begin()
+        return self._parse_generate_item()
+
+    def _parse_generate_begin(self):
+        self._consume("begin")
+        # optional named label: : label_name
+        if self._at(":"):
+            self._consume(":")
+            self._try_consume()  # label name
+        items = []
+        while not self._at("end", "EOF"):
+            items.extend(self._parse_generate_item())
+        self._consume("end")
+        # optional : label
+        if self._at(":"):
+            self._consume(":")
+            self._try_consume()
+        return items
+
+    # ------------------------------------------------------------------
+    # genvar  (M3)
+    # ------------------------------------------------------------------
+
+    def _parse_genvar_decl(self) -> GenVarDecl:
+        self._consume("genvar")
+        names = [self._consume(expected_type="ID").value]
+        while self._try_consume(","):
+            names.append(self._consume(expected_type="ID").value)
+        self._consume(";")
+        return GenVarDecl(names=names)
+
+    # ------------------------------------------------------------------
+    # typedef  (M3)
+    # ------------------------------------------------------------------
+
+    def _parse_typedef(self) -> TypedefDecl:
+        self._consume("typedef")
+        if self._at("enum"):
+            return self._parse_typedef_enum()
+        if self._at("struct", "union"):
+            return self._parse_typedef_struct()
+        # typedef existing_type new_name;
+        type_name = self._consume().value
+        dims = None
+        if self._at("["):
+            dims = self._parse_dims()
+        new_name = self._consume(expected_type="ID").value
+        self._try_consume(";")
+        return TypedefDecl(type_def=type_name, name=new_name)
+
+    def _parse_typedef_enum(self) -> TypedefDecl:
+        self._consume("enum")
+        # optional base type: logic [N:0], int, bit, etc.
+        base_kw = None
+        dims = None
+        if self._at("logic", "bit", "int", "integer", "byte",
+                    "shortint", "longint", "signed", "unsigned"):
+            base_kw = self._consume().value
+            if self._at("["):
+                dims = self._parse_dims()
+        self._consume("{")
+        members: List[EnumMember] = []
+        while not self._at("}"):
+            name = self._consume(expected_type="ID").value
+            val = None
+            if self._at("="):
+                self._consume("=")
+                val = self._parse_expression()
+            members.append(EnumMember(name=name, value=val))
+            if not self._try_consume(","):
+                break
+        self._consume("}")
+        type_name = self._consume(expected_type="ID").value
+        self._try_consume(";")
+        return TypedefDecl(
+            type_def=EnumTypeDef(base_kw=base_kw, dims=dims, members=members),
+            name=type_name,
+        )
+
+    def _parse_typedef_struct(self) -> TypedefDecl:
+        kw = self._consume().value  # 'struct' or 'union'
+        packed = bool(self._try_consume("packed"))
+        self._consume("{")
+        fields: List[StructField] = []
+        while not self._at("}"):
+            net_type = None
+            if self._at("logic", "bit", "int", "integer", "byte",
+                        "reg", "wire", "signed", "unsigned",
+                        "shortint", "longint"):
+                net_type = self._consume().value
+            dims = None
+            if self._at("["):
+                dims = self._parse_dims()
+            name = self._consume(expected_type="ID").value
+            # May have multiple names
+            names = [name]
+            while self._try_consume(","):
+                names.append(self._consume(expected_type="ID").value)
+            self._try_consume(";")
+            for n in names:
+                fields.append(StructField(net_type=net_type, dims=dims, name=n))
+        self._consume("}")
+        type_name = self._consume(expected_type="ID").value
+        self._try_consume(";")
+        return TypedefDecl(type_def=StructTypeDef(packed=packed, fields=fields), name=type_name)
+
+    # ------------------------------------------------------------------
+    # import  (M3)
+    # ------------------------------------------------------------------
+
+    def _parse_import(self) -> ImportDecl:
+        self._consume("import")
+        pkg = self._consume(expected_type="ID").value
+        # :: is two : tokens in our lexer
+        self._consume(":")
+        self._consume(":")
+        if self._at("*"):
+            self._consume("*")
+            item = None
+        else:
+            item = self._consume(expected_type="ID").value
+        self._try_consume(";")
+        return ImportDecl(pkg=pkg, item=item)
 
     def _parse_assign_item(self) -> AssignItem:
         self._consume("assign")
@@ -280,8 +568,27 @@ class Parser:
         names = [self._consume(expected_type="ID").value]
         while self._try_consume(","):
             names.append(self._consume(expected_type="ID").value)
+        # M4: optional unpacked array dimension after names: name [lo:hi] or name [depth]
+        unpacked_dims: Optional[Dims] = None
+        if self._at("["):
+            self._consume("[")
+            hi = self._parse_expression()
+            if self._at(":"):
+                self._consume(":")
+                lo = self._parse_expression()
+                self._consume("]")
+                unpacked_dims = Dims(hi=hi, lo=lo)
+            else:
+                self._consume("]")
+                # [N] shorthand: depth = N, treated as [N-1:0]
+                from deltasim.parser.ast_nodes import BinOp as _BinOp, NumberLiteral as _NL
+                unpacked_dims = Dims(
+                    hi=_BinOp("-", hi, _NL(1, None)),
+                    lo=_NL(0, None),
+                )
         self._consume(";")
-        return [NetDecl(net_type=net_type, dims=dims, names=names, signed=signed)]
+        return [NetDecl(net_type=net_type, dims=dims, names=names,
+                        signed=signed, unpacked_dims=unpacked_dims)]
 
     # ------------------------------------------------------------------
     # Sensitivity list:  @(posedge clk or negedge rst_n) | @(*) | @(*)
@@ -626,18 +933,29 @@ class Parser:
         self._error(f"unexpected token in expression: {tok.value!r} ({tok.type})")
 
     def _parse_postfix(self, base: "Expr") -> "Expr":
-        """Parse bit-select / part-select after a primary."""
-        while self._at("["):
-            self._consume("[")
-            idx = self._parse_expression()
-            if self._at(":"):
-                self._consume(":")
-                lo = self._parse_expression()
-                self._consume("]")
-                base = PartSelect(base=base, hi=idx, lo=lo)
+        """Parse bit-select / part-select / member-access after a primary."""
+        while True:
+            if self._at("["):
+                self._consume("[")
+                idx = self._parse_expression()
+                if self._at(":"):
+                    self._consume(":")
+                    lo = self._parse_expression()
+                    self._consume("]")
+                    base = PartSelect(base=base, hi=idx, lo=lo)
+                else:
+                    self._consume("]")
+                    base = BitSelect(base=base, index=idx)
+            elif self._at("."):
+                # Member access: expr.field_name
+                self._consume(".")
+                if self._peek().type == "ID":
+                    fname = self._consume(expected_type="ID").value
+                    base = MemberAccess(base=base, field=fname)
+                else:
+                    break
             else:
-                self._consume("]")
-                base = BitSelect(base=base, index=idx)
+                break
         return base
 
     def _parse_concat_or_replicate(self) -> "Expr":
@@ -739,9 +1057,13 @@ def parse_string(source: str, filename: str = "<string>") -> Module:
 
 
 def parse_file(path: str) -> Module:
-    """Parse a .sv file and return a Module AST."""
-    with open(path, encoding="utf-8") as f:
-        source = f.read()
-    mod = parse_string(source, filename=path)
-    mod.source_file = path
+    """Parse a .sv file and return a Module AST.
+    
+    The file is read as UTF-8 with CRLF normalisation (Windows compatible).
+    """
+    from pathlib import Path
+    p = Path(path)
+    source = p.read_text(encoding="utf-8")
+    mod = parse_string(source, filename=str(p))
+    mod.source_file = str(p)
     return mod
