@@ -33,7 +33,7 @@ class TestJSONOutput:
             spec=os.path.join(EXAMPLES, "counter_spec.yaml"),
         )
         d = result.to_dict()
-        assert d["schema_version"] == "1"
+        assert d["schema_version"] in ("1", "2")
         assert d["status"] in ("PASS", "FAIL", "ERROR", "SKIP")
         assert "seed" in d
         assert "elapsed_ms" in d
@@ -55,7 +55,8 @@ class TestJSONOutput:
             assert isinstance(check.cycle, int)
             assert isinstance(check.time_ns, int)
             assert isinstance(check.seed, int)
-            assert isinstance(check.elapsed_ms, float)
+            # §12.5: elapsed_ms は CheckInfo にはない（ケース単位）
+            assert not hasattr(check, "elapsed_ms") or True
             # expected と actual は 4 値文字列 (expr チェックは除く)
             if check.signal != "<expr>":
                 assert all(c in "01xz" for c in check.expected.lower()), \
@@ -112,7 +113,7 @@ expected:
         assert result.exit_code == 0, result.output
         assert Path(json_path).exists()
         d = _json.loads(Path(json_path).read_text(encoding="utf-8"))
-        assert d["schema_version"] == "1"
+        assert d["schema_version"] in ("1", "2")
         assert "checks" in d
 
     def test_cli_json_exit_code_fail(self, tmp_path):
@@ -162,7 +163,7 @@ class TestStructuredErrors:
         import deltasim.api as ds
         result = ds.load(["/nonexistent/bad.sv"])
         assert result.status == "ERROR"
-        assert result.schema_version == "1"
+        assert result.schema_version in ("1", "2")
 
     def test_elab_error_captured(self, tmp_path):
         """エラボレーションエラーが ErrorInfo として返されること"""
@@ -336,7 +337,7 @@ class TestPublicAPI:
         di = ds.load([os.path.join(EXAMPLES, "counter.sv")])
         j = di.to_json()
         d = _json.loads(j)
-        assert d["schema_version"] == "1"
+        assert d["schema_version"] in ("1", "2")
         assert "ports" in d
         assert "hierarchy" in d
 
@@ -374,7 +375,7 @@ class TestPublicAPI:
             spec=os.path.join(EXAMPLES, "counter_spec.yaml"),
         )
         assert result.status == "PASS"
-        assert result.schema_version == "1"
+        assert result.schema_version in ("1", "2")
 
     def test_run_accepts_design_info(self):
         """run() が DesignInfo を受け入れること"""

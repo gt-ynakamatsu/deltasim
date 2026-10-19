@@ -93,8 +93,11 @@ def eval_expr(
         return (expr.value, expr.width)
 
     if isinstance(expr, FillLiteral):
-        if expr.fill in ("x", "X", "z", "Z"):
-            return (None, None)
+        if expr.fill in ("x", "X"):
+            return (None, None)          # X
+        if expr.fill in ("z", "Z"):
+            from deltasim.result import Z_VALUE
+            return (Z_VALUE, None)        # Z distinct from X (§12.4)
         val = 0 if expr.fill in ("0",) else -1
         return (val, None)
 
@@ -179,9 +182,18 @@ def _eff_width(w: Optional[int]) -> int:
     return w if w is not None else 32
 
 
+def _to_x(v):
+    """Normalize Z to X (None) for arithmetic purposes."""
+    from deltasim.result import Z_VALUE
+    return None if isinstance(v, Z_VALUE.__class__) else v
+
+
 def _eval_binop(expr, signals, widths, params, ctx=None) -> Tuple[Optional[int], Optional[int]]:
-    lv, lw = eval_expr(expr.left, signals, widths, params, ctx)
-    rv, rw = eval_expr(expr.right, signals, widths, params, ctx)
+    lv_raw, lw = eval_expr(expr.left, signals, widths, params, ctx)
+    rv_raw, rw = eval_expr(expr.right, signals, widths, params, ctx)
+    # §12.4: Z treated as X for arithmetic
+    lv = _to_x(lv_raw)
+    rv = _to_x(rv_raw)
     op = expr.op
     w = max(_eff_width(lw), _eff_width(rw))
     mask = (1 << w) - 1
@@ -895,6 +907,10 @@ class SimEngine:
         # Initial block scheduler (M2)
         self._initial_scheduler: Optional[_InitialScheduler] = None
 
+        # M6: forced-signal overrides — writes to these signals are ignored
+        # until the force is released.  Populated by Simulator.force().
+        self._force_overrides: Dict[str, int] = {}
+
     # ------------------------------------------------------------------
     # EvalContext builder  (M4)
     # ------------------------------------------------------------------
@@ -1183,7 +1199,14 @@ class SimEngine:
     # Internal: write a signal value with masking
     # ------------------------------------------------------------------
 
-    def _write(self, name: str, raw_val: Optional[int]) -> None:
+    def _write(self, name: str, raw_val) -> None:
+        """Write a value to a signal with masking.
+
+        §M6: If the signal is in _force_overrides, the write is ignored so
+        that force() semantics take precedence over NBA and comb outputs.
+        """
+        if name in self._force_overrides:
+            return   # forced signal — ignore any RTL-driven write
         _write_signal(self.signals, name, raw_val, self._widths)
 
     # ------------------------------------------------------------------
@@ -1205,14 +1228,21 @@ class SimEngine:
 def _write_signal(
     signals: Dict[str, Optional[int]],
     name: str,
-    raw_val: Optional[int],
+    raw_val,
     widths: Dict[str, int],
 ) -> bool:
     """Write *raw_val* to *signals[name]* with width masking. Returns True if changed."""
+    from deltasim.result import Z_VALUE
     if raw_val is None:
         old = signals.get(name, 0)
         if old is not None:
             signals[name] = None
+            return True
+        return False
+    if isinstance(raw_val, type(Z_VALUE)):   # Z_VALUE sentinel
+        old = signals.get(name)
+        if not isinstance(old, type(Z_VALUE)):
+            signals[name] = Z_VALUE
             return True
         return False
     w = widths.get(name, 1)

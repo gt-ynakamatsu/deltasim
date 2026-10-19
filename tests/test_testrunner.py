@@ -316,7 +316,7 @@ module clk_tb;
         cnt <= cnt + 1;
     end
 endmodule
-""")
+""", encoding="utf-8")
         mod = parse_file(str(sv))
         design = elaborate(mod)
         from deltasim.sim.engine import SimEngine
@@ -342,7 +342,7 @@ module repeat_tb;
         .clk(clk), .rst_n(rst_n), .count(count)
     );
 endmodule
-""")
+""", encoding="utf-8")
         # この SV はインスタンスを含むため M2 では解析のみ
         # (階層インスタンスは M3 以降)
         # パーサーが例外を出さないことだけ確認
@@ -364,7 +364,7 @@ module delay_tb;
         #10 sig = 0;
     end
 endmodule
-""")
+""", encoding="utf-8")
         mod = parse_file(str(sv))
         design = elaborate(mod)
         from deltasim.sim.engine import SimEngine

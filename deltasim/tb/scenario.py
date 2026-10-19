@@ -109,6 +109,9 @@ class Scenario:
     inputs: List[InputEntry] = field(default_factory=list)
     expected: List[ExpectedEntry] = field(default_factory=list)
     model: Optional[ModelSpec] = None
+    # §12.1: SKIP
+    skip: bool = False
+    skip_reason: str = ""
     _base_dir: str = field(default="", compare=False)
 
 
@@ -129,6 +132,10 @@ def load_scenario(path: str) -> Scenario:
     s = Scenario(_base_dir=base_dir)
     s.version = int(data.get("version", 1))
     s.top = data.get("top")
+
+    # §12.1: skip
+    s.skip = bool(data.get("skip", False))
+    s.skip_reason = str(data.get("skip_reason", ""))
 
     ck = data.get("clock") or {}
     s.clock = ClockSpec(

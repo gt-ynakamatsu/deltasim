@@ -20,7 +20,31 @@ import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
+
+# ---------------------------------------------------------------------------
+# Z-value sentinel  (§12.4: x と z を区別、小文字統一)
+# ---------------------------------------------------------------------------
+
+class _ZValue:
+    """Sentinel for high-impedance (Z) — distinct from None (X)."""
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __repr__(self) -> str:
+        return "Z"
+
+
+Z_VALUE = _ZValue()   # singleton sentinel for Z
+
+
+def _is_xz(v) -> bool:
+    """Return True if v is X (None) or Z (_ZValue)."""
+    return v is None or isinstance(v, _ZValue)
 
 
 # ---------------------------------------------------------------------------
@@ -28,11 +52,18 @@ SCHEMA_VERSION = "1"
 # ---------------------------------------------------------------------------
 
 def val_to_4state(val: Optional[int], width: int) -> str:
-    """Convert a simulation value (None = X) to a 4-state bit string."""
+    """Convert a simulation value to a 4-state bit string (§12.4 小文字統一).
+
+    * None (X) → "x" / "xxx..."
+    * Z_VALUE  → "z" / "zzz..."
+    * int      → "0" / "1" / "0101..."
+    """
     if width <= 0:
         width = 1
     if val is None:
         return "x" if width == 1 else "x" * width
+    if isinstance(val, _ZValue):
+        return "z" if width == 1 else "z" * width
     if width == 1:
         return str(val & 1)
     return bin(val & ((1 << width) - 1))[2:].zfill(width)
@@ -68,7 +99,10 @@ class ErrorInfo:
 # ---------------------------------------------------------------------------
 
 @dataclass
+@dataclass
 class CheckInfo:
+    """§12.5: elapsed_ms はケース（シナリオ）単位で TestResult.elapsed_ms に入る。
+    CheckInfo はチェック個別の合否を表す。"""
     name: str = ""
     status: str = "PASS"        # PASS | FAIL | ERROR | SKIP
     signal: str = ""
@@ -79,7 +113,6 @@ class CheckInfo:
     source: str = "spec"        # "spec" | "model"
     seed: int = 0
     message: Optional[str] = None
-    elapsed_ms: float = 0.0
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -169,16 +202,19 @@ class DesignInfo:
 
 @dataclass
 class TestResult:
-    """Return value of test() / `deltasim test --json` (§2.2)."""
+    """Return value of test() / `deltasim test --json` (§2.2, schema v2)."""
     schema_version: str = SCHEMA_VERSION
     module: str = ""
     status: str = "PASS"        # PASS | FAIL | ERROR | SKIP
     seed: int = 0
-    elapsed_ms: float = 0.0
+    # §12.5: ケースの elapsed_ms は checks 内。全体はここに入れる
+    elapsed_ms: float = 0.0     # 全体の実時間 (≡ summary.elapsed_ms)
     log: List[str] = field(default_factory=list)
     checks: List[CheckInfo] = field(default_factory=list)
     errors: List[ErrorInfo] = field(default_factory=list)
     cancelled: bool = False
+    # §12.3: 記録停止時刻 (ns)
+    truncated_at: Optional[int] = None
 
     @property
     def passed(self) -> bool:
@@ -198,8 +234,11 @@ class TestResult:
             "module": self.module,
             "status": self.status,
             "seed": self.seed,
-            "elapsed_ms": self.elapsed_ms,
+            # §12.5: summary.elapsed_ms
+            "summary": {"elapsed_ms": self.elapsed_ms},
+            "elapsed_ms": self.elapsed_ms,   # backward compat
             "cancelled": self.cancelled,
+            "truncated_at": self.truncated_at,
             "log": self.log,
             "checks": [c.to_dict() for c in self.checks],
             "errors": [e.to_dict() for e in self.errors],
@@ -313,18 +352,54 @@ class SimSnapshot:
 # ---------------------------------------------------------------------------
 
 class SignalChangeDB:
-    """In-memory store of value-change events keyed by signal name (§2.6)."""
+    """In-memory store of value-change events keyed by signal name (§2.6).
 
-    def __init__(self):
+    §12.3: 既定で記録対象はトップのポートと仕様参照シグナルのみ。
+    上限 512 MB (既定)、超えたら記録停止 + truncated_at を設定。
+    """
+
+    DEFAULT_MAX_BYTES = 512 * 1024 * 1024  # 512 MB
+
+    def __init__(
+        self,
+        max_bytes: int = DEFAULT_MAX_BYTES,
+        record_set: "Optional[set]" = None,  # None = record all
+    ):
         self._db: Dict[str, List[SignalChange]] = {}
+        self._max_bytes = max_bytes
+        self._used_bytes = 0
+        self._truncated_at: Optional[int] = None
+        self._active = True
+        self._record_set = record_set  # None = all signals
 
-    def record(self, time_ns: int, signal: str, val: Optional[int], width: int) -> None:
-        entry = SignalChange(time_ns=time_ns, value=val_to_4state(val, width))
-        lst = self._db.setdefault(signal, [])
-        # Only record actual changes
-        if lst and lst[-1].value == entry.value:
+    @property
+    def truncated_at(self) -> Optional[int]:
+        """Simulation time (ns) when recording was stopped due to memory limit."""
+        return self._truncated_at
+
+    def record(self, time_ns: int, signal: str, val, width: int) -> None:
+        if not self._active:
             return
+        # Filter by record set (§12.3)
+        if self._record_set is not None and signal not in self._record_set:
+            return
+
+        value_str = val_to_4state(val, width)
+        entry = SignalChange(time_ns=time_ns, value=value_str)
+
+        lst = self._db.setdefault(signal, [])
+        if lst and lst[-1].value == value_str:
+            return  # skip duplicate values
+
+        # Check memory budget (~16 bytes per entry rough estimate)
+        est = 8 + len(value_str) + 8  # time_ns(8) + chars + overhead(8)
+        if self._used_bytes + est > self._max_bytes:
+            self._truncated_at = time_ns
+            self._active = False
+            return
+
         lst.append(entry)
+        self._used_bytes += est
 
     def get(
         self, signal: str, start_ns: int = 0, end_ns: Optional[int] = None
