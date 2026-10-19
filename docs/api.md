@@ -129,6 +129,7 @@ for ev in ds.test_events(["counter.sv"], "spec.yaml"):
 ```json
 {
   "schema_version": "2",
+  "deltasim_version": "0.2.0",
   "module": "counter",
   "status": "PASS",
   "seed": 42,
@@ -905,4 +906,31 @@ cases:
 
 ---
 
+
+## バージョン管理
+
+### ツール版 (`deltasim_version`)
+
+`TestResult.to_dict()` および `deltasim test --json` の出力のトップレベルに `deltasim_version` フィールドが含まれます。  
+値は `deltasim.__version__`（`pyproject.toml` の `version` から自動取得）と常に一致します。
+
+```json
+{
+  "schema_version": "2",
+  "deltasim_version": "0.2.0"
+}
+```
+
+- `schema_version` はJSON構造の互換性を表し、任意フィールドの追加では変わりません（現在 `"2"`）。
+- `deltasim_version` はツール自体のリリース版を表します。
+- `--json-events` の各イベントには `deltasim_version` を含みません（開始イベント等は対象外）。
+
+### バージョン定義の場所
+
+| 場所 | 内容 |
+|------|------|
+| `pyproject.toml` の `version` | **唯一の定義箇所** |
+| `deltasim.__version__` | `importlib.metadata.version("deltasim")` で取得（`pyproject.toml` と常に一致） |
+| `deltasim --version` | `deltasim.__version__` を表示 |
+| `TestResult.to_dict()["deltasim_version"]` | `deltasim.__version__` と同値 |
 

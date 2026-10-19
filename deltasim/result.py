@@ -291,8 +291,10 @@ class TestResult:
         return sum(1 for c in self.checks if c.status == "FAIL")
 
     def to_dict(self) -> Dict[str, Any]:
+        from deltasim import __version__ as _ver
         d = {
             "schema_version": self.schema_version,
+            "deltasim_version": _ver,           # §0.2.0: ツール版（schema_version は "2" のまま）
             "module": self.module,
             "status": self.status,
             "seed": self.seed,
