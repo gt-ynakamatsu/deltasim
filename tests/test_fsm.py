@@ -133,7 +133,7 @@ module penc #(parameter W=8) (
         end
     end
 endmodule
-""")
+""", encoding="utf-8")
         from deltasim.parser.parser import parse_file
         from deltasim.elab.elaborator import elaborate
         from deltasim.sim.engine import SimEngine

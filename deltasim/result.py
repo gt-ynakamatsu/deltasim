@@ -99,7 +99,10 @@ class ErrorInfo:
 # ---------------------------------------------------------------------------
 
 @dataclass
+@dataclass
 class CheckInfo:
+    """§12.5: elapsed_ms はケース（シナリオ）単位で TestResult.elapsed_ms に入る。
+    CheckInfo はチェック個別の合否を表す。"""
     name: str = ""
     status: str = "PASS"        # PASS | FAIL | ERROR | SKIP
     signal: str = ""
@@ -110,7 +113,6 @@ class CheckInfo:
     source: str = "spec"        # "spec" | "model"
     seed: int = 0
     message: Optional[str] = None
-    elapsed_ms: float = 0.0
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

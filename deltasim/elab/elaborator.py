@@ -96,6 +96,9 @@ class ElabDesign:
     signal_types: Dict[str, str] = field(default_factory=dict)     # sig_name → type_name
     array_decls: Dict[str, tuple] = field(default_factory=dict)    # array_name → (depth, elem_width)
     typedefs: Dict[str, int] = field(default_factory=dict)         # type_name → bit-width
+    # M6: VCD hierarchy aliases — alias_path → canonical signal name
+    # e.g. {"u_add.sum": "add_sum"} emits u_add.sum in VCD pointing to add_sum's data
+    signal_aliases: Dict[str, str] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -321,6 +324,7 @@ def elaborate(
         signal_types=signal_types,
         array_decls=array_decls,
         typedefs=typedefs,
+        signal_aliases=procs.get("aliases", {}),
     )
 
 
@@ -690,3 +694,19 @@ def _flatten_instance(
 
     for ib_body in sub_design.initial_blocks:
         parent_procs["initial"].append(_rs(ib_body, mapping))
+
+    # M6: Record VCD hierarchy aliases for port-connected signals.
+    # alias  "u_add.sum"  →  canonical  "add_sum"
+    # This lets the VCDWriter show port signals in the sub-instance scope.
+    # We store aliases in parent_procs["aliases"] and propagate to ElabDesign.
+    aliases = parent_procs.setdefault("aliases", {})
+    for child_port, parent_sig in mapping.items():
+        # Only emit alias for ports (direction is not None in sub_design)
+        info = sub_design.signals.get(child_port)
+        if info is not None and info.direction is not None:
+            alias_path = inst_prefix + child_port
+            aliases[alias_path] = parent_sig
+        # Also recurse into sub_design aliases
+        for sub_alias, sub_canon in sub_design.signal_aliases.items():
+            renamed_canon = mapping.get(sub_canon, sub_canon)
+            aliases[inst_prefix + sub_alias] = renamed_canon

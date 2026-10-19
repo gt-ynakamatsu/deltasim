@@ -455,15 +455,17 @@ class TestElapsedMs:
         assert d["summary"]["elapsed_ms"] == d["elapsed_ms"]
 
     def test_check_has_elapsed_ms(self):
-        """個々のチェックにも elapsed_ms があること (§12.5)"""
+        """個々のチェックは elapsed_ms を持たない (§12.5: ケース単位)"""
         import deltasim.api as ds
         result = ds.test(
             [os.path.join(EXAMPLES, "counter.sv")],
             spec=os.path.join(EXAMPLES, "counter_spec.yaml"),
         )
+        # §12.5: elapsed_ms はシナリオ全体 (TestResult) の時間
+        assert result.elapsed_ms > 0
+        # 個々のチェックは elapsed_ms フィールドを持たない
         for check in result.checks:
-            if check.signal != "<expr>":
-                assert isinstance(check.elapsed_ms, float)
+            assert not hasattr(check, "elapsed_ms") or check.elapsed_ms == 0.0
 
 
 # ---------------------------------------------------------------------------

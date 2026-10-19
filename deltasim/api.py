@@ -402,7 +402,6 @@ def test(
                         actual=val_to_4state(actual_raw, w_bits),
                         source="spec",
                         seed=scenario.sim.seed,
-                        elapsed_ms=(time.time() - case_t0) * 1000,
                         message=None if passed else
                                 f"expected {expected_val}, got {actual_raw}",
                     ))
@@ -422,7 +421,6 @@ def test(
                     cycle=cycle_num, time_ns=time_ns,
                     expected=exp.expr, actual="",
                     source="spec", seed=scenario.sim.seed,
-                    elapsed_ms=(time.time() - case_t0) * 1000,
                     message=None if passed else f"expression failed: {exp.expr}",
                 ))
 
@@ -452,7 +450,6 @@ def test(
                     expected=val_to_4state(expected_val, w_bits),
                     actual=val_to_4state(actual_raw, w_bits),
                     source="model", seed=scenario.sim.seed,
-                    elapsed_ms=(time.time() - case_t0) * 1000,
                     message=None if passed else
                             f"model: expected {expected_val}, got {actual_raw}",
                 ))
@@ -1028,19 +1025,36 @@ class Simulator:
     def list_signals(self) -> List[dict]:
         """List all signals with hierarchy paths, widths, and directions.
 
-        Returns a list of dicts with keys:
-          name, path, width, direction, signed, value (4-state string)
+        Returns canonical signals + sub-instance aliases (port-connected signals
+        are also listed under their sub-instance hierarchy path).
+        Keys: name, path, width, direction, signed, value (4-state string)
         """
         result = []
+        # Canonical signals
         for sname, sinfo in self._design.signals.items():
             val = self._engine.signals.get(sname)
             result.append({
                 "name": sname,
-                "path": sname,            # dot-separated hierarchy path
+                "path": sname,
                 "width": sinfo.width,
                 "direction": sinfo.direction,
                 "signed": sinfo.signed,
                 "value": val_to_4state(val, sinfo.width),
+            })
+        # Alias paths (port-connected signals in sub-scopes)
+        for alias_path, canonical in self._design.signal_aliases.items():
+            canon_info = self._design.signals.get(canonical)
+            if canon_info is None:
+                continue
+            val = self._engine.signals.get(canonical)
+            result.append({
+                "name": alias_path,
+                "path": alias_path,
+                "width": canon_info.width,
+                "direction": canon_info.direction,
+                "signed": canon_info.signed,
+                "value": val_to_4state(val, canon_info.width),
+                "alias_of": canonical,
             })
         return result
 
@@ -1102,8 +1116,13 @@ class Simulator:
     def get_signal_changes(
         self, signal: str, start_ns: int = 0, end_ns: Optional[int] = None
     ) -> list:
-        """Get recorded value changes for *signal* within a time range."""
-        return self._change_db.get(signal, start_ns, end_ns)
+        """Get recorded value changes for *signal* within a time range.
+
+        Accepts both canonical names and alias paths (sub-instance hierarchy).
+        """
+        # Resolve alias to canonical name if needed
+        canonical = self._design.signal_aliases.get(signal, signal)
+        return self._change_db.get(canonical, start_ns, end_ns)
 
     # ------------------------------------------------------------------
     # Properties

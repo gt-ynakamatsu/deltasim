@@ -52,30 +52,42 @@ class VCDWriter:
         fh.write("$version deltasim 0.1.0 $end\n")
         fh.write(f"$timescale {self._timescale} $end\n")
 
-        # Assign VCD identifiers
+        # Assign VCD identifiers for canonical signals
         ident_base = 33  # '!' in ASCII
         for i, name in enumerate(self._design.signals):
             self._ids[name] = _int_to_id(ident_base + i)
 
-        # Emit hierarchy with $scope/$upscope (§M6)
+        # Collect all VCD entries: canonical + alias paths
+        # alias_path → vcd_id (same id as canonical, different hierarchy)
+        aliases = self._design.signal_aliases  # {alias_path: canonical_name}
+
+        # Build combined list: canonical signals + alias paths, sorted by hierarchy
+        all_entries = {}  # path → (vcd_id, width, local_name_override)
+        for name, info in self._design.signals.items():
+            all_entries[name] = (self._ids[name], info.width, None)
+        for alias_path, canonical in aliases.items():
+            if canonical in self._ids:
+                w = self._design.signals.get(canonical)
+                if w:
+                    all_entries[alias_path] = (self._ids[canonical], w.width, None)
+
+        # Emit scope hierarchy
         top_name = self._design.module_name
         fh.write(f"$scope module {top_name} $end\n")
 
-        # Sort by hierarchy path so sibling / child signals are grouped
         sorted_names = sorted(
-            self._design.signals.keys(),
+            all_entries.keys(),
             key=lambda n: (n.split(".")[:-1], n.split(".")[-1]),
         )
 
-        current_scope: List[str] = []  # scope path stack (minus top)
+        current_scope: List[str] = []
 
         for name in sorted_names:
-            info = self._design.signals[name]
+            vcd_id, width, _ = all_entries[name]
             parts = name.split(".")
-            sig_path = parts[:-1]   # hierarchy components (no local name)
-            sig_local = parts[-1]   # local signal name within scope
+            sig_path = parts[:-1]
+            sig_local = parts[-1]
 
-            # Compute common prefix with current scope
             common = 0
             for a, b in zip(current_scope, sig_path):
                 if a == b:
@@ -83,24 +95,19 @@ class VCDWriter:
                 else:
                     break
 
-            # Upscope out of current branches that differ
             for _ in range(len(current_scope) - common):
                 fh.write("$upscope $end\n")
 
-            # Scope into new sub-scopes
             for component in sig_path[common:]:
                 fh.write(f"$scope module {component} $end\n")
 
             current_scope = sig_path
+            fh.write(f"$var wire {width} {vcd_id} {sig_local} $end\n")
 
-            vcd_id = self._ids[name]
-            fh.write(f"$var wire {info.width} {vcd_id} {sig_local} $end\n")
-
-        # Close remaining open scopes (excluding top)
         for _ in range(len(current_scope)):
             fh.write("$upscope $end\n")
 
-        fh.write("$upscope $end\n")   # close top scope
+        fh.write("$upscope $end\n")
         fh.write("$enddefinitions $end\n")
 
     def record(self, time_ns: int, signals: Dict[str, object]) -> None:

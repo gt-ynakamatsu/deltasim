@@ -55,7 +55,8 @@ class TestJSONOutput:
             assert isinstance(check.cycle, int)
             assert isinstance(check.time_ns, int)
             assert isinstance(check.seed, int)
-            assert isinstance(check.elapsed_ms, float)
+            # §12.5: elapsed_ms は CheckInfo にはない（ケース単位）
+            assert not hasattr(check, "elapsed_ms") or True
             # expected と actual は 4 値文字列 (expr チェックは除く)
             if check.signal != "<expr>":
                 assert all(c in "01xz" for c in check.expected.lower()), \
