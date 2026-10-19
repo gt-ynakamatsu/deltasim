@@ -198,11 +198,19 @@ class DesignInfo:
 
 @dataclass
 class CaseResult:
-    """1 テストケース（シナリオ cases[] の要素）の実行結果 (§13.2)。"""
+    """1 テストケース（シナリオ cases[] の要素）の実行結果 (§13.2)。
+
+    §14.3: message フィールド
+      SKIP    : skip_reason（無ければ "skipped"）
+      キャンセル: "cancelled"
+      ERROR   : エラー要約
+      PASS/FAIL: §14 では未定義 → 空文字列（docs に明記済み）
+    """
     name: str = ""
     status: str = "PASS"           # PASS | FAIL | ERROR | SKIP
     seed: int = 0
     elapsed_ms: float = 0.0        # §13.1: このケースの実時間
+    message: str = ""              # §14.3: 状態を表すメッセージ
     checks: List[CheckInfo] = field(default_factory=list)
     log: List[str] = field(default_factory=list)
     errors: List[ErrorInfo] = field(default_factory=list)
@@ -215,6 +223,7 @@ class CaseResult:
             "status": self.status,
             "seed": self.seed,
             "elapsed_ms": self.elapsed_ms,
+            "message": self.message,
             "cancelled": self.cancelled,
             "truncated_at": self.truncated_at,
             "checks": [c.to_dict() for c in self.checks],
@@ -467,12 +476,13 @@ class ProgressEvent:
     signal: Optional[str] = None
     expected: Optional[str] = None
     actual: Optional[str] = None
+    message: Optional[str] = None      # §14.3: case_done に message を追加
 
     def to_dict(self) -> Dict[str, Any]:
         d: Dict[str, Any] = {"type": self.type, "timestamp_ms": self.timestamp_ms}
         for k in ("module", "status", "elapsed_ms", "cancelled",
                    "phase", "cycle", "total_cycles", "time_ns",
-                   "name", "signal", "expected", "actual"):
+                   "name", "signal", "expected", "actual", "message"):
             v = getattr(self, k)
             if v is not None:
                 d[k] = v

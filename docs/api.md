@@ -660,3 +660,75 @@ deltasim test counter.sv --spec spec.yaml --case a --case b  # 複数指定
 5. **`Simulator.force()` の精度**: 現在の実装では pre-posedge hook で適用するため、NBA の影響を完全に抑制できない場合がある (完全な force は将来対応)。
 6. **階層シグナルパスの VCD**: 現在は `$scope` なしのフラット展開。`top.u_add.sum` 形式は将来対応。
 7. **`test()` の elapsed_ms**: 各 check の `elapsed_ms` は概算 (チェック1件あたりの処理時間)。
+
+---
+
+## §14 PR #8 仮決め点の確定（2026-10-19 15:55）
+
+### §14.1 `--case` で全ケースが除外された場合
+
+```python
+# 全除外時の TestResult
+{
+  "schema_version": "2",
+  "status": "ERROR",        # PASS ではなく ERROR
+  "cases": [],
+  "errors": [
+    {
+      "code": "E_NO_CASE",
+      "severity": "error",
+      "message": "--case フィルタ 'xyz' に一致するケースがありません"
+    }
+  ]
+}
+```
+
+| 動作 | 説明 |
+|------|------|
+| `status` | `"ERROR"` |
+| `cases` | `[]` |
+| `errors[].code` | `"E_NO_CASE"` |
+| `errors[].message` | 指定パターンを含む |
+| CLI 終了コード | 非 0 |
+| `--json` | 正しい JSON を stdout に出力（stderr で非 0 終了）|
+| 戻り値型 | `TestResult`（`None` にはならない）|
+
+CIで「何も実行されずにPASS」を防ぐための仕様です。
+
+### §14.2 `--case` の fnmatch 記法
+
+`--case` および `filter_cases` は Python `fnmatch` に準拠します:
+
+| パターン | 説明 | 例 |
+|---------|------|-----|
+| `*` | 任意の文字列 | `test_*` → test_a, test_b |
+| `?` | 任意の 1 文字 | `test_?1` → test_a1 |
+| `[abc]` | 文字クラス | `test_[ab]?` → test_a1, test_b2 |
+| `[a-z]` | 文字範囲 | `case_[0-9]` → case_0, case_1 |
+
+複数パターンはいずれかに一致すれば実行されます（OR 条件）。
+
+### §14.3 `cases[].message` フィールド
+
+各 `CaseResult` の `message` は状態ごとに以下の値を持ちます。
+
+| status | message の値 |
+|--------|-------------|
+| `SKIP` | `skip_reason`（空なら `"skipped"`） |
+| `SKIP`（キャンセル） | `"cancelled"` |
+| `ERROR` | エラー要約（`errors[0].message`） |
+| `PASS` | `""` ← **§14 では未定義 → 空文字列を使用**（後述） |
+| `FAIL` | `""` ← **§14 では未定義 → 空文字列を使用**（後述） |
+
+`case_done` イベントにも `message` が含まれます:
+
+```json
+{"type": "case_done", "name": "my_case", "status": "SKIP",
+ "message": "CI対象外", "elapsed_ms": 0.1}
+```
+
+> **未定義事項 (§14.3)**: PASS / FAIL の `message` に何を入れるかは仕様書に記載がありません。
+> 現実装は空文字列（`""`）としており、最終報告に記載しています。
+
+---
+
