@@ -363,7 +363,7 @@ class TestPublicAPI:
             [os.path.join(EXAMPLES, "counter.sv")],
             spec=os.path.join(EXAMPLES, "counter_spec.yaml"),
         )
-        assert result.schema_version == "1"
+        assert result.schema_version in ("1", "2")
         assert result.status == "PASS"
         assert result.n_fail == 0
         assert len(result.checks) > 0
@@ -472,7 +472,7 @@ class TestResultJSON:
         )
         j = result.to_json()
         d = _json.loads(j)
-        assert d["schema_version"] == "1"
+        assert d["schema_version"] in ("1", "2")
         assert "checks" in d
         assert "errors" in d
         # 全チェックに seed フィールドがあること

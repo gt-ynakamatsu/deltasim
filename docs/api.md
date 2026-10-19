@@ -422,7 +422,92 @@ GUI は FastAPI で公開 API を包む薄い層です。
 
 ---
 
-## 未決事項 (要仕様担当確認)
+## §12 API 詳細決定（2026-10-19 確定）
+
+以下は仕様担当が §12 として確定した事項です。これらが本 API 仕様の根拠です。
+
+---
+
+### §12.1 SKIP ステータスの発生条件
+
+| 条件 | 挙動 |
+|------|------|
+| YAML に `skip: true` | status=SKIP, log に skip_reason |
+| `skip_reason` フィールド | 任意（空可） |
+| キャンセル時に未実行のケース | status=SKIP, message="cancelled" |
+| 参照モデルが見つからない等の不備 | status=ERROR（SKIP ではない） |
+| `--case` で絞り込まれたケース | 結果に含めない |
+
+```yaml
+# YAML に skip 指定する例:
+skip: true
+skip_reason: "環境依存テスト — CI では無効"
+```
+
+```python
+# キャンセル前に token.cancel() → status=SKIP
+result = ds.test(files, spec, cancel=token)
+assert result.status == "SKIP"
+```
+
+### §12.2 case_done の粒度
+
+`case_done` イベントはテストケース（シナリオ）単位で **1 回だけ** 発行されます。
+個々のチェックの失敗はそのケース結果の `checks` リストに入ります。
+
+```json
+{
+  "type": "case_done",
+  "name": "counter",
+  "status": "FAIL",
+  "elapsed_ms": 12.3
+}
+```
+
+### §12.3 信号変化 DB のメモリ制御
+
+| 設定 | 内容 |
+|------|------|
+| 既定の記録対象 | トップポート ＋ 仕様ファイルで参照された信号 |
+| `--record-all` / `record_all=True` | 全信号を記録 |
+| メモリ上限 | 512 MB（既定）|
+| `--wave-mem N` / `wave_mem_mb=N` | MB 単位で上限変更 |
+| 上限超過時 | 記録停止 ＋ warning イベント ＋ `truncated_at`（停止時刻 ns）|
+| VCD 出力 | **上限の影響を受けず** 全サイクル出力 |
+
+`truncated_at` は `TestResult.to_dict()` の `truncated_at` フィールドに出力されます。
+
+### §12.4 4 値の文字列表現（小文字統一）
+
+| 値 | 文字列 |
+|----|--------|
+| 0 | `"0"` |
+| 1 | `"1"` |
+| X (unknown) | `"x"` |
+| Z (high-impedance) | `"z"` |
+
+- 多ビット: `"01xz10"` (MSB 先頭, 長さ = N)
+- **X と Z を区別します**（Z は `"z"` であり `"x"` ではありません）
+- 大文字は使用しません（すべて小文字）
+
+### §12.5 elapsed_ms の定義
+
+| フィールド | 意味 |
+|-----------|------|
+| `checks[i].elapsed_ms` | そのチェックの実時間（ms）|
+| `elapsed_ms` / `summary.elapsed_ms` | テスト全体の実時間（ms）|
+
+`to_dict()` には両方が含まれます:
+
+```json
+{
+  "elapsed_ms": 12.3,
+  "summary": {"elapsed_ms": 12.3},
+  "checks": [{"name": "...", "elapsed_ms": 0.5, ...}]
+}
+```
+
+---
 
 1. **`SKIP` の発生条件**: テストが条件付きスキップになるケースが未定義。
 2. **`case_done` の粒度**: 全チェックに対して発行するか、サイクル単位かは未定。

@@ -203,8 +203,14 @@ def gen_cmd(sv_files, top, params, out_dir, spec_path, tb_path, no_tb, no_spec, 
 @click.option("--no-color", is_flag=True, default=False)
 @click.option("--json-events", is_flag=True, default=False,
               help="進捗イベントを JSON Lines として stdout に出力")
+@click.option("--record-all", is_flag=True, default=False,
+              help="§12.3: 全信号を変化 DB に記録（既定: ポートと spec 参照信号のみ）")
+@click.option("--wave-mem", "wave_mem_mb", default=512, show_default=True, type=int,
+              help="§12.3: 信号変化 DB メモリ上限 (MB)")
+@click.option("--case", "filter_cases", multiple=True, metavar="CASE_NAME",
+              help="§12.1: 実行するケース名を絞り込む（未指定で全ケース）")
 def test_cmd(sv_files, top, spec, params, junit, json_out, vcd, seed,
-             verbose, no_color, json_events):
+             verbose, no_color, json_events, record_all, wave_mem_mb, filter_cases):
     """YAML スペックに従ってテストを実行し PASS/FAIL を判定する。
 
     Examples:\n
@@ -233,6 +239,8 @@ def test_cmd(sv_files, top, spec, params, junit, json_out, vcd, seed,
         list(sv_files), spec,
         top=top, params=param_overrides, seed=seed, vcd=vcd,
         on_progress=_progress_cb,
+        record_all=record_all,
+        wave_mem_mb=wave_mem_mb,
     )
 
     # Terminal output

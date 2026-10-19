@@ -216,7 +216,287 @@ def test(
     vcd: Optional[Union[str, Path]] = None,
     on_progress: Optional[Callable[[dict], None]] = None,
     cancel: Optional[CancelToken] = None,
+    record_all: bool = False,
+    wave_mem_mb: int = 512,
 ) -> TestResult:
+    """Run simulation driven by a YAML scenario spec.
+
+    Parameters
+    ----------
+    files:
+        RTL file paths *or* a DesignInfo from load().
+    spec:
+        YAML scenario file path.
+    top, params, seed, vcd:
+        Override values (take precedence over spec).
+    on_progress:
+        Callback receiving progress event dicts (§2.4).
+    cancel:
+        CancelToken to interrupt the run.
+    record_all:
+        §12.3: Record all signals in change DB.
+        Default: only top ports + spec-referenced signals.
+    wave_mem_mb:
+        §12.3: Memory limit for change DB in MB (default 512).
+    """
+    from deltasim.tb.scenario import load_scenario, ScenarioError
+    from deltasim.sim.engine import SimEngine, SimError
+
+    t0 = time.time()
+    params = params or {}
+    result = TestResult(schema_version=SCHEMA_VERSION, seed=seed or 0)
+
+    def _emit(type_: str, **kw):
+        if on_progress:
+            ev = ProgressEvent(type=type_, **kw)
+            on_progress(ev.to_dict())
+
+    _emit("start", phase="parse")
+
+    # §12.1: check for pre-run cancel
+    if cancel and cancel.is_cancelled:
+        result.status = "SKIP"
+        result.log.append("cancelled")
+        result.elapsed_ms = (time.time() - t0) * 1000
+        _emit("finish", status="SKIP", elapsed_ms=result.elapsed_ms,
+              cancelled=True)
+        return result
+
+    # Load spec
+    try:
+        scenario = load_scenario(str(spec))
+    except Exception as e:
+        result.status = "ERROR"
+        result.errors.append(_exc_to_error(e, "E001"))
+        result.elapsed_ms = (time.time() - t0) * 1000
+        _emit("finish", status="ERROR", elapsed_ms=result.elapsed_ms)
+        return result
+
+    # §12.1: YAML skip
+    if scenario.skip:
+        result.status = "SKIP"
+        result.seed = scenario.sim.seed
+        if scenario.skip_reason:
+            result.log.append(scenario.skip_reason)
+        result.elapsed_ms = (time.time() - t0) * 1000
+        _emit("case_done", name=scenario.top or "scenario",
+              status="SKIP", message=scenario.skip_reason)
+        _emit("finish", status="SKIP", elapsed_ms=result.elapsed_ms)
+        return result
+
+    # Elaborate
+    _emit("progress", phase="elab")
+    top_name = top or scenario.top
+    di = load(files, top=top_name, params=params)
+    if di.status != "PASS":
+        result.status = "ERROR"
+        result.errors = di.errors
+        result.elapsed_ms = (time.time() - t0) * 1000
+        _emit("finish", status="ERROR", elapsed_ms=result.elapsed_ms)
+        return result
+
+    result.module = di.module
+    design = di._design
+
+    if seed is not None:
+        scenario.sim.seed = seed
+    if vcd:
+        scenario.sim.vcd = str(vcd)
+
+    total = scenario.sim.cycles
+    _emit("progress", phase="sim", cycle=0, total_cycles=total, time_ns=0)
+
+    # Engine
+    engine = SimEngine(
+        design,
+        half_period_ns=scenario.clock.period_ns // 2,
+        reset_cycles=scenario.reset.duration_cycles,
+    )
+    if scenario.clock.signal:
+        engine.set_clk(scenario.clock.signal)
+    if scenario.reset.signal:
+        engine.set_rst(scenario.reset.signal, active_low=scenario.reset.active_low)
+
+    # Stimuli
+    from deltasim.tb.scenario import StimulusSchedule, _expand_at
+    stim = StimulusSchedule(scenario.inputs, total, seed=scenario.sim.seed)
+
+    # Reference model
+    model = None
+    if scenario.model:
+        try:
+            from deltasim.tb.runner import TestRunner as _TR
+            _dummy = _TR(design, scenario)
+            model = _dummy._load_model()
+            if hasattr(model, "reset"):
+                model.reset()
+        except Exception as e:
+            # §12.1: missing model = ERROR, not SKIP
+            result.status = "ERROR"
+            result.errors.append(_exc_to_error(e, "E006",
+                                               message=f"参照モデルの読み込み失敗: {e}"))
+            result.elapsed_ms = (time.time() - t0) * 1000
+            _emit("finish", status="ERROR", elapsed_ms=result.elapsed_ms)
+            return result
+
+    # VCD (§12.3: VCD is NOT subject to memory limits)
+    vcd_obj = None
+    if scenario.sim.vcd:
+        from deltasim.vcd.writer import VCDWriter
+        vcd_obj = VCDWriter(scenario.sim.vcd, design)
+        vcd_obj.record_initial(0, engine.signals)
+        engine.vcd_writer = vcd_obj
+
+    # §12.3: build record set (ports + spec-referenced signals by default)
+    record_set = None if record_all else _build_record_set(design, scenario)
+    change_db = SignalChangeDB(
+        max_bytes=wave_mem_mb * 1024 * 1024,
+        record_set=record_set,
+    )
+
+    checks: List[CheckInfo] = []
+    overall_status = "PASS"
+    case_t0 = time.time()   # §12.5: per-case elapsed_ms
+
+    def _pre(cycle_num: int, sigs: dict):
+        if cancel and cancel.is_cancelled:
+            raise SimulationCancelled()
+        for sig, val in stim.get(cycle_num).items():
+            engine._write(sig, val)
+
+    def _post(cycle_num: int, snap: dict):
+        nonlocal overall_status
+        time_ns = engine._time
+
+        # §12.3: Record signal changes in DB
+        for sname, sinfo in design.signals.items():
+            change_db.record(time_ns, sname, snap.get(sname), sinfo.width)
+
+        # Emit warning if change DB truncated
+        if change_db.truncated_at == time_ns and not result.truncated_at:
+            result.truncated_at = time_ns
+            _emit("progress", phase="sim", cycle=cycle_num,
+                  total_cycles=total, time_ns=time_ns,
+                  warning="signal change DB memory limit reached")
+
+        # Spec checks
+        for exp in scenario.expected:
+            if cycle_num not in _expand_at(exp.at, total):
+                continue
+            if exp.check:
+                for sig, expected_val in exp.check.items():
+                    actual_raw = snap.get(sig, 0)
+                    w = design.signals.get(sig)
+                    w_bits = w.width if w else 1
+                    passed = (actual_raw == expected_val)
+                    st = "PASS" if passed else "FAIL"
+                    if not passed:
+                        overall_status = "FAIL"
+                    checks.append(CheckInfo(
+                        name=f"{sig}@cycle{cycle_num}[spec]",
+                        status=st,
+                        signal=sig,
+                        cycle=cycle_num,
+                        time_ns=time_ns,
+                        expected=val_to_4state(expected_val, w_bits),
+                        actual=val_to_4state(actual_raw, w_bits),
+                        source="spec",
+                        seed=scenario.sim.seed,
+                        elapsed_ms=(time.time() - case_t0) * 1000,
+                        message=None if passed else
+                                f"expected {expected_val}, got {actual_raw}",
+                    ))
+            elif exp.expr:
+                ns = dict(snap)
+                ns["_cycle"] = cycle_num
+                try:
+                    passed = bool(eval(exp.expr, {"__builtins__": {}}, ns))
+                except Exception:
+                    passed = False
+                st = "PASS" if passed else "FAIL"
+                if not passed:
+                    overall_status = "FAIL"
+                checks.append(CheckInfo(
+                    name=f"expr@cycle{cycle_num}[spec]",
+                    status=st, signal="<expr>",
+                    cycle=cycle_num, time_ns=time_ns,
+                    expected=exp.expr, actual="",
+                    source="spec", seed=scenario.sim.seed,
+                    elapsed_ms=(time.time() - case_t0) * 1000,
+                    message=None if passed else f"expression failed: {exp.expr}",
+                ))
+
+        # Model checks
+        if model:
+            inp = {n: engine.signals.get(n, 0)
+                   for n, info in design.signals.items()
+                   if info.direction == "input"}
+            try:
+                exp_out = model.step(inp)
+            except Exception:
+                exp_out = {}
+            for sig, expected_val in exp_out.items():
+                if sig not in snap:
+                    continue
+                actual_raw = snap.get(sig, 0)
+                w = design.signals.get(sig)
+                w_bits = w.width if w else 1
+                passed = (actual_raw == expected_val)
+                st = "PASS" if passed else "FAIL"
+                if not passed:
+                    overall_status = "FAIL"
+                checks.append(CheckInfo(
+                    name=f"{sig}@cycle{cycle_num}[model]",
+                    status=st, signal=sig,
+                    cycle=cycle_num, time_ns=time_ns,
+                    expected=val_to_4state(expected_val, w_bits),
+                    actual=val_to_4state(actual_raw, w_bits),
+                    source="model", seed=scenario.sim.seed,
+                    elapsed_ms=(time.time() - case_t0) * 1000,
+                    message=None if passed else
+                            f"model: expected {expected_val}, got {actual_raw}",
+                ))
+
+        _emit("progress", phase="sim", cycle=cycle_num,
+              total_cycles=total, time_ns=time_ns)
+
+    try:
+        engine.run(total, pre_posedge_hook=_pre, post_posedge_hook=_post)
+    except SimulationCancelled:
+        result.cancelled = True
+        if not checks:
+            # §12.1: cancelled before any checks → SKIP
+            overall_status = "SKIP"
+            result.log.append("cancelled")
+    except Exception as e:
+        overall_status = "ERROR"
+        result.errors.append(_exc_to_error(e, "E005"))
+    finally:
+        if vcd_obj:
+            vcd_obj.close()
+
+    if result.cancelled and overall_status not in ("ERROR",):
+        final_status = ("FAIL" if any(c.status == "FAIL" for c in checks)
+                        else overall_status)
+    else:
+        final_status = overall_status
+
+    result.status = final_status
+    result.checks = checks
+    result.log = engine._result.log if engine._result else []
+    result.elapsed_ms = (time.time() - t0) * 1000  # §12.5: summary
+    result.seed = scenario.sim.seed
+
+    # §12.2: case_done once per scenario at the end
+    _emit("case_done",
+          name=result.module or scenario.top or "scenario",
+          status=result.status,
+          elapsed_ms=result.elapsed_ms,
+          cancelled=result.cancelled)
+
+    _emit("finish", status=result.status,
+          elapsed_ms=result.elapsed_ms, cancelled=result.cancelled)
+    return result
     """Run simulation driven by a YAML scenario spec.
 
     Parameters
@@ -640,19 +920,12 @@ class Simulator:
         changes_acc: list = []
         bp_hit: Optional[int] = None
 
-        forced = dict(self._forced)  # snapshot of forced signals
-
-        def _pre_hook(cycle_num: int, signals: dict):
-            # Apply forced signals AFTER engine reset management
-            for sig, val in forced.items():
-                self._engine._write(sig, val)
+        # §M6: engine._force_overrides already set by force() —
+        # no extra pre_posedge_hook needed; _write() ignores RTL updates.
 
         for _ in range(max(1, n_cycles)):
             # Run one engine cycle
-            self._engine._run_cycle(
-                self._cycle,
-                pre_posedge_hook=_pre_hook if forced else None,
-            )
+            self._engine._run_cycle(self._cycle)
             self._cycle += 1
 
             # Collect changes
@@ -729,13 +1002,24 @@ class Simulator:
         self._engine._eval_comb_loop()
 
     def force(self, signal: str, value: Optional[int]) -> None:
-        """Force *signal* to *value* persistently across clock edges."""
-        self._forced[signal] = value if value is not None else 0
-        self.set(signal, value)
+        """Force *signal* to *value* persistently across clock edges.
+
+        §M6: Uses engine._force_overrides so the value is preserved even
+        after NBA updates (NBA to forced signals are silently discarded).
+        """
+        v = value if value is not None else 0
+        self._forced[signal] = v
+        # Register in engine so _write() ignores RTL-driven updates
+        self._engine._force_overrides[signal] = v
+        # Apply immediately, bypassing override (write directly)
+        from deltasim.sim.engine import _write_signal
+        _write_signal(self._engine.signals, signal, v, self._engine._widths)
+        self._engine._eval_comb_loop()
 
     def release(self, signal: str) -> None:
         """Remove a previously forced value from *signal*."""
         self._forced.pop(signal, None)
+        self._engine._force_overrides.pop(signal, None)
 
     # ------------------------------------------------------------------
     # Signal listing  (§2.5)
@@ -888,6 +1172,22 @@ def test_events(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _build_record_set(design, scenario=None):
+    """§12.3: Build the default signal record set.
+
+    Records only top-level ports + signals referenced in the spec's expected checks.
+    """
+    # Top ports
+    ports = {n for n, info in design.signals.items() if info.direction is not None}
+    # Spec-referenced signals
+    spec_refs: set = set()
+    if scenario:
+        for exp in scenario.expected:
+            if exp.check:
+                spec_refs.update(exp.check.keys())
+    return ports | spec_refs
+
 
 def _parse_files(files):
     from deltasim.parser.parser import parse_file
