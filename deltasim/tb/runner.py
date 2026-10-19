@@ -77,6 +77,8 @@ class TestRunner:
         Loaded scenario (YAML spec).
     verbose:
         Print $display / check results inline.
+    on_progress:
+        Optional callback(dict) receiving progress events (M5 API §2.4).
     """
 
     def __init__(
@@ -84,10 +86,12 @@ class TestRunner:
         design: ElabDesign,
         scenario: Scenario,
         verbose: bool = False,
+        on_progress: Optional[Callable] = None,
     ):
         self.design = design
         self.scenario = scenario
         self.verbose = verbose
+        self._on_progress = on_progress
 
         hp = scenario.clock.period_ns // 2
         rc = scenario.reset.duration_cycles
@@ -113,6 +117,15 @@ class TestRunner:
         sc = self.scenario
         engine = self.engine
         result = TestRunResult(module_name=self.design.module_name)
+
+        def _emit(ev_type: str, **kwargs):
+            if self._on_progress:
+                import time as _time
+                ev = {"type": ev_type, "timestamp_ms": _time.time() * 1000}
+                ev.update(kwargs)
+                self._on_progress(ev)
+
+        _emit("start", phase="sim", module=self.design.module_name)
 
         stim = StimulusSchedule(
             sc.inputs, sc.sim.cycles, seed=sc.sim.seed
@@ -140,6 +153,9 @@ class TestRunner:
             self._check_expected(result, sc, cycle_num, snap)
             if model:
                 self._check_model(result, engine, model, cycle_num, snap)
+            _emit("progress", phase="sim",
+                  cycle=cycle_num, total_cycles=sc.sim.cycles,
+                  time_ns=engine._time)
 
         try:
             engine.run(
@@ -152,6 +168,7 @@ class TestRunner:
                 vcd_obj.close()
 
         result.log.extend(engine._result.log)
+        _emit("finish", status="PASS" if result.passed else "FAIL")
         return result
 
     # ------------------------------------------------------------------

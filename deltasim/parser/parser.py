@@ -28,6 +28,8 @@ from deltasim.parser.ast_nodes import (
     PortConn, InstDecl, GenVarDecl,
     GenerateFor, GenerateIf, GenerateBlock,
     EnumMember, EnumTypeDef, StructField, StructTypeDef, TypedefDecl, ImportDecl,
+    # M4 additions
+    MemberAccess,
     NumberLiteral, FillLiteral, StringLiteral, Identifier,
     BinOp, UnaryOp, Conditional, BitSelect, PartSelect, Concat, Replicate,
     SysFunc,
@@ -566,8 +568,27 @@ class Parser:
         names = [self._consume(expected_type="ID").value]
         while self._try_consume(","):
             names.append(self._consume(expected_type="ID").value)
+        # M4: optional unpacked array dimension after names: name [lo:hi] or name [depth]
+        unpacked_dims: Optional[Dims] = None
+        if self._at("["):
+            self._consume("[")
+            hi = self._parse_expression()
+            if self._at(":"):
+                self._consume(":")
+                lo = self._parse_expression()
+                self._consume("]")
+                unpacked_dims = Dims(hi=hi, lo=lo)
+            else:
+                self._consume("]")
+                # [N] shorthand: depth = N, treated as [N-1:0]
+                from deltasim.parser.ast_nodes import BinOp as _BinOp, NumberLiteral as _NL
+                unpacked_dims = Dims(
+                    hi=_BinOp("-", hi, _NL(1, None)),
+                    lo=_NL(0, None),
+                )
         self._consume(";")
-        return [NetDecl(net_type=net_type, dims=dims, names=names, signed=signed)]
+        return [NetDecl(net_type=net_type, dims=dims, names=names,
+                        signed=signed, unpacked_dims=unpacked_dims)]
 
     # ------------------------------------------------------------------
     # Sensitivity list:  @(posedge clk or negedge rst_n) | @(*) | @(*)
@@ -912,18 +933,29 @@ class Parser:
         self._error(f"unexpected token in expression: {tok.value!r} ({tok.type})")
 
     def _parse_postfix(self, base: "Expr") -> "Expr":
-        """Parse bit-select / part-select after a primary."""
-        while self._at("["):
-            self._consume("[")
-            idx = self._parse_expression()
-            if self._at(":"):
-                self._consume(":")
-                lo = self._parse_expression()
-                self._consume("]")
-                base = PartSelect(base=base, hi=idx, lo=lo)
+        """Parse bit-select / part-select / member-access after a primary."""
+        while True:
+            if self._at("["):
+                self._consume("[")
+                idx = self._parse_expression()
+                if self._at(":"):
+                    self._consume(":")
+                    lo = self._parse_expression()
+                    self._consume("]")
+                    base = PartSelect(base=base, hi=idx, lo=lo)
+                else:
+                    self._consume("]")
+                    base = BitSelect(base=base, index=idx)
+            elif self._at("."):
+                # Member access: expr.field_name
+                self._consume(".")
+                if self._peek().type == "ID":
+                    fname = self._consume(expected_type="ID").value
+                    base = MemberAccess(base=base, field=fname)
+                else:
+                    break
             else:
-                self._consume("]")
-                base = BitSelect(base=base, index=idx)
+                break
         return base
 
     def _parse_concat_or_replicate(self) -> "Expr":
@@ -1025,9 +1057,13 @@ def parse_string(source: str, filename: str = "<string>") -> Module:
 
 
 def parse_file(path: str) -> Module:
-    """Parse a .sv file and return a Module AST."""
-    with open(path, encoding="utf-8") as f:
-        source = f.read()
-    mod = parse_string(source, filename=path)
-    mod.source_file = path
+    """Parse a .sv file and return a Module AST.
+    
+    The file is read as UTF-8 with CRLF normalisation (Windows compatible).
+    """
+    from pathlib import Path
+    p = Path(path)
+    source = p.read_text(encoding="utf-8")
+    mod = parse_string(source, filename=str(p))
+    mod.source_file = str(p)
     return mod

@@ -22,10 +22,11 @@ from deltasim.elab.elaborator import ElabDesign
 
 def generate_tb_sv(design: ElabDesign, out_path: str) -> None:
     """Generate a testbench SV skeleton for *design*."""
+    from pathlib import Path
     sv = _build_tb_sv(design)
-    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
-    with open(out_path, "w", encoding="utf-8") as f:
-        f.write(sv)
+    p = Path(out_path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(sv, encoding="utf-8")
 
 
 def _build_tb_sv(design: ElabDesign) -> str:
@@ -234,6 +235,7 @@ def generate_yaml_spec(design: ElabDesign, out_path: str) -> None:
     a(f"#   class: {design.module_name.capitalize()}Model")
     a("#   params: {}")
 
-    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
-    with open(out_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines) + "\n")
+    from pathlib import Path
+    p = Path(out_path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
