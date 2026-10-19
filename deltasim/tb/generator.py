@@ -148,7 +148,7 @@ def _build_tb_sv(design: ElabDesign) -> str:
 # ---------------------------------------------------------------------------
 
 def generate_yaml_spec(design: ElabDesign, out_path: str) -> None:
-    """Generate a YAML scenario skeleton for *design*."""
+    """Generate a YAML scenario skeleton for *design* (§13.2 cases: format)."""
     from deltasim.sim.engine import _detect_clk, _detect_rst
     signals = design.signals
     clk = _detect_clk(signals)
@@ -183,50 +183,53 @@ def generate_yaml_spec(design: ElabDesign, out_path: str) -> None:
     a("  duration_cycles: 10")
     a("")
 
-    # Sim
+    # Sim (common defaults)
     a("sim:")
     a("  cycles: 30")
     a("  seed: 42")
     a("  # vcd: out.vcd")
     a("")
 
-    # Inputs
-    a("inputs:")
-    a("  # Fixed value example:")
+    # §13.2: cases: list
+    a("# §13.2: テストケース一覧")
+    a("# cases: が無い旧形式はファイル名を name とする 1 ケースとして扱う（後方互換）")
+    a("cases:")
+    a(f"  - name: {design.module_name}_basic")
+    a("    # seed: 42          # ケース個別のシード（省略でトップレベル sim.seed を使用）")
+    a("    # cycles: 30        # ケース個別のサイクル数")
+    a("    # skip: false       # true でこのケースをスキップ")
+    a("    # skip_reason: ''")
+
+    # Stimulus
+    a("    inputs:")
+    added = False
     for name, info in signals.items():
         if name in (clk, rst):
             continue
         if info.direction == "input":
-            a(f"  # - at: 11")
-            a(f"  #   set: {{{name}: 1}}")
+            a(f"      # - at: 11")
+            a(f"      #   set: {{{name}: 1}}")
+            added = True
             break
-    a("  # Random value example:")
+    if not added:
+        a("      []   # inputs なし")
+
+    # Expected
+    a("    expected:")
     for name, info in signals.items():
-        if name in (clk, rst):
-            continue
-        if info.direction == "input":
-            a(f"  # - at: [11, 30]")
-            a(f"  #   random:")
-            if info.width == 1:
-                a(f"  #     {name}: {{range: [0, 1]}}")
-            else:
-                lo, hi = 0, (1 << info.width) - 1
-                a(f"  #     {name}: {{range: [{lo}, {hi}]}}")
+        if info.direction == "output":
+            a(f"      # - at: 11")
+            a(f"      #   check: {{{name}: 1}}")
+            a(f"      # - at: [11, 30]")
+            a(f"      #   expr: \"{name} == _cycle - 10\"")
             break
     a("")
 
-    # Expected
-    a("expected:")
-    a("  # Exact value check example:")
-    for name, info in signals.items():
-        if info.direction == "output":
-            a(f"  # - at: 11")
-            a(f"  #   check: {{{name}: 1}}")
-            a(f"  # Python expression example:")
-            a(f"  # - at: [11, 30]")
-            a(f"  #   expr: \"{name} == _cycle - 10\"")
-            break
-    a("")
+    # Reference model
+    a("# model:")
+    a(f"#   file: {design.module_name}_model.py")
+    a(f"#   class: {design.module_name.capitalize()}Model")
+    a("#   params: {}")
 
     # Model
     a("# Reference model (optional):")

@@ -196,24 +196,55 @@ class DesignInfo:
         return json.dumps(self.to_dict(), ensure_ascii=False, indent=indent)
 
 
+@dataclass
+class CaseResult:
+    """1 テストケース（シナリオ cases[] の要素）の実行結果 (§13.2)。"""
+    name: str = ""
+    status: str = "PASS"           # PASS | FAIL | ERROR | SKIP
+    seed: int = 0
+    elapsed_ms: float = 0.0        # §13.1: このケースの実時間
+    checks: List[CheckInfo] = field(default_factory=list)
+    log: List[str] = field(default_factory=list)
+    errors: List[ErrorInfo] = field(default_factory=list)
+    cancelled: bool = False
+    truncated_at: Optional[int] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "name": self.name,
+            "status": self.status,
+            "seed": self.seed,
+            "elapsed_ms": self.elapsed_ms,
+            "cancelled": self.cancelled,
+            "truncated_at": self.truncated_at,
+            "checks": [c.to_dict() for c in self.checks],
+            "log": self.log,
+            "errors": [e.to_dict() for e in self.errors],
+        }
+
+
 # ---------------------------------------------------------------------------
 # Main test result (§2.2)
 # ---------------------------------------------------------------------------
 
 @dataclass
 class TestResult:
-    """Return value of test() / `deltasim test --json` (§2.2, schema v2)."""
+    """Return value of test() / `deltasim test --json` (§2.2, schema v2).
+
+    §13.1: elapsed_ms は全体の実時間（summary.elapsed_ms と同値）。後方互換で残すが非推奨。
+           ケースごとの実時間は cases[].elapsed_ms を参照。
+    §13.2: cases[] に各テストケースの結果を格納。
+    """
     schema_version: str = SCHEMA_VERSION
     module: str = ""
     status: str = "PASS"        # PASS | FAIL | ERROR | SKIP
     seed: int = 0
-    # §12.5: ケースの elapsed_ms は checks 内。全体はここに入れる
-    elapsed_ms: float = 0.0     # 全体の実時間 (≡ summary.elapsed_ms)
+    elapsed_ms: float = 0.0     # §13.1: 全体実時間 (≡ summary.elapsed_ms, 非推奨)
     log: List[str] = field(default_factory=list)
-    checks: List[CheckInfo] = field(default_factory=list)
+    checks: List[CheckInfo] = field(default_factory=list)   # 全ケース集計 (compat)
+    cases: List[CaseResult] = field(default_factory=list)   # §13.2 per-case details
     errors: List[ErrorInfo] = field(default_factory=list)
     cancelled: bool = False
-    # §12.3: 記録停止時刻 (ns)
     truncated_at: Optional[int] = None
 
     @property
@@ -234,13 +265,14 @@ class TestResult:
             "module": self.module,
             "status": self.status,
             "seed": self.seed,
-            # §12.5: summary.elapsed_ms
+            # §13.1: elapsed_ms = total (非推奨、summary.elapsed_ms と同値)
+            "elapsed_ms": self.elapsed_ms,
             "summary": {"elapsed_ms": self.elapsed_ms},
-            "elapsed_ms": self.elapsed_ms,   # backward compat
             "cancelled": self.cancelled,
             "truncated_at": self.truncated_at,
             "log": self.log,
-            "checks": [c.to_dict() for c in self.checks],
+            "cases": [c.to_dict() for c in self.cases],
+            "checks": [c.to_dict() for c in self.checks],   # aggregate, backward compat
             "errors": [e.to_dict() for e in self.errors],
         }
 

@@ -278,7 +278,7 @@ class TestSummaryElapsedMs:
             "summary.elapsed_ms が 0 以下"
 
     def test_summary_elapsed_ms_matches_top_level(self):
-        """summary.elapsed_ms が top-level elapsed_ms と一致すること"""
+        """summary.elapsed_ms >= elapsed_ms であること（§12.5: total >= case sim time）"""
         import deltasim.api as ds
 
         result = ds.test(
@@ -286,9 +286,10 @@ class TestSummaryElapsedMs:
             spec=os.path.join(EXAMPLES, "counter_spec.yaml"),
         )
         d = result.to_dict()
-        assert d["summary"]["elapsed_ms"] == d["elapsed_ms"], (
-            f"summary.elapsed_ms={d['summary']['elapsed_ms']} ≠ "
-            f"elapsed_ms={d['elapsed_ms']}"
+        # §12.5: summary.elapsed_ms = total (parse+elab+sim) >= elapsed_ms (sim only)
+        assert d["summary"]["elapsed_ms"] >= d["elapsed_ms"], (
+            f"summary.elapsed_ms={d['summary']['elapsed_ms']} < "
+            f"elapsed_ms={d['elapsed_ms']}: total should be >= case sim time"
         )
 
     def test_summary_elapsed_ms_in_json_file(self, tmp_path):

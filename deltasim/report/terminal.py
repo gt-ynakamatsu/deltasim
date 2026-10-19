@@ -54,11 +54,11 @@ def print_results(
 
 
 def print_results_v2(
-    result: TestResult,
+    result: "TestResult",
     verbose: bool = False,
     color: bool = True,
 ) -> None:
-    """Print a summary from a TestResult (M5 API)."""
+    """Print a summary from a TestResult (M5+ API). §13.2 multi-case aware."""
     P = _PASS if color else _PASS_PLAIN
     F = _FAIL if color else _FAIL_PLAIN
     E = ("\033[33mERROR\033[0m" if color else "ERROR")
@@ -74,25 +74,44 @@ def print_results_v2(
             loc = f"{err.file}:{err.line}" if err.file else ""
             print(f"  [{sev}] {err.code}: {loc} {err.message}")
 
-    if verbose or result.status != "PASS":
-        for ci in result.checks:
-            st = STATUS_CLR.get(ci.status, ci.status)
-            src = f"[{ci.source}]" if ci.source != "spec" else ""
-            msg = f"  → {ci.message}" if ci.message and ci.status != "PASS" else ""
-            print(
-                f"  {st} cycle={ci.cycle:4d}  {ci.signal}{src}: "
-                f"expected={ci.expected!r}  actual={ci.actual!r}{msg}"
-            )
+    # Print per-case details if multi-case, or flat if single-case
+    if result.cases:
+        for cr in result.cases:
+            case_st = STATUS_CLR.get(cr.status, cr.status)
+            print(f"  [{case_st}] case: {cr.name}  seed={cr.seed}  elapsed={cr.elapsed_ms:.0f}ms")
+            if verbose or cr.status != "PASS":
+                for ci in cr.checks:
+                    st = STATUS_CLR.get(ci.status, ci.status)
+                    src = f"[{ci.source}]" if ci.source != "spec" else ""
+                    msg = f"  → {ci.message}" if ci.message and ci.status != "PASS" else ""
+                    print(
+                        f"    {st} cycle={ci.cycle:4d}  {ci.signal}{src}: "
+                        f"expected={ci.expected!r}  actual={ci.actual!r}{msg}"
+                    )
+    else:
+        # Legacy flat display (no cases[])
+        if verbose or result.status != "PASS":
+            for ci in result.checks:
+                st = STATUS_CLR.get(ci.status, ci.status)
+                src = f"[{ci.source}]" if ci.source != "spec" else ""
+                msg = f"  → {ci.message}" if ci.message and ci.status != "PASS" else ""
+                print(
+                    f"  {st} cycle={ci.cycle:4d}  {ci.signal}{src}: "
+                    f"expected={ci.expected!r}  actual={ci.actual!r}{msg}"
+                )
 
-    total = len(result.checks)
+    total_checks = len(result.checks)
     n_pass = result.n_pass
     n_fail = result.n_fail
     print(f"{'='*60}")
-    if total == 0 and not result.errors:
-        print("  (expected-value チェックなし)")
+    if total_checks == 0 and not result.errors:
+        n_cases = len(result.cases)
+        print(f"  (チェックなし" + (f"、{n_cases} ケース" if n_cases else "") + ")")
     else:
-        print(f"  {n_pass}/{total} PASS  {n_fail}/{total} FAIL"
-              f"  elapsed={result.elapsed_ms:.0f}ms")
+        print(
+            f"  {n_pass}/{total_checks} PASS  {n_fail}/{total_checks} FAIL"
+            f"  elapsed={result.elapsed_ms:.0f}ms"
+        )
         print(f"  Overall: {STATUS_CLR.get(result.status, result.status)}")
     if result.cancelled:
         print("  [キャンセルされました]")
