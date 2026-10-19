@@ -60,16 +60,42 @@ from deltasim.parser.ast_nodes import (
 )
 
 
-MAX_DELTA = 1000   # delta-cycle convergence limit
-MAX_FOREVER_TICKS = 10_000  # safety limit on forever-loop iterations
+MAX_DELTA = 10_000  # default delta-cycle convergence limit (§0.2.1 E_DELTA_LIMIT)
+MAX_FOREVER_TICKS = 1_000_000  # default loop iteration limit (§0.2.1 E_LOOP_LIMIT)
 
 
 # ---------------------------------------------------------------------------
-# SimError
+# SimError — generic simulation error
 # ---------------------------------------------------------------------------
 
 class SimError(Exception):
     pass
+
+
+class DeltaLimitError(SimError):
+    """Raised when delta-cycle convergence exceeds max_delta (E_DELTA_LIMIT)."""
+    def __init__(self, time_ns: int, signal_hint: str = "", max_delta: int = MAX_DELTA):
+        self.time_ns = time_ns
+        self.signal_hint = signal_hint
+        self.max_delta = max_delta
+        hint = f"（変化し続けている信号: {signal_hint}）" if signal_hint else ""
+        super().__init__(
+            f"E_DELTA_LIMIT: {time_ns}ns でデルタサイクルが {max_delta} 回を超えました{hint}"
+        )
+
+
+class LoopLimitError(SimError):
+    """Raised when a loop body executes more than max_loop times (E_LOOP_LIMIT)."""
+    def __init__(self, time_ns: int, loop_kind: str = "loop", location: str = "",
+                 max_loop: int = MAX_FOREVER_TICKS):
+        self.time_ns = time_ns
+        self.loop_kind = loop_kind
+        self.location = location
+        self.max_loop = max_loop
+        loc = f" ({location})" if location else ""
+        super().__init__(
+            f"E_LOOP_LIMIT: {time_ns}ns の {loop_kind}{loc} が {max_loop} 回を超えました"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -423,11 +449,15 @@ class _Executor:
         widths: Dict[str, int],
         params: Dict[str, int],
         ctx: Optional[EvalContext] = None,
+        max_loop: int = MAX_FOREVER_TICKS,
+        time_ns: int = 0,
     ):
         self.signals = dict(signals)
         self.widths = widths
         self.params = params
         self.ctx = ctx or _EMPTY_CTX
+        self.max_loop = max_loop
+        self.time_ns = time_ns
         # NBA items: (name, val) for signals, (arr_name, idx, val) for arrays
         self.nba_queue: List[tuple] = []
         self.display_log: List[str] = []
@@ -502,8 +532,8 @@ class _Executor:
                 self.execute(stmt.body)
                 self.execute(stmt.update)
                 iterations += 1
-                if iterations > 100_000:
-                    raise SimError("for loop exceeded 100k iterations")
+                if iterations > self.max_loop:
+                    raise LoopLimitError(self.time_ns, "for loop", max_loop=self.max_loop)
 
         elif isinstance(stmt, WhileStmt):
             iterations = 0
@@ -513,8 +543,8 @@ class _Executor:
                     break
                 self.execute(stmt.body)
                 iterations += 1
-                if iterations > 100_000:
-                    raise SimError("while loop exceeded 100k iterations")
+                if iterations > self.max_loop:
+                    raise LoopLimitError(self.time_ns, "while loop", max_loop=self.max_loop)
 
         # TB statements (silently ignored in synthesizable executor)
         elif isinstance(stmt, (TimeDelay, ForeverStmt, RepeatStmt,
@@ -588,8 +618,8 @@ def _exec_initial_gen(stmt, engine: "SimEngine"):
         while True:
             yield from _exec_initial_gen(stmt.body, engine)
             ticks += 1
-            if ticks > MAX_FOREVER_TICKS:
-                raise SimError("forever loop safety limit exceeded")
+            if ticks > engine.max_loop:
+                raise LoopLimitError(engine._time, "forever loop", max_loop=engine.max_loop)
 
     elif isinstance(stmt, RepeatStmt):
         n = eval_val(stmt.count, engine.signals, engine._widths, engine._params)
@@ -610,8 +640,8 @@ def _exec_initial_gen(stmt, engine: "SimEngine"):
         while eval_val(stmt.cond, engine.signals, engine._widths, engine._params):
             yield from _exec_initial_gen(stmt.body, engine)
             iters += 1
-            if iters > MAX_FOREVER_TICKS:
-                raise SimError("while loop safety limit exceeded")
+            if iters > engine.max_loop:
+                raise LoopLimitError(engine._time, "while loop", max_loop=engine.max_loop)
 
     elif isinstance(stmt, ForStmt):
         yield from _exec_initial_gen(stmt.init, engine)
@@ -620,8 +650,8 @@ def _exec_initial_gen(stmt, engine: "SimEngine"):
             yield from _exec_initial_gen(stmt.body, engine)
             yield from _exec_initial_gen(stmt.update, engine)
             iters += 1
-            if iters > MAX_FOREVER_TICKS:
-                raise SimError("for loop safety limit exceeded")
+            if iters > engine.max_loop:
+                raise LoopLimitError(engine._time, "for loop", max_loop=engine.max_loop)
 
     elif isinstance(stmt, BlockingAssign):
         old_val = engine.signals.get(_lhs_name(stmt.lhs), 0)
@@ -879,11 +909,15 @@ class SimEngine:
         half_period_ns: int = 5,
         reset_cycles: int = 10,
         verbose: bool = False,
+        max_delta: int = MAX_DELTA,
+        max_loop: int = MAX_FOREVER_TICKS,
     ):
         self.design = design
         self.half_period = half_period_ns
         self.reset_cycles = reset_cycles
         self.verbose = verbose
+        self.max_delta = max_delta
+        self.max_loop = max_loop
 
         self._widths: Dict[str, int] = {
             name: info.width for name, info in design.signals.items()
@@ -1109,7 +1143,8 @@ class SimEngine:
         nba: List[Tuple[str, int]] = []
         for proc in self.design.seq_procs:
             if self._is_triggered(proc.sensitivity, sig_name, old_val, new_val):
-                ex = _Executor(self.signals, self._widths, self._params, self._ctx)
+                ex = _Executor(self.signals, self._widths, self._params, self._ctx,
+                               max_loop=self.max_loop, time_ns=self._time)
                 try:
                     ex.execute(proc.body)
                 except _FinishSignal:
@@ -1171,7 +1206,8 @@ class SimEngine:
     # ------------------------------------------------------------------
 
     def _eval_comb_loop(self) -> None:
-        for _ in range(MAX_DELTA):
+        prev_signals: Optional[Dict[str, int]] = None
+        for _ in range(self.max_delta):
             changed = False
 
             for proc in self.design.assign_procs:
@@ -1179,7 +1215,8 @@ class SimEngine:
                 changed |= _assign_to_lhs(proc.lhs, v, w, self.signals, self._widths, self._ctx)
 
             for proc in self.design.comb_procs:
-                ex = _Executor(self.signals, self._widths, self._params, self._ctx)
+                ex = _Executor(self.signals, self._widths, self._params, self._ctx,
+                               max_loop=self.max_loop, time_ns=self._time)
                 try:
                     ex.execute(proc.body)
                 except _FinishSignal:
@@ -1197,10 +1234,22 @@ class SimEngine:
 
             if not changed:
                 break
+            prev_signals = dict(self.signals)
         else:
-            raise SimError(
-                f"Combinational loop: did not converge in {MAX_DELTA} delta cycles"
-            )
+            # Find a signal that keeps changing for a helpful hint
+            hint = ""
+            if prev_signals is not None:
+                # Run one more iteration to detect what changed
+                for proc in self.design.assign_procs:
+                    v, w = eval_expr(proc.rhs, self.signals, self._widths,
+                                     self._params, self._ctx)
+                    tmp: Dict[str, int] = dict(self.signals)
+                    _assign_to_lhs(proc.lhs, v, w, tmp, self._widths, self._ctx)
+                    changed_sigs = [n for n in tmp if tmp[n] != prev_signals.get(n)]
+                    if changed_sigs:
+                        hint = changed_sigs[0]
+                        break
+            raise DeltaLimitError(self._time, signal_hint=hint, max_delta=self.max_delta)
 
     # ------------------------------------------------------------------
     # Internal: write a signal value with masking

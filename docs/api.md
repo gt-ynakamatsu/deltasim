@@ -935,3 +935,59 @@ cases:
 | `deltasim --version` | `deltasim.__version__` を表示 |
 | `TestResult.to_dict()["deltasim_version"]` | `deltasim.__version__` と同値 |
 
+---
+
+## v0.2.1 変更点
+
+### ANSI 複数ポート名宣言
+
+IEEE 1800 の ANSI スタイルで、1つの方向・型・幅の後に複数の名前を並べる書き方を受け付けます。
+
+```systemverilog
+module dff(input logic clk, rst, d, output logic q);
+  always_ff @(posedge clk) if (!rst) q <= 0; else q <= d;
+endmodule
+```
+
+後続の名前は直前の方向・型・幅を引き継ぎます。複数行にまたがる書き方も動作します。
+
+### 無限ループ対策（`E_DELTA_LIMIT` / `E_LOOP_LIMIT`）
+
+#### `E_DELTA_LIMIT` — 組み合わせループ検出
+
+`assign y = ~y;` のように収束しない組み合わせ論理が delta サイクル上限を超えると `E_DELTA_LIMIT` エラーになります。
+
+| 項目 | 内容 |
+|------|------|
+| デフォルト上限 | 10,000 delta サイクル |
+| CLI オプション | `--max-delta N` |
+| 公開 API 引数 | `max_delta=N`（`test()` の引数） |
+| エラーコード | `E_DELTA_LIMIT` |
+| message 例 | `E_DELTA_LIMIT: 0ns でデルタサイクルが 5 回を超えました（変化し続けている信号: y）` |
+
+#### `E_LOOP_LIMIT` — 無限ループ検出
+
+`while (1)`、`for (i = 0; 1; ...)` などのループが反復上限を超えると `E_LOOP_LIMIT` エラーになります。
+
+| 項目 | 内容 |
+|------|------|
+| デフォルト上限 | 1,000,000 反復/ループ実行 |
+| CLI オプション | `--max-loop N` |
+| 公開 API 引数 | `max_loop=N`（`test()` の引数） |
+| エラーコード | `E_LOOP_LIMIT` |
+| message 例 | `E_LOOP_LIMIT: 5ns の for loop が 100 回を超えました` |
+
+#### エラー時の動作
+
+- `status = "ERROR"`, `errors[]` に `code` と `message` を含む `ErrorInfo` が入ります。
+- 该当ケース (`cases[].status`) も `"ERROR"` になり `cases[].errors[]` にも入ります。
+- トップレベル `errors[]` にも伝播します。
+- **他のケースは続行します**（最初のエラーケースで中断しません）。
+- VCD はエラー発生時点までを正しく閉じます。
+
+#### `--json` 時の常時出力
+
+`deltasim test --json path.json` を付けた場合、想定外の例外（`RecursionError` 含む）でも必ず JSON を出力します。想定外例外のコードは `E_INTERNAL`、`message` に例外の型と内容、トレースバックは `stderr` に出力されます。
+
+`schema_version` は `"2"` のまま変わりません。
+
