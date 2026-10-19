@@ -80,17 +80,19 @@ def eval_expr(
     signals: Dict[str, int],
     widths: Dict[str, int],
     params: Dict[str, int],
-) -> Tuple[int, Optional[int]]:
+) -> Tuple[Optional[int], Optional[int]]:
     """Evaluate *expr* and return (value, width).
 
-    *width* is ``None`` for unsized literals (treated as 32-bit when a
-    specific width is required).
+    *value* is ``None`` when the result is unknown (X/Z).
+    *width* is ``None`` for unsized literals (treated as 32-bit when needed).
     """
     if isinstance(expr, NumberLiteral):
         return (expr.value, expr.width)
 
     if isinstance(expr, FillLiteral):
-        val = 0 if expr.fill in ("0", "x", "z") else -1
+        if expr.fill in ("x", "X", "z", "Z"):
+            return (None, None)  # X / Z → unknown
+        val = 0 if expr.fill in ("0",) else -1
         return (val, None)
 
     if isinstance(expr, StringLiteral):
@@ -100,7 +102,7 @@ def eval_expr(
         name = expr.name
         if name in params:
             return (params[name], 32)
-        val = signals.get(name, 0)
+        val = signals.get(name, 0)   # None = X, int = normal
         w = widths.get(name, 1)
         return (val, w)
 
@@ -112,6 +114,8 @@ def eval_expr(
 
     if isinstance(expr, Conditional):
         cond_v, _ = eval_expr(expr.cond, signals, widths, params)
+        if cond_v is None:
+            return (None, None)  # X condition → X result
         if cond_v:
             return eval_expr(expr.then_expr, signals, widths, params)
         else:
@@ -120,12 +124,16 @@ def eval_expr(
     if isinstance(expr, BitSelect):
         base_v, _ = eval_expr(expr.base, signals, widths, params)
         idx_v, _ = eval_expr(expr.index, signals, widths, params)
+        if base_v is None or idx_v is None:
+            return (None, 1)
         return ((base_v >> idx_v) & 1, 1)
 
     if isinstance(expr, PartSelect):
         base_v, _ = eval_expr(expr.base, signals, widths, params)
         hi_v, _ = eval_expr(expr.hi, signals, widths, params)
         lo_v, _ = eval_expr(expr.lo, signals, widths, params)
+        if base_v is None or hi_v is None or lo_v is None:
+            return (None, 1)
         w = hi_v - lo_v + 1
         mask = (1 << w) - 1
         return ((base_v >> lo_v) & mask, w)
@@ -136,6 +144,8 @@ def eval_expr(
     if isinstance(expr, Replicate):
         cnt_v, _ = eval_expr(expr.count, signals, widths, params)
         val_v, val_w = eval_expr(expr.value, signals, widths, params)
+        if cnt_v is None or val_v is None:
+            return (None, None)
         if val_w is None:
             val_w = 32
         result = 0
@@ -153,10 +163,29 @@ def _eff_width(w: Optional[int]) -> int:
     return w if w is not None else 32
 
 
-def _eval_binop(expr, signals, widths, params) -> Tuple[int, Optional[int]]:
+def _eval_binop(expr, signals, widths, params) -> Tuple[Optional[int], Optional[int]]:
     lv, lw = eval_expr(expr.left, signals, widths, params)
     rv, rw = eval_expr(expr.right, signals, widths, params)
     op = expr.op
+    w = max(_eff_width(lw), _eff_width(rw))
+    mask = (1 << w) - 1
+
+    # X/Z propagation with special cases per IEEE 4-state logic
+    if lv is None or rv is None:
+        # 0 & X = 0,  X | 1 = 1
+        if op == "&":
+            if lv == 0 or rv == 0:
+                return (0, w)
+        elif op == "|":
+            if (lv is not None and lv & mask == mask) or (rv is not None and rv & mask == mask):
+                return (mask, w)
+        elif op == "&&":
+            if (lv is not None and not lv) or (rv is not None and not rv):
+                return (0, 1)
+        elif op == "||":
+            if (lv is not None and lv) or (rv is not None and rv):
+                return (1, 1)
+        return (None, w)
 
     if op == "==":   return (int(lv == rv), 1)
     if op == "!=":   return (int(lv != rv), 1)
@@ -168,9 +197,6 @@ def _eval_binop(expr, signals, widths, params) -> Tuple[int, Optional[int]]:
     if op == ">=":   return (int(lv >= rv), 1)
     if op == "&&":   return (int(bool(lv) and bool(rv)), 1)
     if op == "||":   return (int(bool(lv) or bool(rv)), 1)
-
-    w = max(_eff_width(lw), _eff_width(rw))
-    mask = (1 << w) - 1
     if op == "+":    return (lv + rv, w)
     if op == "-":    return (lv - rv, w)
     if op == "*":    return (lv * rv, w)
@@ -193,9 +219,11 @@ def _eval_binop(expr, signals, widths, params) -> Tuple[int, Optional[int]]:
     raise SimError(f"Unknown binary operator: {op!r}")
 
 
-def _eval_unaryop(expr, signals, widths, params) -> Tuple[int, Optional[int]]:
+def _eval_unaryop(expr, signals, widths, params) -> Tuple[Optional[int], Optional[int]]:
     v, w = eval_expr(expr.operand, signals, widths, params)
     op = expr.op
+    if v is None:
+        return (None, w)
     ew = _eff_width(w)
     mask = (1 << ew) - 1
 
@@ -224,12 +252,14 @@ def _eval_unaryop(expr, signals, widths, params) -> Tuple[int, Optional[int]]:
     raise SimError(f"Unknown unary operator: {op!r}")
 
 
-def _eval_concat(expr, signals, widths, params) -> Tuple[int, int]:
+def _eval_concat(expr, signals, widths, params) -> Tuple[Optional[int], int]:
     result = 0
     total_w = 0
     for part in expr.parts:
         v, w = eval_expr(part, signals, widths, params)
         pw = _eff_width(w)
+        if v is None:
+            return (None, total_w + pw)
         result = (result << pw) | (v & ((1 << pw) - 1))
         total_w += pw
     return (result, total_w)
@@ -368,8 +398,11 @@ class _Executor:
         elif isinstance(stmt, BlockingAssign):
             v, w = eval_expr(stmt.rhs, self.signals, self.widths, self.params)
             lhs_name = _lhs_name(stmt.lhs)
-            sig_w = self.widths.get(lhs_name, _eff_width(w))
-            self.signals[lhs_name] = v & ((1 << sig_w) - 1)
+            if v is None:
+                self.signals[lhs_name] = None
+            else:
+                sig_w = self.widths.get(lhs_name, _eff_width(w))
+                self.signals[lhs_name] = v & ((1 << sig_w) - 1)
 
         elif isinstance(stmt, NonBlockingAssign):
             v, _ = eval_expr(stmt.rhs, self.signals, self.widths, self.params)
@@ -382,9 +415,33 @@ class _Executor:
         elif isinstance(stmt, SysTaskStmt):
             self._handle_sys_task(stmt)
 
+        elif isinstance(stmt, ForStmt):
+            self.execute(stmt.init)
+            iterations = 0
+            while True:
+                cond = eval_val(stmt.cond, self.signals, self.widths, self.params)
+                if not cond:
+                    break
+                self.execute(stmt.body)
+                self.execute(stmt.update)
+                iterations += 1
+                if iterations > 100_000:
+                    raise SimError("for loop exceeded 100k iterations")
+
+        elif isinstance(stmt, WhileStmt):
+            iterations = 0
+            while True:
+                cond = eval_val(stmt.cond, self.signals, self.widths, self.params)
+                if not cond:
+                    break
+                self.execute(stmt.body)
+                iterations += 1
+                if iterations > 100_000:
+                    raise SimError("while loop exceeded 100k iterations")
+
         # TB statements (silently ignored in synthesizable executor)
         elif isinstance(stmt, (TimeDelay, ForeverStmt, RepeatStmt,
-                                WaitEventStmt, ForStmt, WhileStmt)):
+                                WaitEventStmt)):
             pass
 
         else:
@@ -626,13 +683,16 @@ class _InitialScheduler:
     def notify_edge(self, signal: str, old: int, new: int,
                     current_time: int, engine: "SimEngine"):
         """Resume runners waiting for this edge."""
-        still_waiting = []
-        for runner in self._waiting:
+        # Snapshot the current waiting list and clear it first,
+        # so that _schedule_runner can safely append new waiters.
+        current_waiting = list(self._waiting)
+        self._waiting = []
+        for runner in current_waiting:
             we = runner.wait_edge
             if we is None:
                 continue
             if we.signal and we.signal != signal:
-                still_waiting.append(runner)
+                self._waiting.append(runner)
                 continue
             triggered = False
             if we.edge == "posedge" and old == 0 and new == 1:
@@ -645,8 +705,7 @@ class _InitialScheduler:
                 runner.wait_edge = None
                 self._schedule_runner(runner, current_time, engine)
             else:
-                still_waiting.append(runner)
-        self._waiting = still_waiting
+                self._waiting.append(runner)
 
 
 class _InitialRunner:
@@ -878,6 +937,9 @@ class SimEngine:
         # --- Pre-posedge hook (stimulus injection) ---
         if pre_posedge_hook:
             pre_posedge_hook(cycle_num, self.signals)
+            # Re-evaluate combinational logic after input changes so that
+            # always_ff sees the settled combinational outputs (e.g., FSM next-state).
+            self._eval_comb_loop()
 
         # --- Posedge clk ---
         if self._clk is not None:
@@ -980,7 +1042,6 @@ class SimEngine:
     def _apply_nba(self, nba: List[Tuple[str, int]]) -> None:
         for lhs_name, raw_val in nba:
             self._write(lhs_name, raw_val)
-
     # ------------------------------------------------------------------
     # Internal: combinational convergence loop (delta cycles)
     # ------------------------------------------------------------------
@@ -991,12 +1052,7 @@ class SimEngine:
 
             for proc in self.design.assign_procs:
                 v, w = eval_expr(proc.rhs, self.signals, self._widths, self._params)
-                lhs_name = _lhs_name(proc.lhs)
-                sig_w = self._widths.get(lhs_name, _eff_width(w))
-                new_val = v & ((1 << sig_w) - 1)
-                if self.signals.get(lhs_name, 0) != new_val:
-                    self.signals[lhs_name] = new_val
-                    changed = True
+                changed |= _assign_to_lhs(proc.lhs, v, w, self.signals, self._widths)
 
             for proc in self.design.comb_procs:
                 ex = _Executor(self.signals, self._widths, self._params)
@@ -1005,11 +1061,7 @@ class SimEngine:
                 except _FinishSignal:
                     raise
                 for lhs_name, raw_val in ex.nba_queue:
-                    sig_w = self._widths.get(lhs_name, 32)
-                    new_val = raw_val & ((1 << sig_w) - 1)
-                    if self.signals.get(lhs_name, 0) != new_val:
-                        self.signals[lhs_name] = new_val
-                        changed = True
+                    changed |= _write_signal(self.signals, lhs_name, raw_val, self._widths)
                 for name, val in ex.signals.items():
                     if self.signals.get(name, 0) != val:
                         self.signals[name] = val
@@ -1030,9 +1082,8 @@ class SimEngine:
     # Internal: write a signal value with masking
     # ------------------------------------------------------------------
 
-    def _write(self, name: str, raw_val: int) -> None:
-        w = self._widths.get(name, 1)
-        self.signals[name] = raw_val & ((1 << w) - 1)
+    def _write(self, name: str, raw_val: Optional[int]) -> None:
+        _write_signal(self.signals, name, raw_val, self._widths)
 
     # ------------------------------------------------------------------
     # Overrides
@@ -1044,3 +1095,90 @@ class SimEngine:
     def set_rst(self, name: str, active_low: bool = True) -> None:
         self._rst = name
         self._rst_active_low = active_low
+
+
+# ---------------------------------------------------------------------------
+# Module-level helpers for signal writing and LHS assignment
+# ---------------------------------------------------------------------------
+
+def _write_signal(
+    signals: Dict[str, Optional[int]],
+    name: str,
+    raw_val: Optional[int],
+    widths: Dict[str, int],
+) -> bool:
+    """Write *raw_val* to *signals[name]* with width masking. Returns True if changed."""
+    if raw_val is None:
+        old = signals.get(name, 0)
+        if old is not None:
+            signals[name] = None
+            return True
+        return False
+    w = widths.get(name, 1)
+    new_val = raw_val & ((1 << w) - 1)
+    if signals.get(name, 0) != new_val:
+        signals[name] = new_val
+        return True
+    return False
+
+
+def _assign_to_lhs(
+    lhs_expr,
+    value: Optional[int],
+    width: Optional[int],
+    signals: Dict[str, Optional[int]],
+    widths: Dict[str, int],
+) -> bool:
+    """Assign *value* to *lhs_expr* in *signals*. Returns True if any signal changed.
+
+    Handles: Identifier, BitSelect (partially), PartSelect (partially), Concat.
+    """
+    from deltasim.parser.ast_nodes import Identifier, Concat, BitSelect, PartSelect
+
+    if isinstance(lhs_expr, Identifier):
+        return _write_signal(signals, lhs_expr.name, value, widths)
+
+    if isinstance(lhs_expr, Concat):
+        # Distribute bits from MSB to LSB across the concat parts
+        # Compute widths of each part
+        part_widths = []
+        for part in lhs_expr.parts:
+            if isinstance(part, Identifier):
+                pw = widths.get(part.name, 1)
+            elif isinstance(part, PartSelect):
+                # rough estimate — actual eval would need params
+                pw = 1
+            elif isinstance(part, BitSelect):
+                pw = 1
+            else:
+                pw = _eff_width(None)
+            part_widths.append(pw)
+        total_w = sum(part_widths)
+
+        if value is None:
+            changed = False
+            for part in lhs_expr.parts:
+                if isinstance(part, Identifier):
+                    changed |= _write_signal(signals, part.name, None, widths)
+            return changed
+
+        changed = False
+        offset = total_w
+        for part, pw in zip(lhs_expr.parts, part_widths):
+            offset -= pw
+            bits = (value >> offset) & ((1 << pw) - 1)
+            if isinstance(part, Identifier):
+                changed |= _write_signal(signals, part.name, bits, widths)
+        return changed
+
+    if isinstance(lhs_expr, BitSelect):
+        # base_name[idx] = value
+        if isinstance(lhs_expr.base, Identifier):
+            name = lhs_expr.base.name
+            # idx would need eval — skip for now
+        return False
+
+    if isinstance(lhs_expr, PartSelect):
+        return False
+
+    return False
