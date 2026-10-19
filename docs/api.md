@@ -193,6 +193,21 @@ deltasim test counter.sv --spec counter_spec.yaml --json-events  # JSON Lines
 | `column` | `int` | 列番号 (0 = 不明) |
 | `severity` | `"error" \| "warning"` | 深刻度 |
 | `message` | `str` | エラーメッセージ |
+| `code` | `str` | エラーコード |
+
+### §16 エラーコード E001（パース・構文エラー）
+
+`E001` はパーサまたはレキサーが入力を解析できなかったときに発生します。
+**どんな入力でも有限の時間で終わります**（v0.2.2 で修正）。
+
+| 状況 | message の例 |
+|------|------------|
+| `endmodule` がない | `endmodule がありません（module 'foo' は 1 行目で開始）` |
+| `end` がない（begin…end ブロック） | `unexpected EOF inside begin…end block` |
+| 括弧が閉じていない | `expected ')', got 'endmodule'` |
+| module 宣言がない（空ファイル等） | `No module declaration found` |
+| 閉じていない `/* ... */` コメント | `閉じていないブロックコメント /* が EOF に達しました` |
+| 閉じていない文字列リテラル | `閉じていない文字列リテラルが EOF に達しました` |
 | `code` | `str` | エラーコード (例: `"E001"`) |
 
 ---

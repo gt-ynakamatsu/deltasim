@@ -111,9 +111,14 @@ def tokenize(source: str, filename: str = "<string>") -> List[Token]:
     
     CRLF (\\r\\n) and bare CR (\\r) are normalised to LF before tokenising,
     which ensures Windows-edited files are handled correctly.
+    §16: Unclosed block comments and unterminated string literals raise LexError.
     """
     # Normalise line endings (Windows CRLF / old Mac CR)
     source = source.replace("\r\n", "\n").replace("\r", "\n")
+
+    # §16: Pre-scan for unclosed /* comments and unterminated strings
+    _check_unclosed(source, filename)
+
     tokens: List[Token] = []
     line = 1
     line_start = 0
@@ -151,5 +156,59 @@ def tokenize(source: str, filename: str = "<string>") -> List[Token]:
             line_start = pos + text.rfind("\n") + 1
         pos = m.end()
 
-    tokens.append(Token("EOF", "", line, 0))
+    tokens.append(Token("EOF", "EOF", line, 0))
     return tokens
+
+
+def _check_unclosed(source: str, filename: str) -> None:
+    """Detect unclosed /* block comments and unterminated string literals.
+
+    Both constructs prevent the main regex from matching and would silently
+    produce garbled tokens.  Raising LexError here gives a clear E001.
+    """
+    line = 1
+    i = 0
+    n = len(source)
+    while i < n:
+        c = source[i]
+        if c == '/' and i + 1 < n and source[i + 1] == '*':
+            start_line = line
+            i += 2
+            closed = False
+            while i < n:
+                if source[i] == '\n':
+                    line += 1
+                elif source[i] == '*' and i + 1 < n and source[i + 1] == '/':
+                    i += 2
+                    closed = True
+                    break
+                i += 1
+            if not closed:
+                raise LexError(
+                    f"{filename}:{start_line}: 閉じていないブロックコメント /* が EOF に達しました"
+                )
+        elif c == '/' and i + 1 < n and source[i + 1] == '/':
+            while i < n and source[i] != '\n':
+                i += 1
+        elif c == '"':
+            start_line = line
+            i += 1
+            closed = False
+            while i < n:
+                if source[i] == '\n':
+                    line += 1
+                if source[i] == '"':
+                    i += 1
+                    closed = True
+                    break
+                if source[i] == '\\':
+                    i += 1
+                i += 1
+            if not closed:
+                raise LexError(
+                    f"{filename}:{start_line}: 閉じていない文字列リテラルが EOF に達しました"
+                )
+        else:
+            if c == '\n':
+                line += 1
+            i += 1
