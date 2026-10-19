@@ -553,81 +553,72 @@ function clearResults() {
 
 function renderResults(result) {
   const s = result.summary;
+  // §13.1: summary.elapsed_ms が推奨
+  const totalMs = s.elapsed_ms ?? 0;
+
   dom.summaryBar.innerHTML = [
     ["pass",  s.pass,  "badge-pass"],
     ["fail",  s.fail,  "badge-fail"],
     ["error", s.error, "badge-error"],
     ["skip",  s.skip,  "badge-skip"],
   ].map(([l, c, cls]) => `<span class="count-badge ${cls}">${c} ${l.toUpperCase()}</span>`).join("")
-  + (result.cancelled ? `<span class="count-badge" style="background:#2d2d44;color:#a3a3b4;">キャンセル</span>` : "");
+  + (result.cancelled ? `<span class="count-badge" style="background:#2d2d44;color:#a3a3b4;">キャンセル</span>` : "")
+  + (totalMs > 0 ? `<span style="font-size:10px;color:#8888aa;margin-left:auto;">${(totalMs/1000).toFixed(2)}s</span>` : "");
 
   dom.resultList.innerHTML = "";
 
-  // §12.2: checks をケース名単位でグループ化して表示
-  const groups = _groupChecks(result.checks ?? []);
-  const caseCount = groups.length;
+  // §13.2: cases[] ベースで表示（PR#8 で追加された per-case details）
+  const cases = result.cases ?? [];
 
-  if (caseCount === 0 && result.status === "ERROR") {
-    // パース失敗等: チェックなしでエラー表示
+  if (cases.length === 0 && result.status === "ERROR") {
+    // パース失敗等: ケースなしでエラー表示
     const card = _makeCaseCard({
       name: result.module || "error",
       status: "ERROR",
-      message: result.errors?.map(e => e.message).join("; ") ?? "エラー",
+      seed: null,
+      elapsed_ms: totalMs,
+      log: result.log ?? [],
       checks: [],
-      seed: result.seed,
-      duration_sec: (result.elapsed_ms ?? 0) / 1000,
+      errors: result.errors ?? [],
+      truncated_at: null,
+      cancelled: result.cancelled,
     });
     dom.resultList.appendChild(card);
     return;
   }
 
-  groups.forEach((grp, i) => {
-    const card = _makeCaseCard(grp);
+  cases.forEach((c, i) => {
+    const card = _makeCaseCard(c);
     dom.resultList.appendChild(card);
-    if (i === 0) selectCase(card, grp);
+    if (i === 0) selectCase(card, c);
   });
 }
 
-function _groupChecks(checks) {
-  // §12.2: checks を scenario (name の共通プレフィックス) 単位にまとめる
-  // M5 API の check name は "<signal>@cycle<N>[spec]" 形式
-  // シナリオ = spec ファイル名（全チェックが同一シナリオ）
-  if (!checks.length) return [];
-
-  const overall_status = checks.some(c => c.status === "FAIL") ? "FAIL"
-    : checks.some(c => c.status === "ERROR") ? "ERROR"
-    : "PASS";
-  const fails = checks.filter(c => c.status !== "PASS");
-
-  return [{
-    name: state.project.specFile?.path.split(/[\\/]/).pop()?.replace(/_spec\.yaml$/, "") ?? "test",
-    status: overall_status,
-    checks,
-    failures: fails,
-    seed: checks[0]?.seed ?? 0,
-    duration_sec: null,
-  }];
-}
-
-function _makeCaseCard(grp) {
+function _makeCaseCard(c) {
+  // §13.2: cases[] の要素（name/status/seed/elapsed_ms/checks/log）
   const card = document.createElement("div");
   card.className = "case-card";
-  const dur = grp.duration_sec != null ? `${grp.duration_sec.toFixed(2)}s` : "";
+  const dur = c.elapsed_ms != null ? `${(c.elapsed_ms / 1000).toFixed(3)}s` : "";
+
+  // failures: checks[] から FAIL/ERROR のものを抽出
+  const failures = (c.checks ?? []).filter(chk => chk.status !== "PASS" && chk.status !== "SKIP");
+  const errMsg   = (c.errors ?? []).map(e => e.message).join("; ");
+
   card.innerHTML = `
     <div class="case-header">
-      <div class="status-dot dot-${grp.status}"></div>
-      <div class="case-name">${escHtml(grp.name)}</div>
+      <div class="status-dot dot-${c.status}"></div>
+      <div class="case-name">${escHtml(c.name)}</div>
       <div class="case-meta">${dur}</div>
     </div>
     <div class="case-detail">
-      ${grp.seed != null ? `<div class="failure-label">シード: ${grp.seed}</div>` : ""}
-      ${grp.message ? `<div class="failure-label">${escHtml(grp.message)}</div>` : ""}
-      ${_renderFailures(grp.failures ?? [])}
-      <div class="case-actions">
-        ${grp.seed != null ? `<button class="btn btn-secondary" style="font-size:10px;padding:2px 7px;" onclick="rerunWithSeed(${grp.seed})">↺ このシードで再実行</button>` : ""}
-      </div>
+      ${c.seed != null ? `<div class="failure-label">シード: <code>${c.seed}</code></div>` : ""}
+      ${c.truncated_at != null ? `<div class="failure-label" style="color:#fb923c;">⚠ 波形上限 ${c.truncated_at}ns</div>` : ""}
+      ${c.cancelled ? `<div class="failure-label" style="color:#a3a3b4;">⚠ キャンセル</div>` : ""}
+      ${errMsg ? `<div class="failure-label" style="color:#fb923c;">${escHtml(errMsg)}</div>` : ""}
+      ${_renderFailures(failures)}
+      ${_renderCaseLog(c.log ?? [])}
     </div>`;
-  card.addEventListener("click", () => selectCase(card, grp));
+  card.addEventListener("click", () => selectCase(card, c));
   return card;
 }
 
@@ -639,18 +630,29 @@ function _renderFailures(failures) {
   ).join("") + (failures.length > 10 ? `<div class="failure-label">… 他 ${failures.length - 10} 件</div>` : "");
 }
 
-function selectCase(card, grp) {
+function _renderCaseLog(logLines) {
+  if (!logLines?.length) return "";
+  return `<div class="failure-label" style="margin-top:4px;">ログ:</div>`
+    + logLines.slice(0, 5).map(l =>
+        `<div style="font-family:monospace;font-size:10px;color:#a3a3b4;padding:0 4px;">${escHtml(l)}</div>`
+      ).join("")
+    + (logLines.length > 5 ? `<div class="failure-label">… 他 ${logLines.length - 5} 行</div>` : "");
+}
+
+function selectCase(card, c) {
   document.querySelectorAll(".case-card").forEach(el => el.classList.remove("selected"));
   card.classList.add("selected");
-  state.selectedCase = grp;
+  state.selectedCase = c;
   // 波形カーソルを最初の失敗へジャンプ
-  if (grp.failures?.length > 0 && state.waveformData) {
-    state.cursorA = grp.failures[0].time_ns ?? grp.failures[0].cycle * 10;
+  const firstFail = (c.checks ?? []).find(chk => chk.status !== "PASS");
+  if (firstFail && state.waveformData) {
+    state.cursorA = firstFail.time_ns ?? (firstFail.cycle ?? 0) * 10;
     drawWaveform();
   }
 }
 
 async function rerunWithSeed(seed) {
+  if (!seed && seed !== 0) return;
   dom.seedInput.value = String(seed);
   await runTest();
 }

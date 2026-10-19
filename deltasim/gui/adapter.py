@@ -1,20 +1,24 @@
-"""GUI アダプタ層 — M5/PR#7 公開 API (deltasim.api) の薄いラッパー。
+"""GUI アダプタ層 — M5/PR#7/PR#8 公開 API (deltasim.api) の薄いラッパー。
 
-PR#7（マイルストーン6）で解消した §12 の暫定コードをすべて削除:
-  - case_done 集約バッファ → API が §12.2 準拠（シナリオ単位で1回発火）
-  - truncated_at の warning fallback → result.truncated_at フィールドを直接参照
-  - Z/X の区別 → val_to_4state が "z"/"x" を正しく返す
-  - summary.elapsed_ms → TestResult.to_dict() が summary キーを返す
+PR#8（§13 マルチケース）で追加:
+  - TestResult.cases[] (CaseResult) を使用（seed/elapsed_ms/log が per-case）
+  - トップレベル elapsed_ms は非推奨 → summary.elapsed_ms を使用
+  - API は常に TestResult を返す（None なし）
+  - YAML マルチケース書式（cases: リスト）対応
 
-残課題（reports/api.md の未決事項として管理）:
+非推奨フィールドを使用しない:
+  - result.elapsed_ms (非推奨) → result.summary.elapsed_ms を参照
+  - case_done バッファ → API が §12.2 準拠（PR#7 で解消済み）
+  - truncated_at warning fallback → case.truncated_at を直接参照
+
+残課題（docs/api.md §未決事項より管理）:
   - §未決事項 #5: Simulator.force() の NBA 抑制精度
-  - §未決事項 #6: 階層シグナルパス（$scope フラット展開のまま）
+  - §未決事項 #6: 階層シグナルパス（フラット展開のまま）
 """
 
 from __future__ import annotations
 
 import threading
-from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 
@@ -22,8 +26,7 @@ from typing import Callable, Dict, List, Optional
 # 定数
 # ---------------------------------------------------------------------------
 
-# PR#7 で SCHEMA_VERSION = "2" に更新
-SCHEMA_VERSION = "2"
+SCHEMA_VERSION = "2"  # PR#7 で更新、PR#8 で維持
 
 
 # ---------------------------------------------------------------------------
@@ -36,7 +39,6 @@ def _progress_to_sse(ev: dict, callback: Optional[Callable]) -> None:
         return
     sse = dict(ev)
     sse["event"] = sse.pop("type", "progress")
-    # total_cycles → total エイリアス（GUI が期待するフィールド名）
     if "total_cycles" in sse:
         sse["total"] = sse["total_cycles"]
     try:
@@ -92,21 +94,19 @@ def test(
     on_progress: Optional[Callable[[dict], None]] = None,
     cancel_event=None,  # threading.Event | None
 ) -> dict:
-    """テストを実行して結果 JSON を返す（M5/PR#7 公開 API 使用版）。
+    """テストを実行して結果 JSON を返す（PR#8 cases[] ベース）。
 
-    PR#7 で確定した §12 の各点:
-      §12.1 SKIP: cancelled=True 時、result.cancelled フィールドを使用
-      §12.2 case_done: API がシナリオ単位で1回発火（暫定バッファ不要）
-      §12.3 truncated_at: result.truncated_at フィールドを直接参照
-      §12.4 Z/X: val_to_4state が "z"/"x" を正しく返す（暫定コード不要）
-      §12.5 summary.elapsed_ms: TestResult.to_dict() が summary キーを返す
+    PR#8 変更点:
+      - result.cases[] を使用（per-case: name/status/seed/elapsed_ms/checks/log）
+      - summary.elapsed_ms を全体実時間として使用（top-level elapsed_ms は非推奨）
+      - API は常に TestResult を返す（None 分岐なし）
+      - seed は cases[].seed に入る（top-level result.seed はデフォルト値のまま）
     """
     import deltasim.api as ds
     from deltasim.result import CancelToken
 
     token = CancelToken()
 
-    # threading.Event → CancelToken の変換スレッド
     if cancel_event is not None:
         def _watch():
             cancel_event.wait()
@@ -127,38 +127,52 @@ def test(
         cancel=token,
     )
 
-    # summary 構築（PR#7: result.to_dict() が summary を持つ）
-    n_pass  = sum(1 for c in result.checks if c.status == "PASS")
-    n_fail  = sum(1 for c in result.checks if c.status == "FAIL")
-    n_error = sum(1 for c in result.checks if c.status == "ERROR")
-    n_skip  = sum(1 for c in result.checks if c.status == "SKIP")
-    total   = len(result.checks)
+    # §13.2: cases[] を使用（per-case details）
+    cases = [c.to_dict() for c in result.cases]
 
+    # summary: §13.1 summary.elapsed_ms が推奨
+    total_elapsed = result.summary.get("elapsed_ms", result.elapsed_ms) \
+        if hasattr(result, "summary") and isinstance(result.summary, dict) \
+        else result.elapsed_ms
+
+    # summary counts (cases ベース)
+    n_pass  = sum(1 for c in result.cases if c.status == "PASS")
+    n_fail  = sum(1 for c in result.cases if c.status == "FAIL")
+    n_error = sum(1 for c in result.cases if c.status == "ERROR")
+    n_skip  = sum(1 for c in result.cases if c.status == "SKIP")
+    total   = len(result.cases)
+
+    # エラー（パース失敗等）でケースが空の場合
     if result.status == "ERROR" and total == 0:
         n_error = 1
         total   = 1
 
     return {
-        "schema_version": result.schema_version,   # PR#7: "2"
+        "schema_version": result.schema_version,
         "module": result.module,
         "status": result.status,
-        "seed": result.seed,
-        "elapsed_ms": result.elapsed_ms,
         "cancelled": result.cancelled,
-        "checks": [c.to_dict() for c in result.checks],
-        "log": result.log,
-        "errors": [e.to_dict() for e in result.errors],
+        # §13.1: summary.elapsed_ms が推奨、トップレベルは非推奨なので含めない
         "summary": {
             "total": total,
             "pass": n_pass,
             "fail": n_fail,
             "error": n_error,
             "skip": n_skip,
-            "elapsed_ms": result.elapsed_ms,  # §12.5: 全体の実時間
+            "elapsed_ms": total_elapsed,  # §13.1 推奨フィールド
             "cancelled": result.cancelled,
         },
+        # §13.2: per-case details（name/status/seed/elapsed_ms/checks/log）
+        "cases": cases,
+        # backward compat: 集約 checks（非推奨、GUI は cases を使用）
+        "checks": [c.to_dict() for c in result.checks],
+        "log": result.log,
+        "errors": [e.to_dict() for e in result.errors],
         "vcd_path": vcd_path,
-        "truncated_at": result.truncated_at,  # §12.3: PR#7 で TestResult フィールドに昇格
+        # §12.3: truncated_at はケースごとに cases[].truncated_at で確認
+        "truncated_at": next(
+            (c.truncated_at for c in result.cases if c.truncated_at is not None), None
+        ),
     }
 
 
@@ -178,7 +192,7 @@ def run(
     on_progress: Optional[Callable[[dict], None]] = None,
     keep_changes: bool = False,
 ) -> dict:
-    """シミュレーションを実行して結果を返す（M5/PR#7 公開 API 使用版）。"""
+    """シミュレーションを実行して結果を返す（PR#8 公開 API 使用版）。"""
     import deltasim.api as ds
 
     def _progress(ev: dict) -> None:
@@ -206,7 +220,7 @@ def run(
         "cancelled": result.cancelled,
         "elapsed_ms": result.elapsed_ms,
         "errors": [e.to_dict() for e in result.errors],
-        "_run_result": result,  # SignalChangeDB アクセス用（内部）
+        "_run_result": result,
     }
 
 

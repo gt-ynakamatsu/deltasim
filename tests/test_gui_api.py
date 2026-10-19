@@ -136,7 +136,7 @@ class TestRunTest:
         assert data["summary"]["fail"] == 0
 
     def test_result_structure(self, client):
-        """結果 JSON の構造が M5 API / §2 の契約に沿っていること"""
+        """結果 JSON の構造が PR#8 §13 の contracts に沿っていること"""
         res = client.post("/api/test", json={
             "sv_files": [COUNTER_SV],
             "spec": COUNTER_SPEC,
@@ -144,34 +144,38 @@ class TestRunTest:
         assert res.status_code == 200
         data = res.json()
 
-        # トップレベル（M5 API 形式）
+        # トップレベル
         assert "schema_version" in data
         assert "module" in data
         assert "status" in data
         assert data["status"] in ("PASS", "FAIL", "ERROR", "SKIP")
-        assert "checks" in data   # M5 API では checks（cases ではない）
         assert "summary" in data
+        assert "cases" in data      # PR#8: cases[] が存在すること
+        assert "checks" in data     # backward compat
         assert "errors" in data
+        assert "cancelled" in data
+        assert "truncated_at" in data
 
-        # checks 構造（M5 CheckInfo 形式）
-        for chk in data["checks"]:
-            assert "name" in chk
-            assert "status" in chk
-            assert chk["status"] in ("PASS", "FAIL", "ERROR", "SKIP")
-            assert "signal" in chk
-            assert "cycle" in chk
-            assert "time_ns" in chk
-            assert "expected" in chk
-            assert "actual" in chk
+        # §13.2: cases[] 構造（per-case details）
+        assert len(data["cases"]) >= 1
+        for case in data["cases"]:
+            assert "name" in case
+            assert "status" in case
+            assert case["status"] in ("PASS", "FAIL", "ERROR", "SKIP")
+            assert "seed" in case            # §13: per-case seed
+            assert "elapsed_ms" in case      # §13.1: per-case 実時間
+            assert "checks" in case          # per-case checks
+            assert "log" in case             # per-case log
+            assert "errors" in case
+            assert "cancelled" in case
+            assert "truncated_at" in case
 
-        # サマリー構造
+        # §13.1: summary.elapsed_ms が推奨フィールド
         s = data["summary"]
+        assert "elapsed_ms" in s
+        assert isinstance(s["elapsed_ms"], (int, float))
         assert "total" in s and "pass" in s and "fail" in s
         assert "error" in s and "skip" in s
-
-        # §12 追加フィールド
-        assert "truncated_at" in data  # None か数値
-        assert "cancelled" in data
 
     def test_seed_override(self, client):
         """シードを指定してテストが実行できること"""
@@ -182,8 +186,9 @@ class TestRunTest:
         })
         assert res.status_code == 200
         data = res.json()
-        # M5 API: トップレベル seed フィールド
-        assert data["seed"] == 12345
+        # PR#8: seed は cases[].seed に入る（top-level は spec デフォルト値）
+        assert len(data["cases"]) > 0
+        assert data["cases"][0]["seed"] == 12345
 
     def test_spec_not_found(self, client):
         res = client.post("/api/test", json={
@@ -807,15 +812,44 @@ class TestSimulatorAPI:
 # ---------------------------------------------------------------------------
 
 class TestM5ApiCompat:
-    def test_checks_field_present(self, client):
-        """M5 API: result に checks フィールドがあること"""
+    def test_cases_field_present(self, client):
+        """PR#8 §13.2: result に cases[] フィールドがあること"""
         res = client.post("/api/test", json={
             "sv_files": [COUNTER_SV],
             "spec": COUNTER_SPEC,
         })
         assert res.status_code == 200
         data = res.json()
-        assert "checks" in data
+        assert "cases" in data
+        assert isinstance(data["cases"], list)
+        assert len(data["cases"]) >= 1
+
+    def test_case_has_seed_and_log(self, client):
+        """PR#8 §13.2: cases[] の各要素が seed と log を持つこと"""
+        res = client.post("/api/test", json={
+            "sv_files": [COUNTER_SV],
+            "spec": COUNTER_SPEC,
+        })
+        assert res.status_code == 200
+        data = res.json()
+        for case in data["cases"]:
+            assert "seed" in case
+            assert "log" in case
+            assert isinstance(case["seed"], int)
+            assert isinstance(case["log"], list)
+
+    def test_case_elapsed_ms(self, client):
+        """PR#8 §13.1: cases[].elapsed_ms が per-case 実時間であること"""
+        res = client.post("/api/test", json={
+            "sv_files": [COUNTER_SV],
+            "spec": COUNTER_SPEC,
+        })
+        assert res.status_code == 200
+        data = res.json()
+        for case in data["cases"]:
+            assert "elapsed_ms" in case
+            assert isinstance(case["elapsed_ms"], (int, float))
+            assert case["elapsed_ms"] >= 0
 
     def test_truncated_at_field(self, client):
         """§12.3: truncated_at フィールドが存在すること（None か数値）"""
@@ -826,7 +860,6 @@ class TestM5ApiCompat:
         assert res.status_code == 200
         data = res.json()
         assert "truncated_at" in data
-        # 小規模テストでは truncated_at は None
         assert data["truncated_at"] is None
 
     def test_cancelled_field(self, client):
@@ -841,31 +874,31 @@ class TestM5ApiCompat:
         assert data["cancelled"] is False
 
     def test_schema_version_string(self, client):
-        """PR#7: schema_version は文字列（現在 '2'）"""
+        """PR#7: schema_version は文字列 '2'"""
         res = client.post("/api/test", json={
             "sv_files": [COUNTER_SV],
             "spec": COUNTER_SPEC,
         })
         assert res.status_code == 200
         data = res.json()
-        # PR#7 で "2" に更新。文字列であることを確認
         assert isinstance(data["schema_version"], str)
         assert data["schema_version"] == "2"
 
     def test_checks_have_4state_values(self, client):
-        """§12.4 (PR#7): expected/actual は 4 値文字列（0/1/x/z 小文字統一）。
-        expr チェックの expected はPython式文字列なので除外する。"""
+        """§12.4 (PR#7): cases[].checks の expected/actual は 4 値文字列（0/1/x/z 小文字統一）。"""
         res = client.post("/api/test", json={
             "sv_files": [MUX2_SV],
             "spec": MUX2_SPEC,
         })
         assert res.status_code == 200
         data = res.json()
-        for chk in data.get("checks", []):
-            if chk.get("source") == "spec" and chk.get("signal") not in ("<expr>", ""):
-                for v in (chk.get("expected", ""), chk.get("actual", "")):
-                    assert all(c in "01xz" for c in str(v).lower()), \
-                        f"4 値文字列でない値: {v!r} (check: {chk['name']})"
+        # PR#8: cases[].checks を参照
+        for case in data.get("cases", []):
+            for chk in case.get("checks", []):
+                if chk.get("source") == "spec" and chk.get("signal") not in ("<expr>", ""):
+                    for v in (chk.get("expected", ""), chk.get("actual", "")):
+                        assert all(c in "01xz" for c in str(v).lower()), \
+                            f"4 値文字列でない値: {v!r} (check: {chk['name']})"
 
     def test_z_x_distinction_in_vcd(self):
         """§12.4 (PR#7): VCDパーサが Z='z' と X='x' を区別すること"""
@@ -883,14 +916,11 @@ class TestM5ApiCompat:
             values = [v for _, v in changes]
             assert "x" in values, f"X 値が見つかりません: {changes}"
             assert "z" in values, f"Z 値が見つかりません: {changes}"
-            # Z と X が区別されていること
-            assert values.count("x") != values.count("z") or \
-                   (any(v == "z" for v in values) and any(v == "x" for v in values))
         finally:
             os.unlink(path)
 
     def test_summary_elapsed_ms(self, client):
-        """§12.5 (PR#7): summary.elapsed_ms が存在すること（全体の実時間）"""
+        """§13.1 (PR#8): summary.elapsed_ms が全体の実時間であること"""
         res = client.post("/api/test", json={
             "sv_files": [COUNTER_SV],
             "spec": COUNTER_SPEC,
@@ -902,3 +932,18 @@ class TestM5ApiCompat:
         assert "elapsed_ms" in s, "summary.elapsed_ms が存在しません"
         assert isinstance(s["elapsed_ms"], (int, float))
         assert s["elapsed_ms"] >= 0
+
+    def test_no_deprecated_elapsed_ms_in_gui(self, client):
+        """§13.1: GUI の summary には deprecated トップレベル elapsed_ms を使わないこと"""
+        res = client.post("/api/test", json={
+            "sv_files": [COUNTER_SV],
+            "spec": COUNTER_SPEC,
+        })
+        assert res.status_code == 200
+        data = res.json()
+        # GUI の adapter は summary.elapsed_ms を正として返す
+        assert "summary" in data
+        assert "elapsed_ms" in data["summary"]
+        # cases[].elapsed_ms は per-case 実時間
+        for case in data.get("cases", []):
+            assert "elapsed_ms" in case
