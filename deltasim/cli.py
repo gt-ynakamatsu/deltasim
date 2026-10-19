@@ -248,6 +248,73 @@ def test_cmd(sv_files, top, spec, params, junit, vcd, verbose, no_color):
 
 
 # ---------------------------------------------------------------------------
+# `gui` subcommand
+# ---------------------------------------------------------------------------
+
+@main.command("gui")
+@click.option("--host", default="127.0.0.1", show_default=True,
+              help="バインドホスト（デフォルト: 127.0.0.1 のみ）")
+@click.option("--port", "-p", default=8765, show_default=True, type=int,
+              help="ポート番号")
+@click.option("--no-browser", is_flag=True, default=False,
+              help="ブラウザを自動起動しない")
+@click.option("--reload", is_flag=True, default=False, hidden=True,
+              help="開発用オートリロード")
+def gui_cmd(host, port, no_browser, reload):
+    """ブラウザ GUI を起動する（127.0.0.1 のみで待受）。
+
+    \b
+    必要な依存パッケージ:
+        pip install "deltasim[gui]"
+
+    Examples:\n
+        deltasim gui\n
+        deltasim gui --port 8080\n
+        deltasim gui --no-browser
+    """
+    try:
+        import uvicorn  # noqa: F401
+        from deltasim.gui.server import app  # noqa: F401
+    except ImportError:
+        click.echo(
+            "ERROR: GUI 依存パッケージがインストールされていません。\n"
+            "次のコマンドでインストールしてください:\n\n"
+            "    pip install \"deltasim[gui]\"\n",
+            err=True,
+        )
+        sys.exit(1)
+
+    url = f"http://{host}:{port}"
+    click.echo(f"[deltasim gui] 起動中: {url}", err=True)
+    click.echo("[deltasim gui] 終了するには Ctrl+C を押してください", err=True)
+
+    if not no_browser:
+        import threading
+        import webbrowser
+
+        def _open_browser():
+            import time
+            time.sleep(1.2)
+            try:
+                webbrowser.open(url)
+                click.echo(f"[deltasim gui] ブラウザを開きました: {url}", err=True)
+            except Exception as e:
+                click.echo(f"[deltasim gui] ブラウザを自動起動できませんでした: {e}", err=True)
+
+        t = threading.Thread(target=_open_browser, daemon=True)
+        t.start()
+
+    import uvicorn
+    uvicorn.run(
+        "deltasim.gui.server:app",
+        host=host,
+        port=port,
+        reload=reload,
+        log_level="warning",
+    )
+
+
+# ---------------------------------------------------------------------------
 # `parse` subcommand (debug)
 # ---------------------------------------------------------------------------
 

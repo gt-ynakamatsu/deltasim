@@ -67,10 +67,79 @@ RTL (.sv)
 ## インストール
 
 ```bash
-pip install -e ".[dev]"
+# CLI のみ（最小構成）
+pip install -e "."
+
+# CLI + GUI（ローカル Web ブラウザ UI）
+pip install -e ".[gui]"
+
+# CLI + GUI + 開発ツール
+pip install -e ".[gui,dev]"
 ```
 
-Python 3.10 以上が必要です。依存パッケージ: `click`, `pyyaml`
+Python 3.10 以上が必要です。依存パッケージ: `click`, `pyyaml`（GUI は `fastapi`, `uvicorn` が追加で必要）
+
+---
+
+## GUI の導入と起動
+
+### インストール
+
+```bash
+pip install "deltasim[gui]"
+```
+
+### 起動
+
+```bash
+# デフォルト: http://127.0.0.1:8765 で起動してブラウザを自動オープン
+deltasim gui
+
+# ポートを変更する場合
+deltasim gui --port 8080
+
+# ブラウザの自動起動を抑制する場合
+deltasim gui --no-browser
+```
+
+> **注意**: GUI は 127.0.0.1 のみで待受します。ネットワーク越しにアクセスはできません。
+
+### GUI の使い方
+
+1. ブラウザで `http://127.0.0.1:8765` を開く（自動的に開きます）
+2. サイドバーの **「サンプル読み込み」** ボタンを押してサンプルプロジェクトを選択
+3. **「▶ テスト実行」** ボタンを押してシミュレーション＋テストを実行
+4. 右ペインにテスト結果（PASS/FAIL/ERROR）が表示される
+5. 下ペインの波形ビューアに VCD 波形が表示される（クリックでカーソル、Shift+クリックでカーソル B）
+
+### GUI 機能一覧
+
+| 機能 | 状態 |
+|------|------|
+| サンプルプロジェクト読み込み | ✅ 実装済み |
+| RTL / YAML スペックのロード（`/api/load`）| ✅ 実装済み |
+| テスト実行・PASS/FAIL 表示（`/api/test`）| ✅ 実装済み |
+| Canvas 波形ビューア（クロック・カウンタ等）| ✅ 実装済み |
+| 波形ズーム / パン / 全体表示 | ✅ 実装済み |
+| 基数切替（HEX / BIN / DEC） | ✅ 実装済み |
+| デュアルカーソル・時間差表示 | ✅ 実装済み |
+| VCD 読み込み（`/api/waveform`）| ✅ 実装済み |
+| ファイルを開く（ドラッグ＆ドロップ）| ⚠️ ブラウザのセキュリティ制限のため不可（CLI 起動時のみ）|
+| RTL エディタ（表示・編集） | 🔜 M5 待ち |
+| 進捗コールバック（start/case_done/progress/finish）| 🔜 M5 公開 API 待ち |
+| キャンセルトークン（実行中の停止） | 🔜 M5 公開 API 待ち |
+| 対話デバッグ（step/force/bp） | 🔜 M5 Simulator API が必要 |
+| LLM 連携 | 🔜 M5 以降 |
+
+### GUI の依存分離
+
+```
+deltasim[gui]  →  fastapi, uvicorn[standard], httpx
+deltasim       →  click, pyyaml（GUI なしで全 CLI 機能が動作）
+```
+
+`deltasim[gui]` が未インストールの状態で `deltasim gui` を実行すると、
+インストール方法を案内するエラーメッセージが表示されます。
 
 ---
 

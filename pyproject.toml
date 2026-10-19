@@ -17,14 +17,23 @@ dependencies = [
 deltasim = "deltasim.cli:main"
 
 [project.optional-dependencies]
+gui = [
+    "fastapi>=0.100.0",
+    "uvicorn[standard]>=0.23.0",
+    "httpx>=0.24.0",
+]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
+    "httpx>=0.24.0",
 ]
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["deltasim*"]
+
+[tool.setuptools.package-data]
+deltasim = ["gui/static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
