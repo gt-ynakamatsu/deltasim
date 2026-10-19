@@ -13,45 +13,54 @@ Python のみで実装した **イベント駆動＋デルタサイクル** エ�
 RTL (.sv)
    │
    ▼
-┌──────────────────────────────────────────────────┐
-│  Parser (deltasim/parser/)                        │
-│  ・lexer.py   — 正規表現ベースのトークナイザ         │
-│  ・parser.py  — 再帰降下パーサ → AST              │
-│  ・ast_nodes.py — データクラスで定義した AST ノード  │
-└──────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│  Parser (deltasim/parser/)                                │
+│  ・lexer.py     — 正規表現ベースのトークナイザ               │
+│  ・parser.py    — 再帰降下パーサ → AST                    │
+│  ・ast_nodes.py — dataclass で定義した全 AST ノード         │
+└──────────────────────────────────────────────────────────┘
    │ Module AST
    ▼
-┌──────────────────────────────────────────────────┐
-│  Elaborator (deltasim/elab/elaborator.py)         │
-│  ・パラメータ解決（定数式を評価）                     │
-│  ・信号テーブル構築（ビット幅・方向）                  │
-│  ・プロセス分類 (SeqProc/CombProc/AssignProc)      │
-└──────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│  Elaborator (deltasim/elab/elaborator.py)                 │
+│  ・パラメータ解決（定数式を評価）                             │
+│  ・信号テーブル構築（ビット幅・方向）                          │
+│  ・プロセス分類 (SeqProc/CombProc/AssignProc/initial)      │
+└──────────────────────────────────────────────────────────┘
    │ ElabDesign
    ▼
-┌──────────────────────────────────────────────────┐
-│  SimEngine (deltasim/sim/engine.py)               │
-│  ・イベント駆動：クロック/リセットエッジで             │
-│    SeqProc (always_ff) を起動                      │
-│  ・NBA キュー：ノンブロッキング代入を一括適用          │
-│  ・デルタサイクルループ：AssignProc / CombProc が   │
-│    収束するまで繰り返す                               │
-│  ・信号履歴を history[] に保存                       │
-└──────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│  SimEngine (deltasim/sim/engine.py)                       │
+│  ・イベント駆動：クロック/リセットエッジで SeqProc を起動       │
+│  ・NBA キュー：ノンブロッキング代入を一括適用                  │
+│  ・デルタサイクルループ：収束まで繰り返す                      │
+│  ・initial ブロック：コルーチン (ジェネレータ) で並行実行       │
+│  ・pre/post-posedge フック：テストランナーが刺激/判定を注入    │
+└──────────────────────────────────────────────────────────┘
    │ SimResult + signal changes
-   ▼
-┌──────────────────────────────────────────────────┐
-│  VCDWriter (deltasim/vcd/writer.py)               │
-│  ・GTKWave で開ける IEEE-1364 VCD ファイルを出力     │
-└──────────────────────────────────────────────────┘
+   ├──────────────────────────────────────────────────────┐
+   ▼                                                       ▼
+┌──────────────────────────┐  ┌───────────────────────────┐
+│  VCDWriter               │  │  TB / Test (deltasim/tb/) │
+│  (deltasim/vcd/writer.py)│  │  ・generator.py — TB SV 生成│
+│  GTKWave 対応 VCD 出力    │  │  ・scenario.py — YAML spec │
+└──────────────────────────┘  │  ・runner.py   — テスト実行 │
+                               └───────────────────────────┘
+                                              │
+                               ┌──────────────▼────────────┐
+                               │  Report (deltasim/report/)│
+                               │  ・terminal.py — 端末出力  │
+                               │  ・junit.py    — JUnit XML │
+                               └───────────────────────────┘
 ```
 
 ### データの流れ
 
 1. **parse_file(path)** → `Module` AST
 2. **elaborate(module, overrides)** → `ElabDesign`（信号テーブル・プロセスリスト）
-3. **SimEngine(design).run(cycles)** → `SimResult`（サイクルごとの信号スナップショット）
-4. **VCDWriter.record(time, signals)** → `.vcd` ファイルに差分を書き出す
+3. **load_scenario(spec.yaml)** → `Scenario`（YAML スペック）
+4. **TestRunner(design, scenario).run()** → `TestRunResult`（チェック結果）
+5. **VCDWriter / JUnit XML** → ファイル出力
 
 ---
 
@@ -61,64 +70,129 @@ RTL (.sv)
 pip install -e ".[dev]"
 ```
 
-Python 3.10 以上が必要です。
+Python 3.10 以上が必要です。依存パッケージ: `click`, `pyyaml`
 
 ---
 
 ## 使い方
 
-### CLI
+### CLI — シミュレーション実行
 
 ```bash
-# 基本実行: 100 サイクルシミュレートして VCD を出力
+# 基本実行: 100 サイクル + VCD 出力
 deltasim run examples/counter.sv --top counter --cycles 100 --vcd out.vcd
 
 # パラメータ上書き
 deltasim run examples/counter.sv --top counter --cycles 30 --param WIDTH=4
 
-# 組み合わせ回路（クロックなし）
+# 組み合わせ回路
 deltasim run examples/mux2.sv --top mux2 --cycles 1
-
-# 詳細ログ ($display 出力を表示)
-deltasim run examples/counter.sv --top counter --cycles 50 --verbose
-
-# AST 確認 (デバッグ用)
-deltasim parse examples/counter.sv
 ```
 
-主なオプション:
+### CLI — テストベンチ自動生成
 
-| オプション | デフォルト | 説明 |
-|------------|-----------|------|
-| `--top` | 最初のモジュール | トップモジュール名 |
-| `--cycles` | 100 | シミュレーションサイクル数 |
-| `--vcd` | なし | VCD 出力ファイルパス |
-| `--reset-cycles` | 10 | リセット保持サイクル数 |
-| `--half-period` | 5 | クロック半周期 (ns) |
-| `--param NAME=VALUE` | なし | パラメータ上書き（複数指定可） |
-| `--clk` | 自動検出 | クロック信号名 |
-| `--rst` | 自動検出 | リセット信号名 |
-| `--rst-active-high` | — | リセットをアクティブ High として扱う |
+```bash
+# TB SV + YAML スペックスケルトンを生成
+deltasim gen examples/counter.sv --top counter
+
+# 出力先ディレクトリ指定
+deltasim gen examples/counter.sv --top counter --out-dir ./gen
+```
+
+### CLI — テスト実行・判定
+
+```bash
+# YAML スペックでテスト実行
+deltasim test examples/counter.sv --spec examples/counter_spec.yaml
+
+# JUnit XML も出力（CI 連携用）
+deltasim test examples/counter.sv --spec examples/counter_spec.yaml --junit report.xml
+
+# VCD も出力
+deltasim test examples/counter.sv --spec examples/counter_spec.yaml \
+    --junit report.xml --vcd out.vcd
+```
+
+終了コード: `0` = 全 PASS、`1` = 1 件以上 FAIL
 
 ### Python API
 
 ```python
 from deltasim.parser.parser import parse_file
 from deltasim.elab.elaborator import elaborate
-from deltasim.sim.engine import SimEngine
-from deltasim.vcd.writer import VCDWriter
+from deltasim.tb.scenario import load_scenario
+from deltasim.tb.runner import TestRunner
+from deltasim.report.junit import write_junit
 
-# パース → エラボレート → シミュレート
 mod    = parse_file("examples/counter.sv")
-design = elaborate(mod, param_overrides={"WIDTH": 4})
-eng    = SimEngine(design, reset_cycles=5)
+design = elaborate(mod)
+spec   = load_scenario("examples/counter_spec.yaml")
+result = TestRunner(design, spec).run()
+write_junit(result, "report.xml")
 
-with VCDWriter("out.vcd", design) as vcd:
-    vcd.record_initial(0, eng.signals)
-    eng.vcd_writer = vcd
-    result = eng.run(cycles=30)
+print(f"PASS: {result.n_pass}  FAIL: {result.n_fail}")
+```
 
-print(result.get_value("count", 10))  # cycle 10 の count 値
+---
+
+## YAML スペック形式
+
+```yaml
+version: 1
+top: counter           # モジュール名（省略可）
+
+clock:
+  signal: clk          # 省略時: ポート名から自動検出
+  period_ns: 10        # デフォルト: 10 (100 MHz)
+
+reset:
+  signal: rst_n        # 省略時: 自動検出
+  active_low: true     # デフォルト: true
+  duration_cycles: 10  # デフォルト: 10
+
+sim:
+  cycles: 30
+  seed: 42             # ランダム刺激の乱数シード
+  vcd: out.vcd         # VCD 出力パス（省略可）
+
+# 入力刺激
+inputs:
+  # 固定値 (1 サイクル)
+  - at: 15
+    set: {d: 1}
+
+  # 固定値 (サイクル範囲)
+  - at: [15, 20]
+    set: {d: 1}
+
+  # シード付きランダム (一様分布)
+  - at: [11, 30]
+    random:
+      data: {range: [0, 255]}
+
+  # 制約付きランダム (dist 重み付き分布)
+  - at: [11, 30]
+    random:
+      flag:
+        dist:
+          - {value: 0, weight: 10}
+          - {value: 1, weight: 1}
+
+# 期待値チェック
+expected:
+  # 完全一致チェック
+  - at: 11
+    check: {count: 1}
+
+  # Python 式チェック (_cycle = 現在サイクル 1-indexed)
+  - at: [11, 30]
+    expr: "count == _cycle - 10"
+
+# Python 参照モデル（省略可）
+model:
+  file: counter_model.py
+  class: CounterModel
+  params: {width: 8}
 ```
 
 ---
@@ -133,8 +207,6 @@ print(result.get_value("count", 10))  # cycle 10 の count 値
 
 **アクティブ High リセット**: `rst`, `reset`, `arst`, `srst`
 
-認識されない場合は `--clk` / `--rst` オプションで明示指定してください。
-
 ---
 
 ## サンプル RTL
@@ -145,57 +217,74 @@ print(result.get_value("count", 10))  # cycle 10 の count 値
 | `examples/shift_reg.sv` | 4 ビット SIPO シフトレジスタ（同期リセット） |
 | `examples/mux2.sv` | 2 入力 MUX（純組み合わせ回路） |
 
+| スペックファイル | 内容 |
+|----------------|------|
+| `examples/counter_spec.yaml` | counter のテストスペック（固定期待値 + 式チェック + 参照モデル） |
+| `examples/mux2_spec.yaml` | mux2 の組み合わせ回路テスト |
+| `examples/shift_reg_spec.yaml` | shift_reg のシフトパターン検証 |
+
+| 参照モデル | 内容 |
+|-----------|------|
+| `examples/counter_model.py` | CounterModel — counter.sv の Python 模倣実装 |
+
 ---
 
 ## テスト
 
 ```bash
-pytest
-# カバレッジ付き
-pytest --cov=deltasim
+pytest                      # 全テスト実行
+pytest -v                   # 詳細表示
+pytest --cov=deltasim       # カバレッジ付き
 ```
 
 ---
 
 ## 対応 SystemVerilog サブセット
 
-### 対応済み（マイルストーン 1）
+### 対応済み（マイルストーン 1 + 2）
 
-- `module` / `endmodule`（ANSI ポートスタイル）
-- `input` / `output` / `inout`
+**合成可能 RTL**
+- `module` / ANSI ポート / `parameter` / `localparam`
 - `logic` / `wire` / `reg`（内部宣言含む）
-- `parameter` / `localparam`（パラメータ付きモジュール）
 - `assign`（継続代入）
-- `always_ff @(posedge/negedge …)` / `always_comb` / `always @(…)`
+- `always_ff @(posedge/negedge …)` / `always_comb` / `always @(…)` / `always`
 - ブロッキング代入（`=`）/ ノンブロッキング代入（`<=`）
-- `if` / `else`
-- `case` / `casex` / `casez` / `endcase`
-- ビット演算子: `&`, `|`, `^`, `~`, リダクション
-- 算術演算子: `+`, `-`, `*`, `/`, `%`
-- 比較演算子: `==`, `!=`, `===`, `!==`, `<`, `>`, `<=`, `>=`
-- 論理演算子: `&&`, `||`, `!`
-- シフト: `<<`, `>>`, `<<<`, `>>>`
-- 三項演算子: `? :`
+- `if/else` / `case/casex/casez`
+- 全算術・ビット・論理・比較・シフト演算子
+- 三項演算子 `? :`
 - ビット選択 `a[i]` / パーツ選択 `a[hi:lo]`
-- 連接 `{a, b, c}` / リプリケーション `{n{a}}`
-- 特殊リテラル: `'0`, `'1`, `'x`, `'z`
-- `$display` / `$finish` / `$stop`（基本のみ）
-- VCD 出力（GTKWave 対応）
+- 連接 `{a,b,c}` / リプリケーション `{n{a}}`
+- 特殊リテラル `'0` `'1` `'x` `'z`
+- `$display` / `$finish` / `$stop`（フォーマット文字列対応）
+
+**TB / 手続き型**
+- `initial` ブロック（コルーチンで並行実行）
+- `#n` 遅延（任意タイミングのイベント）
+- `forever` / `repeat(n)` / `for` / `while`
+- `@(posedge/negedge signal)` 待機
+
+**VCD 出力**: GTKWave 対応 IEEE-1364 形式
+
+**テストベンチ自動生成**: `deltasim gen`
+
+**テスト実行・判定**:
+- YAML スペックによる固定刺激 / シード付きランダム / 制約付きランダム（range/dist）
+- Python 参照モデルとのサイクル毎比較
+- JUnit XML 出力（CI 連携用）
+- ターミナルカラー出力
 
 ### 未対応（今後のマイルストーン）
 
-- `struct` / `union` / `enum` / `typedef`
-- `interface` / `modport`
-- SystemVerilog Assertions (SVA)
-- クラス（OOP）
-- 階層インスタンス（サブモジュール）
-- `generate` / `genvar`
-- `for` / `while` ループ（always 内）
-- `initial` ブロックの実行
-- 4 値論理の厳密な X 伝搬
-- `$monitor` / `$strobe`
-- ファンクション / タスク
-- VHDL
+| 機能 | 予定マイルストーン |
+|------|----------------|
+| 階層インスタンス | M3 |
+| `struct` / `union` / `enum` / `typedef` | M3 |
+| 4 値論理の厳密な X/Z 伝搬 | M3 |
+| `generate` / `genvar` | M3 |
+| 対話デバッグ（force / examine / bp） | M4 |
+| LLM 連携 | M5 |
+| SVA / coverage | 未定 |
+| `interface` / `modport` / クラス | 未定 |
 
 ---
 

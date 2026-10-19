@@ -11,6 +11,12 @@ schedule, simplified to what's needed for synthesizable code:
   2. Apply NBA queue (delta 0)
   3. Re-evaluate AssignProcs + CombProcs until quiescent (Δ1, Δ2, …)
 
+  Initial blocks (M2)
+  ───────────────────
+  Python-generator coroutines run concurrently with the clock-driven loop.
+  Time delays (#n) are scheduled in a min-heap; @(edge) waits block until
+  the matching edge is observed.
+
 Non-blocking assignment (NBA) semantics
 ----------------------------------------
 All RHS values are captured *before* any LHS update, then applied in one
@@ -23,19 +29,30 @@ Delta cycle limit
 -----------------
 If combinational logic does not converge within MAX_DELTA iterations,
 a SimError is raised (indicates a combinational loop in the RTL).
+
+Pre/post-posedge hooks (M2)
+-----------------------------
+``run()`` accepts optional callbacks for stimulus injection and result
+checking at each clock cycle:
+
+  pre_posedge_hook(cycle_1indexed, signals)   – apply inputs
+  post_posedge_hook(cycle_1indexed, signals)  – check outputs
 """
 
 from __future__ import annotations
 
+import heapq
 import math
+import re
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from deltasim.elab.elaborator import ElabDesign, SignalInfo, SeqProc, CombProc, AssignProc
 from deltasim.parser.ast_nodes import (
     SensitivityList, SensitivityItem,
     Block, IfStmt, CaseStmt, CaseItem,
     BlockingAssign, NonBlockingAssign, NullStmt, SysTaskStmt,
+    TimeDelay, ForeverStmt, RepeatStmt, WaitEventStmt, ForStmt, WhileStmt,
     NumberLiteral, FillLiteral, StringLiteral, Identifier,
     BinOp, UnaryOp, Conditional, BitSelect, PartSelect, Concat, Replicate,
     SysFunc,
@@ -43,6 +60,8 @@ from deltasim.parser.ast_nodes import (
 
 
 MAX_DELTA = 1000   # delta-cycle convergence limit
+MAX_FOREVER_TICKS = 10_000  # safety limit on forever-loop iterations
+
 
 # ---------------------------------------------------------------------------
 # SimError
@@ -71,12 +90,10 @@ def eval_expr(
         return (expr.value, expr.width)
 
     if isinstance(expr, FillLiteral):
-        # '0 → 0,  '1 → all-ones (mask at assignment),  'x/'z → 0
         val = 0 if expr.fill in ("0", "x", "z") else -1
         return (val, None)
 
     if isinstance(expr, StringLiteral):
-        # Strings only appear as $display args; return 0 here
         return (0, None)
 
     if isinstance(expr, Identifier):
@@ -141,68 +158,38 @@ def _eval_binop(expr, signals, widths, params) -> Tuple[int, Optional[int]]:
     rv, rw = eval_expr(expr.right, signals, widths, params)
     op = expr.op
 
-    # Comparison → 1-bit result
-    if op == "==":
-        return (int(lv == rv), 1)
-    if op == "!=":
-        return (int(lv != rv), 1)
-    if op == "===":
-        return (int(lv == rv), 1)
-    if op == "!==":
-        return (int(lv != rv), 1)
-    if op == "<":
-        return (int(lv < rv), 1)
-    if op == ">":
-        return (int(lv > rv), 1)
-    if op == "<=":
-        return (int(lv <= rv), 1)
-    if op == ">=":
-        return (int(lv >= rv), 1)
+    if op == "==":   return (int(lv == rv), 1)
+    if op == "!=":   return (int(lv != rv), 1)
+    if op == "===":  return (int(lv == rv), 1)
+    if op == "!==":  return (int(lv != rv), 1)
+    if op == "<":    return (int(lv < rv), 1)
+    if op == ">":    return (int(lv > rv), 1)
+    if op == "<=":   return (int(lv <= rv), 1)
+    if op == ">=":   return (int(lv >= rv), 1)
+    if op == "&&":   return (int(bool(lv) and bool(rv)), 1)
+    if op == "||":   return (int(bool(lv) or bool(rv)), 1)
 
-    # Logical
-    if op == "&&":
-        return (int(bool(lv) and bool(rv)), 1)
-    if op == "||":
-        return (int(bool(lv) or bool(rv)), 1)
-
-    # Arithmetic / bitwise – result width = max of operands
     w = max(_eff_width(lw), _eff_width(rw))
     mask = (1 << w) - 1
-    if op == "+":
-        return (lv + rv, w)
-    if op == "-":
-        return (lv - rv, w)
-    if op == "*":
-        return (lv * rv, w)
-    if op == "/":
-        return ((lv // rv if rv != 0 else 0), w)
-    if op == "%":
-        return ((lv % rv if rv != 0 else 0), w)
-    if op == "&":
-        return (lv & rv, w)
-    if op == "|":
-        return (lv | rv, w)
-    if op == "^":
-        return (lv ^ rv, w)
-    if op in ("^~", "~^"):
-        return (~(lv ^ rv) & mask, w)
-    if op == "<<":
-        return (lv << rv, w)
-    if op == ">>":
-        return ((lv >> rv), w)
-    if op == "<<<":
-        return (lv << rv, w)
+    if op == "+":    return (lv + rv, w)
+    if op == "-":    return (lv - rv, w)
+    if op == "*":    return (lv * rv, w)
+    if op == "/":    return ((lv // rv if rv != 0 else 0), w)
+    if op == "%":    return ((lv % rv if rv != 0 else 0), w)
+    if op == "&":    return (lv & rv, w)
+    if op == "|":    return (lv | rv, w)
+    if op == "^":    return (lv ^ rv, w)
+    if op in ("^~", "~^"):  return (~(lv ^ rv) & mask, w)
+    if op == "<<":   return (lv << rv, w)
+    if op == ">>":   return ((lv >> rv), w)
+    if op == "<<<":  return (lv << rv, w)
     if op == ">>>":
-        # Arithmetic right shift – sign-extend using lw
         wl = _eff_width(lw)
         sign = (lv >> (wl - 1)) & 1
         if sign:
-            sign_ext = (-1 << wl) | lv
-            return (sign_ext >> rv, w)
+            return ((-1 << wl | lv) >> rv, w)
         return (lv >> rv, w)
-    if op == "**":
-        return (lv ** rv, w)
-
+    if op == "**":   return (lv ** rv, w)
     raise SimError(f"Unknown binary operator: {op!r}")
 
 
@@ -212,39 +199,28 @@ def _eval_unaryop(expr, signals, widths, params) -> Tuple[int, Optional[int]]:
     ew = _eff_width(w)
     mask = (1 << ew) - 1
 
-    if op == "!":
-        return (int(not v), 1)
-    if op == "~":
-        return (~v & mask, ew)
-    if op == "-":
-        return (-v, ew)
-    if op == "+":
-        return (v, ew)
-
-    # Reduction operators → 1-bit
-    if op == "&":   # AND reduction
-        return (int(v & mask == mask), 1)
-    if op == "~&":  # NAND reduction
-        return (int(v & mask != mask), 1)
-    if op == "|":   # OR reduction
-        return (int(v != 0), 1)
-    if op == "~|":  # NOR reduction
-        return (int(v == 0), 1)
-    if op == "^":   # XOR reduction (parity)
-        parity = 0
-        tmp = v & mask
-        while tmp:
-            parity ^= tmp & 1
-            tmp >>= 1
-        return (parity, 1)
-    if op in ("^~", "~^"):  # XNOR reduction
-        parity = 0
-        tmp = v & mask
-        while tmp:
-            parity ^= tmp & 1
-            tmp >>= 1
-        return (parity ^ 1, 1)
-
+    if op == "!":    return (int(not v), 1)
+    if op == "~":    return (~v & mask, ew)
+    if op == "-":    return (-v, ew)
+    if op == "+":    return (v, ew)
+    if op == "&":    return (int(v & mask == mask), 1)
+    if op == "~&":   return (int(v & mask != mask), 1)
+    if op == "|":    return (int(v != 0), 1)
+    if op == "~|":   return (int(v == 0), 1)
+    if op == "^":
+        p = 0
+        t = v & mask
+        while t:
+            p ^= t & 1
+            t >>= 1
+        return (p, 1)
+    if op in ("^~", "~^"):
+        p = 0
+        t = v & mask
+        while t:
+            p ^= t & 1
+            t >>= 1
+        return (p ^ 1, 1)
     raise SimError(f"Unknown unary operator: {op!r}")
 
 
@@ -264,18 +240,80 @@ def _eval_sysfunc(expr, signals, widths, params) -> Tuple[int, Optional[int]]:
     if name == "clog2":
         v, _ = eval_expr(expr.args[0], signals, widths, params)
         return (max(1, math.ceil(math.log2(max(v, 2)))), 32)
-    if name == "signed":
+    if name in ("signed", "unsigned"):
         return eval_expr(expr.args[0], signals, widths, params)
-    if name == "unsigned":
-        return eval_expr(expr.args[0], signals, widths, params)
-    # Unknown system function → 0
     return (0, 32)
 
 
 def eval_val(expr, signals, widths, params) -> int:
-    """Evaluate and return only the integer value."""
     v, _ = eval_expr(expr, signals, widths, params)
     return v
+
+
+# ---------------------------------------------------------------------------
+# $display / $write format string handling
+# ---------------------------------------------------------------------------
+
+def _format_display(fmt: str, args: List[int]) -> str:
+    """Very small subset of SV format specifiers."""
+    arg_idx = 0
+    out = []
+    i = 0
+    while i < len(fmt):
+        c = fmt[i]
+        if c == '%' and i + 1 < len(fmt):
+            spec = fmt[i + 1]
+            val = args[arg_idx] if arg_idx < len(args) else 0
+            arg_idx += 1
+            if spec in ('d', 'D'):
+                out.append(str(val))
+            elif spec in ('h', 'H', 'x', 'X'):
+                out.append(hex(val))
+            elif spec in ('b', 'B'):
+                out.append(bin(val))
+            elif spec in ('o', 'O'):
+                out.append(oct(val))
+            elif spec == '0':
+                # %0d / %0h etc.
+                if i + 2 < len(fmt):
+                    spec2 = fmt[i + 2]
+                    if spec2 in ('d', 'D'):
+                        out.append(str(val))
+                    elif spec2 in ('h', 'H', 'x', 'X'):
+                        out.append(hex(val)[2:])
+                    else:
+                        out.append(str(val))
+                    i += 3
+                    continue
+                out.append(str(val))
+            elif spec == 's':
+                out.append(str(val))
+            elif spec == 't':
+                out.append(str(val))
+            else:
+                out.append(f'%{spec}')
+            i += 2
+        elif c == '\\':
+            if i + 1 < len(fmt):
+                nc = fmt[i + 1]
+                if nc == 'n':
+                    out.append('\n')
+                elif nc == 't':
+                    out.append('\t')
+                else:
+                    out.append(nc)
+                i += 2
+            else:
+                out.append(c)
+                i += 1
+        else:
+            out.append(c)
+            i += 1
+    # Append remaining args
+    while arg_idx < len(args):
+        out.append(' ' + str(args[arg_idx]))
+        arg_idx += 1
+    return ''.join(out)
 
 
 # ---------------------------------------------------------------------------
@@ -291,11 +329,10 @@ class _Executor:
         widths: Dict[str, int],
         params: Dict[str, int],
     ):
-        # Local copy for blocking assignments (doesn't affect outer signals)
         self.signals = dict(signals)
         self.widths = widths
         self.params = params
-        self.nba_queue: List[Tuple[str, int]] = []  # (lhs_name, raw_value)
+        self.nba_queue: List[Tuple[str, int]] = []
         self.display_log: List[str] = []
 
     def execute(self, stmt) -> None:
@@ -332,8 +369,7 @@ class _Executor:
             v, w = eval_expr(stmt.rhs, self.signals, self.widths, self.params)
             lhs_name = _lhs_name(stmt.lhs)
             sig_w = self.widths.get(lhs_name, _eff_width(w))
-            mask = (1 << sig_w) - 1
-            self.signals[lhs_name] = v & mask
+            self.signals[lhs_name] = v & ((1 << sig_w) - 1)
 
         elif isinstance(stmt, NonBlockingAssign):
             v, _ = eval_expr(stmt.rhs, self.signals, self.widths, self.params)
@@ -346,6 +382,11 @@ class _Executor:
         elif isinstance(stmt, SysTaskStmt):
             self._handle_sys_task(stmt)
 
+        # TB statements (silently ignored in synthesizable executor)
+        elif isinstance(stmt, (TimeDelay, ForeverStmt, RepeatStmt,
+                                WaitEventStmt, ForStmt, WhileStmt)):
+            pass
+
         else:
             raise SimError(f"Unknown statement: {type(stmt).__name__}")
 
@@ -354,12 +395,16 @@ class _Executor:
         if name in ("finish", "stop"):
             raise _FinishSignal()
         if name in ("display", "write", "monitor", "strobe"):
-            parts = []
-            for arg in stmt.args:
-                v, _ = eval_expr(arg, self.signals, self.widths, self.params)
-                parts.append(str(v))
-            self.display_log.append(" ".join(parts))
-        # Other system tasks silently ignored
+            args_vals = [eval_val(a, self.signals, self.widths, self.params)
+                         for a in stmt.args]
+            if stmt.args and isinstance(stmt.args[0], StringLiteral):
+                fmt = stmt.args[0].text
+                arg_vals2 = [eval_val(a, self.signals, self.widths, self.params)
+                              for a in stmt.args[1:]]
+                line = _format_display(fmt, arg_vals2)
+            else:
+                line = " ".join(str(v) for v in args_vals)
+            self.display_log.append(line)
 
 
 class _FinishSignal(Exception):
@@ -367,12 +412,247 @@ class _FinishSignal(Exception):
 
 
 def _lhs_name(lhs) -> str:
-    """Extract the base signal name from an LHS expression."""
     if isinstance(lhs, Identifier):
         return lhs.name
     if isinstance(lhs, (BitSelect, PartSelect)):
         return _lhs_name(lhs.base)
     raise SimError(f"Unsupported LHS expression type: {type(lhs).__name__}")
+
+
+# ---------------------------------------------------------------------------
+# Initial-block coroutine executor
+# ---------------------------------------------------------------------------
+
+class _WaitEdge:
+    """Yielded by initial-block coroutines to wait for a signal edge."""
+    __slots__ = ("edge", "signal")
+
+    def __init__(self, edge: Optional[str], signal: Optional[str]):
+        self.edge = edge
+        self.signal = signal
+
+
+def _exec_initial_gen(stmt, engine: "SimEngine"):
+    """Generator coroutine for executing an initial-block statement.
+
+    Yields:
+      int  – time advance in ns (0 = continue in the same time step)
+      _WaitEdge – block until the matching edge is observed
+    """
+    if isinstance(stmt, Block):
+        for s in stmt.stmts:
+            yield from _exec_initial_gen(s, engine)
+
+    elif isinstance(stmt, TimeDelay):
+        d = eval_val(stmt.delay, engine.signals, engine._widths, engine._params)
+        yield int(max(0, d))
+        if stmt.body:
+            yield from _exec_initial_gen(stmt.body, engine)
+
+    elif isinstance(stmt, ForeverStmt):
+        ticks = 0
+        while True:
+            yield from _exec_initial_gen(stmt.body, engine)
+            ticks += 1
+            if ticks > MAX_FOREVER_TICKS:
+                raise SimError("forever loop safety limit exceeded")
+
+    elif isinstance(stmt, RepeatStmt):
+        n = eval_val(stmt.count, engine.signals, engine._widths, engine._params)
+        for _ in range(int(n)):
+            yield from _exec_initial_gen(stmt.body, engine)
+
+    elif isinstance(stmt, WaitEventStmt):
+        for item in stmt.sensitivity.items:
+            sig_name = (item.signal.name
+                        if isinstance(item.signal, Identifier)
+                        else None)
+            yield _WaitEdge(item.edge, sig_name)
+        if stmt.body:
+            yield from _exec_initial_gen(stmt.body, engine)
+
+    elif isinstance(stmt, WhileStmt):
+        iters = 0
+        while eval_val(stmt.cond, engine.signals, engine._widths, engine._params):
+            yield from _exec_initial_gen(stmt.body, engine)
+            iters += 1
+            if iters > MAX_FOREVER_TICKS:
+                raise SimError("while loop safety limit exceeded")
+
+    elif isinstance(stmt, ForStmt):
+        yield from _exec_initial_gen(stmt.init, engine)
+        iters = 0
+        while eval_val(stmt.cond, engine.signals, engine._widths, engine._params):
+            yield from _exec_initial_gen(stmt.body, engine)
+            yield from _exec_initial_gen(stmt.update, engine)
+            iters += 1
+            if iters > MAX_FOREVER_TICKS:
+                raise SimError("for loop safety limit exceeded")
+
+    elif isinstance(stmt, BlockingAssign):
+        old_val = engine.signals.get(_lhs_name(stmt.lhs), 0)
+        v, w = eval_expr(stmt.rhs, engine.signals, engine._widths, engine._params)
+        name = _lhs_name(stmt.lhs)
+        engine._write(name, v)
+        new_val = engine.signals[name]
+        if old_val != new_val:
+            # Trigger edge-sensitive sequential processes (e.g., always_ff)
+            nba = engine._collect_nba_for_edge(name, old_val, new_val)
+            engine._apply_nba(nba)
+            # Notify other initial block runners waiting for this edge
+            if engine._initial_scheduler:
+                engine._initial_scheduler.notify_edge(
+                    name, old_val, new_val, engine._time, engine
+                )
+        engine._eval_comb_loop()
+        yield 0
+
+    elif isinstance(stmt, NonBlockingAssign):
+        # In initial/TB context: treat as blocking
+        old_val = engine.signals.get(_lhs_name(stmt.lhs), 0)
+        v, _ = eval_expr(stmt.rhs, engine.signals, engine._widths, engine._params)
+        name = _lhs_name(stmt.lhs)
+        engine._write(name, v)
+        new_val = engine.signals[name]
+        if old_val != new_val:
+            nba = engine._collect_nba_for_edge(name, old_val, new_val)
+            engine._apply_nba(nba)
+            if engine._initial_scheduler:
+                engine._initial_scheduler.notify_edge(
+                    name, old_val, new_val, engine._time, engine
+                )
+        engine._eval_comb_loop()
+        yield 0
+
+    elif isinstance(stmt, IfStmt):
+        cond = eval_val(stmt.cond, engine.signals, engine._widths, engine._params)
+        if cond:
+            yield from _exec_initial_gen(stmt.then_body, engine)
+        elif stmt.else_body:
+            yield from _exec_initial_gen(stmt.else_body, engine)
+
+    elif isinstance(stmt, CaseStmt):
+        expr_v = eval_val(stmt.expr, engine.signals, engine._widths, engine._params)
+        matched = False
+        for item in stmt.items:
+            if item.exprs is None:
+                yield from _exec_initial_gen(item.body, engine)
+                break
+            for e in item.exprs:
+                if eval_val(e, engine.signals, engine._widths, engine._params) == expr_v:
+                    yield from _exec_initial_gen(item.body, engine)
+                    matched = True
+                    break
+            if matched:
+                break
+
+    elif isinstance(stmt, SysTaskStmt):
+        name = stmt.name
+        if name in ("finish", "stop"):
+            raise _FinishSignal()
+        if name in ("display", "write", "monitor", "strobe", "dumpfile", "dumpvars"):
+            args_vals = [eval_val(a, engine.signals, engine._widths, engine._params)
+                         for a in stmt.args]
+            if stmt.args and isinstance(stmt.args[0], StringLiteral):
+                fmt = stmt.args[0].text
+                line = _format_display(fmt, [
+                    eval_val(a, engine.signals, engine._widths, engine._params)
+                    for a in stmt.args[1:]
+                ])
+            else:
+                line = " ".join(str(v) for v in args_vals)
+            engine._result.log.append(line)
+            if engine.verbose:
+                print(line)
+        yield 0
+
+    elif isinstance(stmt, NullStmt):
+        pass
+
+
+@dataclass(order=True)
+class _ScheduledRunner:
+    """Min-heap entry for a scheduled initial-block runner."""
+    resume_time: int
+    runner_id: int = field(compare=True)
+    runner: object = field(compare=False)
+
+
+class _InitialScheduler:
+    """Manages all initial-block coroutines and their scheduling."""
+
+    def __init__(self):
+        self._heap: List[_ScheduledRunner] = []   # scheduled runners
+        self._waiting: List[object] = []           # edge-blocked runners
+        self._next_id = 0
+
+    def add(self, body, engine: "SimEngine", start_time: int = 0):
+        gen = _exec_initial_gen(body, engine)
+        runner = _InitialRunner(gen)
+        self._schedule_runner(runner, start_time, engine)
+
+    def _schedule_runner(self, runner, current_time: int, engine: "SimEngine"):
+        """Advance *runner* until it yields a positive delay or a WaitEdge."""
+        while True:
+            try:
+                event = next(runner.gen)
+                if isinstance(event, _WaitEdge):
+                    runner.wait_edge = event
+                    self._waiting.append(runner)
+                    return
+                elif isinstance(event, int):
+                    if event > 0:
+                        rid = self._next_id
+                        self._next_id += 1
+                        heapq.heappush(self._heap, _ScheduledRunner(
+                            current_time + event, rid, runner
+                        ))
+                        return
+                    # event == 0: keep executing
+            except StopIteration:
+                return
+            except _FinishSignal:
+                raise
+            except SimError:
+                raise
+
+    def advance_to(self, target_time: int, engine: "SimEngine"):
+        """Run all scheduled runners up to *target_time*."""
+        while self._heap and self._heap[0].resume_time <= target_time:
+            sr = heapq.heappop(self._heap)
+            sr.runner.wait_edge = None
+            self._schedule_runner(sr.runner, sr.resume_time, engine)
+
+    def notify_edge(self, signal: str, old: int, new: int,
+                    current_time: int, engine: "SimEngine"):
+        """Resume runners waiting for this edge."""
+        still_waiting = []
+        for runner in self._waiting:
+            we = runner.wait_edge
+            if we is None:
+                continue
+            if we.signal and we.signal != signal:
+                still_waiting.append(runner)
+                continue
+            triggered = False
+            if we.edge == "posedge" and old == 0 and new == 1:
+                triggered = True
+            elif we.edge == "negedge" and old == 1 and new == 0:
+                triggered = True
+            elif we.edge is None and old != new:
+                triggered = True
+            if triggered:
+                runner.wait_edge = None
+                self._schedule_runner(runner, current_time, engine)
+            else:
+                still_waiting.append(runner)
+        self._waiting = still_waiting
+
+
+class _InitialRunner:
+    def __init__(self, gen):
+        self.gen = gen
+        self.wait_edge: Optional[_WaitEdge] = None
 
 
 # ---------------------------------------------------------------------------
@@ -387,11 +667,7 @@ class SimResult:
     finished: bool = False
 
     def get_value(self, signal: str, cycle: int) -> int:
-        """Return signal value after the *cycle*-th posedge (1-indexed).
-
-        cycle=0 returns the initial state before any clock edge.
-        """
-        idx = cycle  # history[0] = initial, history[1] = after cycle 1
+        idx = cycle
         if idx < 0 or idx >= len(self.history):
             raise IndexError(f"Cycle {cycle} out of range (0..{len(self.history)-1})")
         return self.history[idx].get(signal, 0)
@@ -478,46 +754,55 @@ class SimEngine:
         }
         self._params = design.params
 
-        # Current signal state
         self.signals: Dict[str, int] = {name: 0 for name in design.signals}
-        # Previous signal state (for edge detection)
         self._prev: Dict[str, int] = dict(self.signals)
 
-        # VCD writer (injected externally)
         self.vcd_writer = None
 
-        # Auto-detect clock and reset
         self._clk: Optional[str] = _detect_clk(design.signals)
         self._rst, self._rst_active_low = _detect_rst(design.signals)
 
         self._time: int = 0
         self._result: SimResult = SimResult()
 
+        # Initial block scheduler (M2)
+        self._initial_scheduler: Optional[_InitialScheduler] = None
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
     def set_input(self, name: str, value: int) -> None:
-        """Drive an input port to *value* and propagate combinationally."""
         self._write(name, value)
         self._eval_comb_loop()
 
     def get_output(self, name: str) -> int:
-        """Read current value of a signal."""
         return self.signals.get(name, 0)
 
     def evaluate(self) -> None:
-        """Evaluate all combinational processes (no clock needed)."""
         self._eval_comb_loop()
 
     def run(
         self,
         cycles: int,
         reset_cycles: Optional[int] = None,
+        pre_posedge_hook: Optional[Callable] = None,
+        post_posedge_hook: Optional[Callable] = None,
     ) -> SimResult:
         """Run simulation for *cycles* clock cycles.
 
-        Returns a :class:`SimResult` with per-cycle signal snapshots.
+        Parameters
+        ----------
+        cycles:
+            Number of clock cycles to simulate.
+        reset_cycles:
+            Override the reset duration (cycles).
+        pre_posedge_hook:
+            Called before each posedge: ``hook(cycle_1indexed, signals)``.
+            Use this to apply stimuli.
+        post_posedge_hook:
+            Called after each posedge: ``hook(cycle_1indexed, signals_snapshot)``.
+            Use this to check expected values.
         """
         if reset_cycles is not None:
             self.reset_cycles = reset_cycles
@@ -525,10 +810,15 @@ class SimEngine:
         self._time = 0
         self._result = SimResult()
 
-        # Assert reset if reset signal found
+        # Assert reset
         if self._rst is not None:
             rst_assert_val = 0 if self._rst_active_low else 1
             self._write(self._rst, rst_assert_val)
+
+        # Set up initial-block scheduler
+        self._initial_scheduler = _InitialScheduler()
+        for ib_body in getattr(self.design, "initial_blocks", []):
+            self._initial_scheduler.add(ib_body, self)
 
         # Initial combinational evaluation
         self._eval_comb_loop()
@@ -540,7 +830,11 @@ class SimEngine:
 
         try:
             for cycle_idx in range(cycles):
-                self._run_cycle(cycle_idx)
+                self._run_cycle(
+                    cycle_idx,
+                    pre_posedge_hook=pre_posedge_hook,
+                    post_posedge_hook=post_posedge_hook,
+                )
         except _FinishSignal:
             self._result.finished = True
 
@@ -550,53 +844,91 @@ class SimEngine:
     # Internal: one full clock cycle
     # ------------------------------------------------------------------
 
-    def _run_cycle(self, cycle_idx: int) -> None:
+    def _run_cycle(
+        self,
+        cycle_idx: int,
+        pre_posedge_hook: Optional[Callable] = None,
+        post_posedge_hook: Optional[Callable] = None,
+    ) -> None:
         hp = self.half_period
+        cycle_num = cycle_idx + 1
 
-        # Update reset at the start of each cycle
+        # --- Run initial blocks up to posedge time ---
+        posedge_time = cycle_idx * 2 * hp + hp
+        if self._initial_scheduler:
+            self._initial_scheduler.advance_to(posedge_time - 1, self)
+
+        # --- Reset control ---
         if self._rst is not None:
             rst_asserted = cycle_idx < self.reset_cycles
-            if self._rst_active_low:
-                new_rst = 0 if rst_asserted else 1
-            else:
-                new_rst = 1 if rst_asserted else 0
-
+            new_rst = (0 if self._rst_active_low else 1) if rst_asserted \
+                      else (1 if self._rst_active_low else 0)
             old_rst = self.signals.get(self._rst, 0)
             if old_rst != new_rst:
                 self._prev[self._rst] = old_rst
                 self._write(self._rst, new_rst)
-                # Evaluate sequential processes triggered by rst edge
+                if self._initial_scheduler:
+                    self._initial_scheduler.notify_edge(
+                        self._rst, old_rst, new_rst, self._time, self
+                    )
                 nba = self._collect_nba_for_edge(self._rst, old_rst, new_rst)
                 self._apply_nba(nba)
                 self._eval_comb_loop()
 
-        # ---- Posedge clk ----
+        # --- Pre-posedge hook (stimulus injection) ---
+        if pre_posedge_hook:
+            pre_posedge_hook(cycle_num, self.signals)
+
+        # --- Posedge clk ---
         if self._clk is not None:
-            self._prev[self._clk] = self.signals.get(self._clk, 0)
-            self._time = cycle_idx * 2 * hp + hp
+            prev_clk = self.signals.get(self._clk, 0)
+            self._prev[self._clk] = prev_clk
+            self._time = posedge_time
             self._write(self._clk, 1)
+            if self._initial_scheduler:
+                self._initial_scheduler.notify_edge(
+                    self._clk, prev_clk, 1, self._time, self
+                )
             nba = self._collect_nba_for_edge(self._clk, 0, 1)
             self._apply_nba(nba)
             self._eval_comb_loop()
         else:
-            self._time = cycle_idx * 2 * hp + hp
+            # No clock: advance initial blocks to posedge_time (may drive clk/signals)
+            self._time = posedge_time
+            if self._initial_scheduler:
+                self._initial_scheduler.advance_to(posedge_time, self)
+            self._eval_comb_loop()
 
         if self.vcd_writer:
             self.vcd_writer.record(self._time, self.signals)
 
-        # Snapshot after posedge
+        # --- Record posedge state ---
         self._result.history.append(dict(self.signals))
 
-        # ---- Negedge clk ----
+        # --- Post-posedge hook (check values) ---
+        if post_posedge_hook:
+            post_posedge_hook(cycle_num, dict(self.signals))
+
+        # --- Run initial blocks between posedge and negedge ---
+        negedge_time = (cycle_idx + 1) * 2 * hp
+        if self._initial_scheduler:
+            self._initial_scheduler.advance_to(negedge_time - 1, self)
+
+        # --- Negedge clk ---
         if self._clk is not None:
-            self._prev[self._clk] = self.signals.get(self._clk, 0)
-            self._time = (cycle_idx + 1) * 2 * hp
+            prev_clk = self.signals.get(self._clk, 0)
+            self._prev[self._clk] = prev_clk
+            self._time = negedge_time
             self._write(self._clk, 0)
+            if self._initial_scheduler:
+                self._initial_scheduler.notify_edge(
+                    self._clk, prev_clk, 0, self._time, self
+                )
             nba = self._collect_nba_for_edge(self._clk, 1, 0)
             self._apply_nba(nba)
             self._eval_comb_loop()
         else:
-            self._time = (cycle_idx + 1) * 2 * hp
+            self._time = negedge_time
 
         if self.vcd_writer:
             self.vcd_writer.record(self._time, self.signals)
@@ -608,7 +940,6 @@ class SimEngine:
     def _collect_nba_for_edge(
         self, sig_name: str, old_val: int, new_val: int
     ) -> List[Tuple[str, int]]:
-        """Run all SeqProcs triggered by the given edge, return NBA list."""
         nba: List[Tuple[str, int]] = []
         for proc in self.design.seq_procs:
             if self._is_triggered(proc.sensitivity, sig_name, old_val, new_val):
@@ -618,11 +949,10 @@ class SimEngine:
                 except _FinishSignal:
                     raise
                 nba.extend(ex.nba_queue)
-                if ex.display_log:
-                    for line in ex.display_log:
-                        self._result.log.append(line)
-                        if self.verbose:
-                            print(line)
+                for line in ex.display_log:
+                    self._result.log.append(line)
+                    if self.verbose:
+                        print(line)
         return nba
 
     @staticmethod
@@ -630,8 +960,9 @@ class SimEngine:
         sens: SensitivityList, sig: str, old: int, new: int
     ) -> bool:
         for item in sens.items:
-            sig_name = _lhs_name(item.signal) if not isinstance(item.signal, Identifier) \
-                else item.signal.name
+            sig_name = (item.signal.name
+                        if isinstance(item.signal, Identifier)
+                        else _lhs_name(item.signal))
             if sig_name != sig:
                 continue
             if item.edge == "posedge" and old == 0 and new == 1:
@@ -655,21 +986,18 @@ class SimEngine:
     # ------------------------------------------------------------------
 
     def _eval_comb_loop(self) -> None:
-        for delta in range(MAX_DELTA):
+        for _ in range(MAX_DELTA):
             changed = False
 
-            # Continuous assigns
             for proc in self.design.assign_procs:
                 v, w = eval_expr(proc.rhs, self.signals, self._widths, self._params)
                 lhs_name = _lhs_name(proc.lhs)
                 sig_w = self._widths.get(lhs_name, _eff_width(w))
-                mask = (1 << sig_w) - 1
-                new_val = v & mask
+                new_val = v & ((1 << sig_w) - 1)
                 if self.signals.get(lhs_name, 0) != new_val:
                     self.signals[lhs_name] = new_val
                     changed = True
 
-            # always_comb processes
             for proc in self.design.comb_procs:
                 ex = _Executor(self.signals, self._widths, self._params)
                 try:
@@ -678,27 +1006,24 @@ class SimEngine:
                     raise
                 for lhs_name, raw_val in ex.nba_queue:
                     sig_w = self._widths.get(lhs_name, 32)
-                    mask = (1 << sig_w) - 1
-                    new_val = raw_val & mask
+                    new_val = raw_val & ((1 << sig_w) - 1)
                     if self.signals.get(lhs_name, 0) != new_val:
                         self.signals[lhs_name] = new_val
                         changed = True
-                # blocking assigns already updated ex.signals; mirror them
                 for name, val in ex.signals.items():
                     if self.signals.get(name, 0) != val:
                         self.signals[name] = val
                         changed = True
-                if ex.display_log:
-                    for line in ex.display_log:
-                        self._result.log.append(line)
-                        if self.verbose:
-                            print(line)
+                for line in ex.display_log:
+                    self._result.log.append(line)
+                    if self.verbose:
+                        print(line)
 
             if not changed:
                 break
         else:
             raise SimError(
-                f"Combinational loop detected: did not converge in {MAX_DELTA} delta cycles"
+                f"Combinational loop: did not converge in {MAX_DELTA} delta cycles"
             )
 
     # ------------------------------------------------------------------
@@ -707,11 +1032,10 @@ class SimEngine:
 
     def _write(self, name: str, raw_val: int) -> None:
         w = self._widths.get(name, 1)
-        mask = (1 << w) - 1
-        self.signals[name] = raw_val & mask
+        self.signals[name] = raw_val & ((1 << w) - 1)
 
     # ------------------------------------------------------------------
-    # Overrides for external configuration
+    # Overrides
     # ------------------------------------------------------------------
 
     def set_clk(self, name: str) -> None:

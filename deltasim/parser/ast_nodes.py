@@ -1,10 +1,11 @@
 """AST node definitions for the SystemVerilog subset supported by deltasim.
 
-Covers synthesizable SV: modules, ports, parameters, logic/wire/reg,
-assign, always_ff/always_comb/always, if/case, blocking/non-blocking
-assignments, basic operators, bit-widths, and concatenation.
+Covers synthesizable SV and basic TB constructs: modules, ports, parameters,
+logic/wire/reg, assign, always_ff/always_comb/always, initial, if/case,
+blocking/non-blocking assignments, basic operators, bit-widths, concatenation,
+time delays (#n), forever/repeat/for/while loops, and wait-event statements.
 
-Struct/enum/interface are excluded from M1 but space is reserved for
+Struct/enum/interface are excluded from M1-M2 but space is reserved for
 future extension via the `ModuleItem` union type.
 """
 
@@ -162,7 +163,55 @@ class SysTaskStmt:
     args: List[Expr]
 
 
-Stmt = Block | IfStmt | CaseStmt | BlockingAssign | NonBlockingAssign | NullStmt | SysTaskStmt
+# ---------- TB / procedural control statements (M2) ----------
+
+@dataclass
+class TimeDelay:
+    """#expression [statement]  —  advance simulation time."""
+    delay: Expr
+    body: Optional["Stmt"] = None
+
+
+@dataclass
+class ForeverStmt:
+    """forever statement"""
+    body: "Stmt"
+
+
+@dataclass
+class RepeatStmt:
+    """repeat (count) statement"""
+    count: Expr
+    body: "Stmt"
+
+
+@dataclass
+class WaitEventStmt:
+    """@(sensitivity) [statement]  —  wait for an edge/event."""
+    sensitivity: SensitivityList
+    body: Optional["Stmt"] = None
+
+
+@dataclass
+class ForStmt:
+    """for (init; cond; update) body"""
+    init: "Stmt"
+    cond: Expr
+    update: "Stmt"
+    body: "Stmt"
+
+
+@dataclass
+class WhileStmt:
+    """while (cond) body"""
+    cond: Expr
+    body: "Stmt"
+
+
+Stmt = (Block | IfStmt | CaseStmt | BlockingAssign | NonBlockingAssign
+        | NullStmt | SysTaskStmt
+        | TimeDelay | ForeverStmt | RepeatStmt | WaitEventStmt
+        | ForStmt | WhileStmt)
 
 
 # ---------------------------------------------------------------------------

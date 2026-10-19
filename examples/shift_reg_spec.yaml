@@ -1,0 +1,36 @@
+version: 1
+top: shift_reg
+
+clock:
+  signal: clk
+  period_ns: 10
+
+reset:
+  signal: rst_n
+  active_low: true
+  duration_cycles: 1
+
+sim:
+  cycles: 6
+  seed: 0
+
+inputs:
+  # d=1 を 4 サイクル入れてから d=0
+  - at: [1, 5]
+    set: {d: 1}
+  - at: 6
+    set: {d: 0}
+
+expected:
+  - at: 1
+    check: {q: 0}    # リセット中
+  - at: 2
+    check: {q: 0b0001}
+  - at: 3
+    check: {q: 0b0011}
+  - at: 4
+    check: {q: 0b0111}
+  - at: 5
+    check: {q: 0b1111}
+  - at: 6
+    check: {q: 0b1110}
