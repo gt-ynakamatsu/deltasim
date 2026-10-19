@@ -29,7 +29,7 @@ def write_junit_v2(result, path: str) -> None:
         tc = ET.SubElement(suite, "testcase")
         tc.set("name", ci.name)
         tc.set("classname", result.module)
-        tc.set("time", f"{ci.elapsed_ms / 1000:.4f}")
+        tc.set("time", "0")
         if ci.status != "PASS":
             failure = ET.SubElement(tc, "failure")
             failure.set("message", ci.message or f"expected {ci.expected!r}, got {ci.actual!r}")

@@ -1,0 +1,44 @@
+version: 1
+top: uart_tx
+
+clock:
+  signal: clk
+  period_ns: 10
+
+reset:
+  signal: rst_n
+  active_low: true
+  duration_cycles: 2
+
+sim:
+  # CLK_DIV=4: 2(reset) + 1(IDLE→START) + 4(START) + 8*4(DATA) + 4(STOP) = 43 cycles
+  # s_idle→start is at cycle 3, s_data at cycle 7, s_stop at cycle 39, idle at cycle 43
+  cycles: 46
+  seed: 0
+
+# 送信: 0x41 ('A') = 0b01000001
+inputs:
+  - at: [1, 2]
+    set: {send: 0, data: 0}
+  # 送信トリガ（1 サイクルのみ）
+  - at: 3
+    set: {send: 1, data: 0x41}
+  - at: 4
+    set: {send: 0}
+
+expected:
+  # リセット直後: アイドル
+  - at: 2
+    check: {busy: 0, tx: 1}
+  # 送信開始: busy=1, スタートビット(tx=0)
+  - at: 3
+    check: {busy: 1, tx: 0}
+  # スタートビット中
+  - at: 4
+    check: {tx: 0}
+  # データビット 0 (data[0]=1): cycle 7 から tx=1
+  - at: 7
+    check: {tx: 1}
+  # 送信完了: busy=0 (cycle 43 で S_IDLE に戻る)
+  - at: 43
+    check: {busy: 0, tx: 1}

@@ -237,7 +237,7 @@ module gen_test #(parameter N=4) (
         end
     endgenerate
 endmodule
-""")
+""", encoding="utf-8")
         from deltasim.parser.parser import parse_file
         from deltasim.elab.elaborator import elaborate
         mod = parse_file(str(sv))
@@ -261,7 +261,7 @@ module genif_test #(parameter USE_EXTRA=1) (
         end
     endgenerate
 endmodule
-""")
+""", encoding="utf-8")
         from deltasim.parser.parser import parse_file
         from deltasim.elab.elaborator import elaborate
         from deltasim.sim.engine import SimEngine
@@ -298,7 +298,7 @@ module popcount (
         end
     end
 endmodule
-""")
+""", encoding="utf-8")
         from deltasim.parser.parser import parse_file
         from deltasim.elab.elaborator import elaborate
         from deltasim.sim.engine import SimEngine
@@ -322,7 +322,7 @@ module xtest (
 );
     assign b = a | 'x;
 endmodule
-""")
+""", encoding="utf-8")
         from deltasim.parser.parser import parse_file
         from deltasim.elab.elaborator import elaborate
         from deltasim.sim.engine import SimEngine
@@ -343,7 +343,7 @@ module xvcd (
 );
     assign b = a & 'x;
 endmodule
-""")
+""", encoding="utf-8")
         from deltasim.parser.parser import parse_file
         from deltasim.elab.elaborator import elaborate
         from deltasim.sim.engine import SimEngine
