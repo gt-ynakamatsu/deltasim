@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=42"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "deltasim"
+version = "0.1.0"
+description = "SystemVerilog フルスクラッチシミュレータ／テストベンチ自動生成ツール"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "click>=8.1",
+]
+
+[project.scripts]
+deltasim = "deltasim.cli:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["deltasim*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
