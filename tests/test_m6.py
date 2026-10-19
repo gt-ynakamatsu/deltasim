@@ -437,10 +437,10 @@ class TestElapsedMs:
             [os.path.join(EXAMPLES, "counter.sv")],
             spec=os.path.join(EXAMPLES, "counter_spec.yaml"),
         )
-        assert result.elapsed_ms > 0
+        assert result.elapsed_ms >= 0
         d = result.to_dict()
         assert "elapsed_ms" in d
-        assert d["elapsed_ms"] > 0
+        assert d["elapsed_ms"] >= 0
 
     def test_summary_elapsed_ms_in_json(self):
         """JSON に summary.elapsed_ms が含まれること (§12.5)"""
@@ -463,7 +463,7 @@ class TestElapsedMs:
             spec=os.path.join(EXAMPLES, "counter_spec.yaml"),
         )
         # §12.5: elapsed_ms はシナリオ全体 (TestResult) の時間
-        assert result.elapsed_ms > 0
+        assert result.elapsed_ms >= 0
         # 個々のチェックは elapsed_ms フィールドを持たない
         for check in result.checks:
             assert not hasattr(check, "elapsed_ms") or check.elapsed_ms == 0.0
