@@ -219,6 +219,8 @@ def test(
     record_all: bool = False,
     wave_mem_mb: int = 512,
     filter_cases: Optional[List[str]] = None,
+    max_delta: Optional[int] = None,
+    max_loop: Optional[int] = None,
 ) -> TestResult:
     """Run simulation driven by a YAML scenario spec.
 
@@ -356,6 +358,8 @@ def test(
             record_all=record_all,
             wave_mem_mb=wave_mem_mb,
             t_parent=t0,
+            max_delta=max_delta,
+            max_loop=max_loop,
         )
         result.cases.append(case_result)
         all_checks.extend(case_result.checks)
@@ -363,6 +367,8 @@ def test(
         # Update overall status: ERROR > FAIL > SKIP > PASS
         if case_result.status == "ERROR":
             overall_status = "ERROR"
+            # Propagate case errors to top-level errors (§0.2.1)
+            result.errors.extend(case_result.errors)
         elif case_result.status == "FAIL" and overall_status not in ("ERROR",):
             overall_status = "FAIL"
         elif case_result.status == "SKIP" and overall_status == "PASS":
@@ -404,12 +410,16 @@ def _run_one_case(
     record_all,
     wave_mem_mb,
     t_parent,
+    max_delta=None,
+    max_loop=None,
 ) -> "CaseResult":
     """Run a single CaseSpec and return CaseResult (§15.3 simulation loop)."""
     from deltasim.result import CaseResult, WarningInfo
     from deltasim.tb.scenario import StimulusSchedule, _expand_at
-    from deltasim.sim.engine import (SimEngine, SimError,
-                                     _InitialScheduler, SimResult)
+    from deltasim.sim.engine import (SimEngine, SimError, DeltaLimitError, LoopLimitError,
+                                     _InitialScheduler, SimResult,
+                                     MAX_DELTA as _DEF_MAX_DELTA,
+                                     MAX_FOREVER_TICKS as _DEF_MAX_LOOP)
 
     case_t0 = time.time()
     cr = CaseResult(name=case.name)
@@ -444,7 +454,10 @@ def _run_one_case(
     hp = period_ns // 2                   # half-period (posedge→negedge)
 
     # Engine setup
-    engine = SimEngine(design, half_period_ns=hp, reset_cycles=eff_reset.duration_cycles)
+    _eff_max_delta = max_delta if max_delta is not None else _DEF_MAX_DELTA
+    _eff_max_loop  = max_loop  if max_loop  is not None else _DEF_MAX_LOOP
+    engine = SimEngine(design, half_period_ns=hp, reset_cycles=eff_reset.duration_cycles,
+                       max_delta=_eff_max_delta, max_loop=_eff_max_loop)
     if eff_clock.signal:
         engine.set_clk(eff_clock.signal)
     if eff_reset.signal:
@@ -501,7 +514,6 @@ def _run_one_case(
     if engine._rst is not None:
         rst_assert_val = 0 if engine._rst_active_low else 1
         engine._write(engine._rst, rst_assert_val)
-    engine._eval_comb_loop()
     engine._result.history.append(dict(engine.signals))
 
     # ---------------------------------------------------------------
@@ -604,6 +616,7 @@ def _run_one_case(
     # §15.3: Main simulation loop
     # ---------------------------------------------------------------
     try:
+        engine._eval_comb_loop()  # initial combinational settle
         for cycle_idx in range(eff_cycles):
             if cancel and cancel.is_cancelled:
                 raise SimulationCancelled()
@@ -688,6 +701,14 @@ def _run_one_case(
         if not checks:
             overall_status = "SKIP"
             cr.log.append("cancelled")
+    except DeltaLimitError as e:
+        overall_status = "ERROR"
+        err = _exc_to_error(e, "E_DELTA_LIMIT")
+        cr.errors.append(err)
+    except LoopLimitError as e:
+        overall_status = "ERROR"
+        err = _exc_to_error(e, "E_LOOP_LIMIT")
+        cr.errors.append(err)
     except Exception as e:
         overall_status = "ERROR"
         err = _exc_to_error(e, "E005")
@@ -727,6 +748,8 @@ def run(
     keep_changes: bool = False,
     on_progress: Optional[Callable[[dict], None]] = None,
     cancel: Optional[CancelToken] = None,
+    max_delta: Optional[int] = None,
+    max_loop: Optional[int] = None,
 ) -> RunResult:
     """Run a bare simulation without a spec file.
 
@@ -738,7 +761,9 @@ def run(
         Record every signal change in a SignalChangeDB accessible via
         RunResult.get_signal_changes().
     """
-    from deltasim.sim.engine import SimEngine, SimError
+    from deltasim.sim.engine import (SimEngine, SimError, DeltaLimitError, LoopLimitError,
+                                     MAX_DELTA as _DEF_MAX_DELTA,
+                                     MAX_FOREVER_TICKS as _DEF_MAX_LOOP)
 
     t0 = time.time()
     params = params or {}
@@ -762,7 +787,10 @@ def run(
     result.module = di.module
     design = di._design
 
-    engine = SimEngine(design, half_period_ns=half_period, reset_cycles=reset_cycles)
+    _eff_max_delta = max_delta if max_delta is not None else _DEF_MAX_DELTA
+    _eff_max_loop  = max_loop  if max_loop  is not None else _DEF_MAX_LOOP
+    engine = SimEngine(design, half_period_ns=half_period, reset_cycles=reset_cycles,
+                       max_delta=_eff_max_delta, max_loop=_eff_max_loop)
     change_db = SignalChangeDB() if keep_changes else None
 
     vcd_obj = None
@@ -791,12 +819,18 @@ def run(
     except SimulationCancelled:
         result.cancelled = True
         result.log = engine._result.log if engine._result else []
+    except DeltaLimitError as e:
+        result.status = "ERROR"
+        result.errors.append(_exc_to_error(e, "E_DELTA_LIMIT"))
+    except LoopLimitError as e:
+        result.status = "ERROR"
+        result.errors.append(_exc_to_error(e, "E_LOOP_LIMIT"))
     except SimError as e:
         result.status = "ERROR"
         result.errors.append(_exc_to_error(e, "E005"))
     except Exception as e:
         result.status = "ERROR"
-        result.errors.append(_exc_to_error(e, "E005"))
+        result.errors.append(_exc_to_error(e, "E_INTERNAL"))
     finally:
         if vcd_obj:
             vcd_obj.close()

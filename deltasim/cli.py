@@ -74,8 +74,13 @@ def _emit_json_event(event: dict, json_events: bool) -> None:
 @click.option("--json", "json_out", default=None, metavar="PATH", help="結果を JSON 出力")
 @click.option("--json-events", is_flag=True, default=False,
               help="進捗イベントを JSON Lines で stdout に出力")
+@click.option("--max-delta", "max_delta", default=None, type=int, metavar="N",
+              help="デルタサイクル上限（既定10000）。超えると E_DELTA_LIMIT。")
+@click.option("--max-loop", "max_loop", default=None, type=int, metavar="N",
+              help="ループ反復上限（既定1000000）。超えると E_LOOP_LIMIT。")
 def run_cmd(sv_files, top, cycles, vcd, reset_cycles, half_period,
-            clk, rst, rst_active_high, params, verbose, json_out, json_events):
+            clk, rst, rst_active_high, params, verbose, json_out, json_events,
+            max_delta, max_loop):
     """SystemVerilog ファイルをシミュレートして VCD を出力する。"""
     import deltasim.api as ds
 
@@ -107,14 +112,40 @@ def run_cmd(sv_files, top, cycles, vcd, reset_cycles, half_period,
                 f"  t={ev.get('time_ns')}ns", err=True
             )
 
-    result = ds.run(
-        di,
-        cycles=cycles,
-        vcd=vcd,
-        reset_cycles=reset_cycles,
-        half_period=half_period,
-        on_progress=_progress_cb,
-    )
+    try:
+        result = ds.run(
+            di,
+            cycles=cycles,
+            vcd=vcd,
+            reset_cycles=reset_cycles,
+            half_period=half_period,
+            on_progress=_progress_cb,
+            max_delta=max_delta,
+            max_loop=max_loop,
+        )
+    except Exception as _unexpected:
+        # E_INTERNAL: 想定外例外でも --json があれば出力
+        import traceback as _tb
+        _tb.print_exc(file=sys.stderr)
+        if json_out:
+            from deltasim.result import RunResult, ErrorInfo, SCHEMA_VERSION
+            _er = RunResult(status="ERROR")
+            _er.errors.append(ErrorInfo(
+                code="E_INTERNAL",
+                message=f"{type(_unexpected).__name__}: {_unexpected}",
+                severity="error",
+            ))
+            Path(json_out).write_text(_er.to_json(), encoding="utf-8")
+            click.echo(f"[deltasim] JSON (E_INTERNAL): {json_out}", err=True)
+        sys.exit(1)
+
+    if result.status == "ERROR":
+        for err in result.errors:
+            click.echo(f"ERROR ({err.code}): {err.message}", err=True)
+        if json_out:
+            Path(json_out).write_text(result.to_json(), encoding="utf-8")
+            click.echo(f"[deltasim] JSON: {json_out}", err=True)
+        sys.exit(1)
 
     click.echo(
         f"[deltasim] 完了: {cycles} サイクル (t={result.time_ns} ns)", err=True
@@ -211,9 +242,13 @@ def gen_cmd(sv_files, top, params, out_dir, spec_path, tb_path, no_tb, no_spec, 
               help="§12.3: 信号変化 DB メモリ上限 (MB)")
 @click.option("--case", "filter_cases", multiple=True, metavar="CASE_NAME",
               help="§12.1: 実行するケース名を絞り込む（未指定で全ケース）。外れたケースは結果に含まない。")
+@click.option("--max-delta", "max_delta", default=None, type=int, metavar="N",
+              help="デルタサイクル上限（既定10000）。超えると E_DELTA_LIMIT。")
+@click.option("--max-loop", "max_loop", default=None, type=int, metavar="N",
+              help="ループ反復上限（既定1000000）。超えると E_LOOP_LIMIT。")
 def test_cmd(sv_files, top, spec, params, junit, json_out, vcd, seed,
              verbose, no_color, json_events, record_mode, record_all_deprecated,
-             wave_mem_mb, filter_cases):
+             wave_mem_mb, filter_cases, max_delta, max_loop):
     """YAML スペックに従ってテストを実行し PASS/FAIL を判定する。
 
     Examples:\n
@@ -247,14 +282,33 @@ def test_cmd(sv_files, top, spec, params, junit, json_out, vcd, seed,
 
     click.echo(f"[deltasim test] spec: {spec}", err=True)
 
-    result = ds.test(
-        list(sv_files), spec,
-        top=top, params=param_overrides, seed=seed, vcd=vcd,
-        on_progress=_progress_cb,
-        record_all=record_all,
-        wave_mem_mb=wave_mem_mb,
-        filter_cases=list(filter_cases) if filter_cases else None,
-    )
+    try:
+        result = ds.test(
+            list(sv_files), spec,
+            top=top, params=param_overrides, seed=seed, vcd=vcd,
+            on_progress=_progress_cb,
+            record_all=record_all,
+            wave_mem_mb=wave_mem_mb,
+            filter_cases=list(filter_cases) if filter_cases else None,
+            max_delta=max_delta,
+            max_loop=max_loop,
+        )
+    except Exception as _unexpected:
+        # §0.2.1: --json 付きのとき想定外例外でも JSON を出力する（E_INTERNAL）
+        import traceback as _tb
+        _tb.print_exc(file=sys.stderr)
+        if json_out:
+            import json as _json
+            from deltasim.result import TestResult, ErrorInfo, SCHEMA_VERSION
+            _er = TestResult(status="ERROR")
+            _er.errors.append(ErrorInfo(
+                code="E_INTERNAL",
+                message=f"{type(_unexpected).__name__}: {_unexpected}",
+                severity="error",
+            ))
+            Path(json_out).write_text(_er.to_json(), encoding="utf-8")
+            click.echo(f"[deltasim test] JSON (E_INTERNAL): {json_out}", err=True)
+        sys.exit(1)
 
     # §12.1: フィルタアウトされたケースは checks が空の TestResult として返る
     # §14.1: E_NO_CASE の場合も JSON を正しく出力してから非 0 終了
@@ -378,7 +432,11 @@ def sim_cmd(sv_files, top, params, reset_cycles):
 
         elif cmd == "step":
             n = int(tokens[1]) if len(tokens) > 1 else 1
-            snap = sim.step(n)
+            try:
+                snap = sim.step(n)
+            except Exception as _e:
+                click.echo(f"ERROR: {type(_e).__name__}: {_e}", err=True)
+                continue
             if snap.breakpoint_hit is not None:
                 click.echo(f"[bp {snap.breakpoint_hit} hit]  t={snap.time_ns}ns")
             else:
@@ -388,7 +446,11 @@ def sim_cmd(sv_files, top, params, reset_cycles):
             if len(tokens) < 2:
                 click.echo("使い方: until TIME_NS")
                 continue
-            snap = sim.run_until(int(tokens[1]))
+            try:
+                snap = sim.run_until(int(tokens[1]))
+            except Exception as _e:
+                click.echo(f"ERROR: {type(_e).__name__}: {_e}", err=True)
+                continue
             click.echo(f"t={snap.time_ns}ns  cycle={sim.cycle}")
 
         elif cmd == "get":

@@ -176,15 +176,21 @@ class Parser:
         self._consume("(")
         ports: List[PortDecl] = []
         if not self._at(")"):
-            ports.append(self._parse_port_decl())
+            ports.extend(self._parse_port_decl_multi())
             while self._try_consume(","):
                 if self._at(")"):
                     break
-                ports.append(self._parse_port_decl())
+                ports.extend(self._parse_port_decl_multi())
         self._consume(")")
         return ports
 
-    def _parse_port_decl(self) -> PortDecl:
+    def _parse_port_decl_multi(self) -> List[PortDecl]:
+        """Parse one ANSI port declaration, returning one or more PortDecl.
+
+        IEEE 1800: multiple names may share a single direction/type/dims, e.g.:
+          input logic clk, rst, d
+          output logic [3:0] a, b
+        """
         if not self._at("input", "output", "inout"):
             self._error(f"expected port direction (input/output/inout), got {self._peek().value!r}")
         direction = self._consume().value
@@ -201,9 +207,33 @@ class Parser:
         if self._at("["):
             dims = self._parse_dims()
 
+        # First name (mandatory)
         name = self._consume(expected_type="ID").value
-        return PortDecl(direction=direction, net_type=net_type, dims=dims,
-                        name=name, signed=signed)
+        result = [PortDecl(direction=direction, net_type=net_type, dims=dims,
+                           name=name, signed=signed)]
+
+        # Additional names sharing the same direction/type/dims:
+        # peek ahead — if the next token is "," and the token after that is an
+        # identifier (not a direction keyword), consume them as extra names.
+        while self._at(","):
+            saved_pos = self._pos
+            self._pos += 1  # tentatively skip ","
+            if self._at("input", "output", "inout") or self._at(")"):
+                # Next is a new full port decl or end of list — put "," back
+                self._pos = saved_pos
+                break
+            if self._peek().type != "ID":
+                # Not an identifier — put "," back
+                self._pos = saved_pos
+                break
+            extra_name = self._consume(expected_type="ID").value
+            result.append(PortDecl(direction=direction, net_type=net_type,
+                                   dims=dims, name=extra_name, signed=signed))
+
+        return result
+
+    def _parse_port_decl(self) -> PortDecl:  # kept for compat (unused internally)
+        return self._parse_port_decl_multi()[0]
 
     # ------------------------------------------------------------------
     # Dimensions: [hi : lo]
