@@ -929,8 +929,9 @@ cases:
 
 | 場所 | 内容 |
 |------|------|
-| `pyproject.toml` の `version` | **唯一の定義箇所** |
-| `deltasim.__version__` | `importlib.metadata.version("deltasim")` で取得（`pyproject.toml` と常に一致） |
+| `deltasim/_version.py` の `__version__` | **唯一の定義箇所**（ここを変えるだけで全箇所に反映） |
+| `deltasim.__version__` | `deltasim._version.__version__` を import（常に一致） |
+| `pyproject.toml` の `dynamic = ["version"]` | `[tool.setuptools.dynamic]` 経由で `_version.__version__` を参照 |
 | `deltasim --version` | `deltasim.__version__` を表示 |
 | `TestResult.to_dict()["deltasim_version"]` | `deltasim.__version__` と同値 |
 

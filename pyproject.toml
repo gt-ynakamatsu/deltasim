@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "deltasim"
-version = "0.2.0"
+dynamic = ["version"]
 description = "SystemVerilog フルスクラッチシミュレータ／テストベンチ自動生成ツール"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -27,6 +27,9 @@ gui = [
     "uvicorn[standard]>=0.22",
     "websockets>=11.0",
 ]
+
+[tool.setuptools.dynamic]
+version = {attr = "deltasim._version.__version__"}
 
 [tool.setuptools.packages.find]
 where = ["."]
