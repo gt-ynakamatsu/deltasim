@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>deltasim GUI</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- ===== ツールバー ===== -->
+  <header id="toolbar">
+    <h1>⚡ deltasim</h1>
+
+    <button id="btn-load-examples" class="btn btn-secondary" title="サンプルプロジェクトを読み込む">
+      サンプル読み込み
+    </button>
+    <button id="btn-open-files" class="btn btn-secondary" title="ファイルを開く">
+      📂 ファイルを開く
+    </button>
+    <button id="btn-run-test" class="btn btn-primary" title="テスト実行">
+      ▶ テスト実行
+    </button>
+    <button id="btn-stop" class="btn btn-danger" title="停止">
+      ■ 停止
+    </button>
+
+    <label style="font-size:11px; color:#8888aa; margin-left:8px;">シード:</label>
+    <input id="seed-input" type="text" placeholder="ランダム" title="乱数シード（空 = ランダム）">
+
+    <span style="margin-left:8px; font-size:11px; color:#8888aa;">基数:</span>
+    <button class="radix-btn active" data-radix="hex">HEX</button>
+    <button class="radix-btn" data-radix="bin">BIN</button>
+    <button class="radix-btn" data-radix="dec">DEC</button>
+
+    <span id="status-bar-top"></span>
+  </header>
+
+  <!-- ===== サイドバー ===== -->
+  <aside id="sidebar">
+    <!-- サンプル -->
+    <div class="sidebar-section">
+      <h2>サンプル</h2>
+      <div id="example-list">（読み込み中…）</div>
+    </div>
+
+    <!-- RTL ファイル -->
+    <div class="sidebar-section">
+      <h2>RTL ファイル</h2>
+      <ul id="file-list" class="file-list"></ul>
+    </div>
+
+    <!-- スペックファイル -->
+    <div class="sidebar-section">
+      <h2>スペック YAML</h2>
+      <ul id="spec-list" class="file-list"></ul>
+    </div>
+
+    <!-- トップモジュール -->
+    <div class="sidebar-section">
+      <h2>トップモジュール</h2>
+      <select id="module-select" class="module-select"></select>
+    </div>
+  </aside>
+
+  <!-- ===== 中央エリア（エディタ） ===== -->
+  <main id="center">
+    <div id="editor-area">
+      <pre id="editor-content">// ここにロードされた RTL の概要が表示されます
+// サイドバーのサンプルを選択して開始してください</pre>
+    </div>
+  </main>
+
+  <!-- ===== 結果パネル（右） ===== -->
+  <aside id="result-panel">
+    <div id="result-header">
+      <h2>テスト結果</h2>
+      <div id="summary-bar">
+        <span class="count-badge badge-pass">0 PASS</span>
+        <span class="count-badge badge-fail">0 FAIL</span>
+      </div>
+    </div>
+    <div id="result-list">
+      <div style="padding:12px; color:#8888aa; font-size:12px;">
+        テストを実行すると結果がここに表示されます
+      </div>
+    </div>
+  </aside>
+
+  <!-- ===== 波形ビューア ===== -->
+  <section id="waveform-panel">
+    <div id="waveform-toolbar">
+      <span>波形ビューア</span>
+      <button id="btn-zoom-in"  class="btn btn-secondary" style="padding:2px 8px;" title="拡大">＋</button>
+      <button id="btn-zoom-out" class="btn btn-secondary" style="padding:2px 8px;" title="縮小">－</button>
+      <button id="btn-zoom-fit" class="btn btn-secondary" style="padding:2px 8px;" title="全体表示">⊡ 全体</button>
+      <span style="font-size:11px; color:#8888aa; margin-left:4px;">クリック: カーソルA　Shift+クリック: カーソルB</span>
+    </div>
+    <div id="waveform-container">
+      <div id="signal-names"></div>
+      <div id="waveform-canvas-wrapper">
+        <canvas id="waveform-canvas"></canvas>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== ログ ===== -->
+  <section id="log-panel">
+    <div id="log-toolbar">
+      <span>ログ / コンソール</span>
+    </div>
+    <div id="log-output"></div>
+  </section>
+
+  <!-- ===== ステータスバー ===== -->
+  <footer id="statusbar" class="idle">
+    <span id="status-text">ready</span>
+  </footer>
+
+  <!-- ===== DnD オーバーレイ ===== -->
+  <div id="drop-overlay">ここにドロップしてファイルを開く</div>
+
+</div><!-- #app -->
+
+<script src="/static/app.js"></script>
+</body>
+</html>
