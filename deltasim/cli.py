@@ -205,12 +205,15 @@ def gen_cmd(sv_files, top, params, out_dir, spec_path, tb_path, no_tb, no_spec, 
               help="進捗イベントを JSON Lines として stdout に出力")
 @click.option("--record", "record_mode", default=None, metavar="all",
               help="§12.3: 'all' で全信号を変化 DB に記録（既定: ポートと spec 参照信号のみ）")
+@click.option("--record-all", "record_all_deprecated", is_flag=True, default=False,
+              hidden=True, help="非推奨: --record all を使ってください")
 @click.option("--wave-mem", "wave_mem_mb", default=512, show_default=True, type=int,
               help="§12.3: 信号変化 DB メモリ上限 (MB)")
 @click.option("--case", "filter_cases", multiple=True, metavar="CASE_NAME",
-              help="§12.1: 実行するケース名を絞り込む（未指定で全ケース）")
+              help="§12.1: 実行するケース名を絞り込む（未指定で全ケース）。外れたケースは結果に含まない。")
 def test_cmd(sv_files, top, spec, params, junit, json_out, vcd, seed,
-             verbose, no_color, json_events, record_mode, wave_mem_mb, filter_cases):
+             verbose, no_color, json_events, record_mode, record_all_deprecated,
+             wave_mem_mb, filter_cases):
     """YAML スペックに従ってテストを実行し PASS/FAIL を判定する。
 
     Examples:\n
@@ -218,18 +221,20 @@ def test_cmd(sv_files, top, spec, params, junit, json_out, vcd, seed,
       deltasim test counter.sv --spec counter_spec.yaml --junit report.xml\n
       deltasim test counter.sv --spec counter_spec.yaml --json result.json\n
       deltasim test counter.sv --spec counter_spec.yaml --json-events\n
-      deltasim test counter.sv --spec counter_spec.yaml --record all
-    """
-    """YAML スペックに従ってテストを実行し PASS/FAIL を判定する。
-
-    Examples:\n
-      deltasim test counter.sv --spec counter_spec.yaml\n
-      deltasim test counter.sv --spec counter_spec.yaml --junit report.xml\n
-      deltasim test counter.sv --spec counter_spec.yaml --json result.json\n
-      deltasim test counter.sv --spec counter_spec.yaml --json-events
+      deltasim test counter.sv --spec counter_spec.yaml --record all\n
+      deltasim test counter.sv --spec counter_spec.yaml --case counter
     """
     import deltasim.api as ds
     from deltasim.report.terminal import print_results_v2
+
+    # --record-all 非推奨エイリアス（stderr のみ、stdout JSON は汚さない）
+    if record_all_deprecated:
+        click.echo(
+            "WARNING: --record-all は非推奨です。'--record all' を使ってください。",
+            err=True,
+        )
+
+    record_all = record_all_deprecated or (record_mode == "all")
 
     if not Path(spec).is_file():
         click.echo(f"ERROR: スペックファイルが見つかりません: {spec!r}", err=True)
@@ -240,17 +245,24 @@ def test_cmd(sv_files, top, spec, params, junit, json_out, vcd, seed,
     def _progress_cb(ev: dict):
         _emit_json_event(ev, json_events)
 
-    click.echo(
-        f"[deltasim test] spec: {spec}", err=True
-    )
+    click.echo(f"[deltasim test] spec: {spec}", err=True)
 
     result = ds.test(
         list(sv_files), spec,
         top=top, params=param_overrides, seed=seed, vcd=vcd,
         on_progress=_progress_cb,
-        record_all=(record_mode == "all"),
+        record_all=record_all,
         wave_mem_mb=wave_mem_mb,
+        filter_cases=list(filter_cases) if filter_cases else None,
     )
+
+    # §12.1: result is None when filtered out by --case (not included in output)
+    if result is None:
+        click.echo(
+            f"[deltasim test] スペック '{Path(spec).stem}' は --case フィルタに一致しないためスキップ",
+            err=True,
+        )
+        sys.exit(0)
 
     # Terminal output
     print_results_v2(result, verbose=verbose, color=not no_color)

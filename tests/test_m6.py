@@ -452,7 +452,8 @@ class TestElapsedMs:
         d = result.to_dict()
         assert "summary" in d
         assert "elapsed_ms" in d["summary"]
-        assert d["summary"]["elapsed_ms"] == d["elapsed_ms"]
+        # §12.5: summary.elapsed_ms (total) >= elapsed_ms (case sim time)
+        assert d["summary"]["elapsed_ms"] >= d["elapsed_ms"]
 
     def test_check_has_elapsed_ms(self):
         """個々のチェックは elapsed_ms を持たない (§12.5: ケース単位)"""

@@ -229,14 +229,16 @@ class TestResult:
         return sum(1 for c in self.checks if c.status == "FAIL")
 
     def to_dict(self) -> Dict[str, Any]:
+        # §12.5: elapsed_ms = case (simulation) time
+        #         summary.elapsed_ms = total (parse + elab + sim)
+        summary_ms = getattr(self, "_summary_elapsed_ms", self.elapsed_ms)
         return {
             "schema_version": self.schema_version,
             "module": self.module,
             "status": self.status,
             "seed": self.seed,
-            # §12.5: summary.elapsed_ms
-            "summary": {"elapsed_ms": self.elapsed_ms},
-            "elapsed_ms": self.elapsed_ms,   # backward compat
+            "elapsed_ms": self.elapsed_ms,
+            "summary": {"elapsed_ms": summary_ms},
             "cancelled": self.cancelled,
             "truncated_at": self.truncated_at,
             "log": self.log,
