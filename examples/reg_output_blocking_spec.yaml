@@ -1,0 +1,17 @@
+# reg_output_blocking spec: always_ff 内のブロッキング代入 = のテスト
+# dff_base.yaml と同じ刺激で同期 DFF と同じ結果になることを確認
+version: 1
+top: d_ff
+clock: {signal: clk, period_ns: 10}
+reset: {signal: rst, active_low: false, duration_cycles: 2}
+sim: {cycles: 6}
+cases:
+  - name: basic
+    inputs:
+      - {at: 3, set: {d: 1}}
+      - {at: 5, set: {d: 0}}
+    expected:
+      - {at: 2, check: {q: 0}}
+      - {at: 3, check: {q: 1}}
+      - {at: 4, check: {q: 1}}
+      - {at: 5, check: {q: 0}}
