@@ -208,16 +208,21 @@ class TestCaseFilter:
             or "スキップ" in result.output
 
     def test_non_matching_case_excluded_via_api(self):
-        """api.test(filter_cases=['other']) が None を返すこと（除外）"""
+        """api.test(filter_cases=['other']) が空チェックの TestResult を返すこと（除外）"""
         import deltasim.api as ds
         result = ds.test(
             [os.path.join(EXAMPLES, "counter.sv")],
             spec=os.path.join(EXAMPLES, "counter_spec.yaml"),
-            filter_cases=["other_module"],  # does not match "counter"
+            filter_cases=["other_module"],  # does not match "counter_spec"
         )
-        # §12.1: excluded case returns None (not included in results)
-        assert result is None, \
-            f"フィルタアウトされたケースは None を返すはずだが {result!r} が返った"
+        # §12.1: 除外ケースは結果に含まれない = checks=[], cases=[] の TestResult
+        assert result is not None, "test() は常に TestResult を返すこと"
+        assert len(result.checks) == 0, \
+            f"フィルタアウトされたケースは checks=[] のはずだが {len(result.checks)} 件ある"
+        assert len(result.cases) == 0, \
+            f"フィルタアウトされたケースは cases=[] のはずだが {len(result.cases)} 件ある"
+        # PASS ステータス（失敗なし）
+        assert result.status == "PASS"
 
     def test_matching_case_via_api(self):
         """api.test(filter_cases=['counter']) がケースを実行すること"""

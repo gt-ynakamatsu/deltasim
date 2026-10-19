@@ -256,13 +256,21 @@ def test_cmd(sv_files, top, spec, params, junit, json_out, vcd, seed,
         filter_cases=list(filter_cases) if filter_cases else None,
     )
 
-    # §12.1: result is None when filtered out by --case (not included in output)
-    if result is None:
+    # §12.1: フィルタアウトされたケースは checks が空の TestResult として返る
+    if result is not None and result.checks == [] and filter_cases:
         click.echo(
-            f"[deltasim test] スペック '{Path(spec).stem}' は --case フィルタに一致しないためスキップ",
+            f"[deltasim test] ケース '{Path(spec).stem}' は --case フィルタに"
+            f" 一致しないため除外されました（結果に含まれません）",
             err=True,
         )
-        sys.exit(0)
+
+    # §12.1: フィルタアウトされたケースは checks が空の TestResult として返る
+    if result is not None and result.checks == [] and filter_cases:
+        click.echo(
+            f"[deltasim test] ケース '{Path(spec).stem}' は --case フィルタに"
+            f" 一致しないため除外されました（結果に含まれません）",
+            err=True,
+        )
 
     # Terminal output
     print_results_v2(result, verbose=verbose, color=not no_color)
