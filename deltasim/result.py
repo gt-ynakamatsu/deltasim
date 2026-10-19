@@ -248,9 +248,8 @@ class CaseResult:
             "checks": [c.to_dict() for c in self.checks],
             "log": self.log,
             "errors": [e.to_dict() for e in self.errors],
+            "warnings": [w.to_dict() for w in self.warnings],   # §15.13: always []
         }
-        if self.warnings:
-            d["warnings"] = [w.to_dict() for w in self.warnings]
         return d
 
 
@@ -305,9 +304,8 @@ class TestResult:
             "cases": [c.to_dict() for c in self.cases],
             "checks": [c.to_dict() for c in self.checks],
             "errors": [e.to_dict() for e in self.errors],
+            "warnings": [w.to_dict() for w in self.warnings],   # §15.13: always []
         }
-        if self.warnings:
-            d["warnings"] = [w.to_dict() for w in self.warnings]
         return d
 
     def to_json(self, indent: int = 2) -> str:
