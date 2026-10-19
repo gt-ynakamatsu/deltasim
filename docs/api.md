@@ -830,8 +830,79 @@ cases:
 仕様YAMLに知らないキーがあると、結果JSON の `warnings[]` に `W_UNKNOWN_KEY` を出力します:
 
 ```json
-{"warnings": [{"code": "W_UNKNOWN_KEY", "message": "stimulus[0]: 不明なキー 'foo' は無視されます"}]}
+{"warnings": [{"code": "W_UNKNOWN_KEY", "message": "stimulus[0].foo: 不明なキーは無視されます"}]}
 ```
 
 ---
+
+## §15.13 PR #10 残り事項の確定（2026-10-19 確定）
+
+### §15.13.1 W_UNKNOWN_KEY の適用範囲
+
+§15.12 から拡張し、YAML のどの階層に未知キーがあっても `W_UNKNOWN_KEY` を出します。
+`message` にはキーの場所をパス形式で含めます。
+
+**既知キー一覧（全階層）**
+
+| 階層 | 既知キー |
+|------|---------|
+| トップレベル | `version`, `top`, `clock`, `reset`, `sim`, `inputs`, `stimulus`, `expected`, `expect`, `model`, `skip`, `skip_reason`, `cases` |
+| `clock` | `signal`, `period_ns` |
+| `reset` | `signal`, `active_low`, `duration_cycles` |
+| `sim` | `cycles`, `seed`, `vcd` |
+| `cases[]` 各ケース | `name`, `skip`, `skip_reason`, `seed`, `cycles`, `clock`, `reset`, `inputs`, `stimulus`, `expected`, `expect`, `model` |
+| `cases[].clock` | `signal`, `period_ns` |
+| `cases[].reset` | `signal`, `active_low`, `duration_cycles` |
+| `stimulus` / `inputs` 各アイテム | `at`, `set`, `random`, `offset_ns` |
+| `expect` / `expected` 各アイテム | `at`, `check`, `expr`, `offset_ns` |
+
+**メッセージの例:**
+
+`message` はキーまでを含むドット区切りパスで始まります（`{path}: 不明なキーは無視されます`）。
+トップレベルはパスなしでキー名がそのまま先頭になります。
+
+| 未知キーの場所 | message の例 |
+|--------------|------------|
+| トップレベル | `BOGUS: 不明なキーは無視されます` |
+| `clock` 配下 | `clock.jitter: 不明なキーは無視されます` |
+| `reset` 配下 | `reset.polarity: 不明なキーは無視されます` |
+| `sim` 配下 | `sim.timeout: 不明なキーは無視されます` |
+| `cases[0]` 直下 | `cases[0].skpi: 不明なキーは無視されます` |
+| `cases[1].clock` 配下 | `cases[1].clock.edge: 不明なキーは無視されます` |
+| `cases[2].reset` 配下 | `cases[2].reset.hold: 不明なキーは無視されます` |
+| `stimulus[0]` アイテム（トップレベル or `cases[i]` 内） | `stimulus[0].foo: 不明なキーは無視されます` |
+| `cases[0].stimulus[2]` アイテム | `cases[0].stimulus[2].ofset_ns: 不明なキーは無視されます` |
+| `cases[0].inputs[0]` アイテム（`inputs` と書いた場合） | `cases[0].inputs[0].foo: 不明なキーは無視されます` |
+| `expect[1]` アイテム | `expect[1].bar: 不明なキーは無視されます` |
+
+### §15.13.2 `warnings` の常時出力
+
+`TestResult` および `CaseResult` の両方について、`to_dict()` が返す JSON オブジェクトに
+`warnings` キーを常に含めます。警告がない場合は `[]` として出力します。
+これにより `schema_version` は `"2"` のままです（任意フィールドの追加のため互換）。
+
+**出力例（警告なし）:**
+
+```json
+{
+  "schema_version": "2",
+  "status": "PASS",
+  "warnings": [],
+  "cases": [
+    {
+      "name": "basic",
+      "status": "PASS",
+      "warnings": []
+    }
+  ]
+}
+```
+
+**移行ガイド:**  
+`"warnings" in result_dict` のような存在チェックは不要になります。
+旧 API は `warnings` が空のとき省略していたため、既存コードが `d.get("warnings", [])` を
+使っている場合はそのまま動作します。
+
+---
+
 
