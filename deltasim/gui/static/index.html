@@ -38,6 +38,11 @@
     <label style="font-size:11px; color:#8888aa; margin-left:8px;">シード:</label>
     <input id="seed-input" type="text" placeholder="ランダム" title="乱数シード（空 = ランダム）">
 
+    <label style="font-size:11px; color:#8888aa; margin-left:6px;">ケース:</label>
+    <input id="case-filter-input" type="text" placeholder="全て（ワイルドカード可）"
+           title="実行するケース名（カンマ区切り、* でワイルドカード）" style="width:160px;">
+    <button id="btn-case-list" class="btn btn-secondary" style="padding:3px 8px;font-size:10px;" title="スペックからケース名一覧を取得">▾</button>
+
     <span style="margin-left:8px; font-size:11px; color:#8888aa;">基数:</span>
     <button class="radix-btn active" data-radix="hex">HEX</button>
     <button class="radix-btn" data-radix="bin">BIN</button>
@@ -92,7 +97,7 @@
     </div>
   </main>
 
-  <!-- ===== 結果パネル（右） ===== -->
+  <!-- ===== 結果パネル（右）2段構成 ===== -->
   <aside id="result-panel">
     <div id="result-header">
       <h2>テスト結果</h2>
@@ -106,12 +111,23 @@
       <span id="truncated-msg">⚠ 波形が上限に達しました</span>
       <button id="btn-open-vcd" class="btn btn-secondary" style="font-size:10px; padding:2px 7px;">VCDを開く</button>
     </div>
-    <div id="result-list">
+    <!-- 上段: ケース一覧 -->
+    <div id="result-list" style="flex:0 0 auto; max-height:45%; overflow-y:auto; border-bottom:1px solid #3d3d5c;">
       <div style="padding:12px; color:#8888aa; font-size:12px;">
         テストを実行すると結果がここに表示されます
       </div>
     </div>
+    <!-- 下段: 選択ケースの詳細（checks）-->
+    <div id="case-detail-panel" style="flex:1; overflow-y:auto; padding:6px 8px; font-size:11px;">
+      <div style="color:#8888aa;">ケースを選択すると詳細が表示されます</div>
+    </div>
   </aside>
+
+  <!-- ケース候補ドロップダウン -->
+  <div id="case-dropdown" style="display:none; position:fixed; z-index:500;
+       background:#252535; border:1px solid #3d3d5c; border-radius:6px;
+       min-width:200px; max-height:200px; overflow-y:auto; box-shadow:0 4px 12px rgba(0,0,0,0.4);">
+  </div>
 
   <!-- ===== 波形ビューア ===== -->
   <section id="waveform-panel">

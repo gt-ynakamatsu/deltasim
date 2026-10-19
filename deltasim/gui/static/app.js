@@ -63,6 +63,9 @@ const dom = {
   btnSaveFile: $("btn-save-file"),
   btnClearLog: $("btn-clear-log"),
   seedInput: $("seed-input"),
+  caseFilterInput: $("case-filter-input"),
+  btnCaseList: $("btn-case-list"),
+  caseDropdown: $("case-dropdown"),
   statusBarTop: $("status-bar-top"),
   progressBar: $("progress-bar"),
   fileList: $("file-list"),
@@ -77,6 +80,7 @@ const dom = {
   waveSigCount: $("wave-sig-count"),
   summaryBar: $("summary-bar"),
   resultList: $("result-list"),
+  caseDetailPanel: $("case-detail-panel"),
   truncatedBanner: $("truncated-banner"),
   truncatedMsg: $("truncated-msg"),
   btnOpenVcd: $("btn-open-vcd"),
@@ -206,9 +210,12 @@ const api = {
   browse:       (path)              => apiFetch("GET", `/api/browse?path=${encodeURIComponent(path)}`),
   fileRead:     (path)              => apiFetch("GET", `/api/file/read?path=${encodeURIComponent(path)}`),
   fileWrite:    (path, content)     => apiFetch("POST", "/api/file/write", { path, content }),
-  testStart:    (sv, spec, top, seed) => apiFetch("POST", "/api/test/start", {
-    sv_files: sv, spec, top: top ?? null, seed: seed !== "" ? parseInt(seed) : null,
+  testStart:    (sv, spec, top, seed, filterCases) => apiFetch("POST", "/api/test/start", {
+    sv_files: sv, spec, top: top ?? null,
+    seed: seed !== "" && seed != null ? parseInt(seed) : null,
+    filter_cases: filterCases?.length ? filterCases : null,
   }),
+  specCases:    (path)              => apiFetch("GET", `/api/spec/cases?path=${encodeURIComponent(path)}`),
   testCancel:   (jid)               => apiFetch("POST", `/api/test/${jid}/cancel`, {}),
   testResult:   (jid)               => apiFetch("GET",  `/api/test/${jid}/result`),
   waveIndex:    (path)              => apiFetch("GET", `/api/waveform/index?path=${encodeURIComponent(path)}`),
@@ -422,8 +429,9 @@ async function runTest() {
     const specPath = state.project.specFile.path;
     const seed = dom.seedInput.value.trim();
     const top = state.project.top;
+    const filterCases = parseCaseFilter(dom.caseFilterInput.value);
 
-    const { job_id } = await api.testStart(svPaths, specPath, top, seed);
+    const { job_id } = await api.testStart(svPaths, specPath, top, seed, filterCases);
     state.currentJobId = job_id;
     await consumeSSE(`/api/test/${job_id}/events`);
 
@@ -548,12 +556,12 @@ async function loadWaveformFromVcd(vcdPath) {
 function clearResults() {
   dom.resultList.innerHTML = "";
   dom.summaryBar.innerHTML = "";
+  dom.caseDetailPanel.innerHTML = '<div style="color:#8888aa;">ケースを選択すると詳細が表示されます</div>';
   state.selectedCase = null;
 }
 
 function renderResults(result) {
   const s = result.summary;
-  // §13.1: summary.elapsed_ms が推奨
   const totalMs = s.elapsed_ms ?? 0;
 
   dom.summaryBar.innerHTML = [
@@ -567,23 +575,34 @@ function renderResults(result) {
 
   dom.resultList.innerHTML = "";
 
-  // §13.2: cases[] ベースで表示（PR#8 で追加された per-case details）
+  // §13.2: cases[] ベースで表示
   const cases = result.cases ?? [];
+
+  // E_NO_CASE: フィルタに一致するケースがない
+  if (result.e_no_case || (cases.length === 0 && result.status === "ERROR"
+      && (result.errors ?? []).some(e => e.code === "E_NO_CASE"))) {
+    const errMsg = (result.errors ?? []).find(e => e.code === "E_NO_CASE")?.message
+      ?? "フィルタに一致するケースがありません";
+    dom.resultList.innerHTML = `
+      <div style="padding:12px 10px;">
+        <div style="color:#fb923c;font-weight:700;margin-bottom:6px;">⚠ E_NO_CASE</div>
+        <div style="color:#a3a3b4;font-size:11px;">${escHtml(errMsg)}</div>
+        <div style="color:#8888aa;font-size:10px;margin-top:6px;">
+          ケースフィルタを変更するか、空欄にして全ケースを実行してください。
+        </div>
+      </div>`;
+    return;
+  }
 
   if (cases.length === 0 && result.status === "ERROR") {
     // パース失敗等: ケースなしでエラー表示
-    const card = _makeCaseCard({
-      name: result.module || "error",
-      status: "ERROR",
-      seed: null,
-      elapsed_ms: totalMs,
-      log: result.log ?? [],
-      checks: [],
-      errors: result.errors ?? [],
-      truncated_at: null,
-      cancelled: result.cancelled,
-    });
-    dom.resultList.appendChild(card);
+    const errMsg = (result.errors ?? []).map(e => e.message).join("\n") || "エラーが発生しました";
+    dom.resultList.innerHTML = `
+      <div style="padding:10px 8px;">
+        <div class="status-dot dot-ERROR" style="display:inline-block;margin-right:4px;"></div>
+        <span style="color:#fb923c;font-size:11px;">ERROR</span>
+        <div style="color:#a3a3b4;font-size:10px;margin-top:4px;white-space:pre-wrap;">${escHtml(errMsg)}</div>
+      </div>`;
     return;
   }
 
@@ -595,60 +614,103 @@ function renderResults(result) {
 }
 
 function _makeCaseCard(c) {
-  // §13.2: cases[] の要素（name/status/seed/elapsed_ms/checks/log）
+  // 上段: コンパクトな一覧行（クリックで下段に詳細表示）
   const card = document.createElement("div");
   card.className = "case-card";
   const dur = c.elapsed_ms != null ? `${(c.elapsed_ms / 1000).toFixed(3)}s` : "";
-
-  // failures: checks[] から FAIL/ERROR のものを抽出
-  const failures = (c.checks ?? []).filter(chk => chk.status !== "PASS" && chk.status !== "SKIP");
-  const errMsg   = (c.errors ?? []).map(e => e.message).join("; ");
+  const nFail = (c.checks ?? []).filter(chk => chk.status !== "PASS" && chk.status !== "SKIP").length;
+  const failBadge = nFail > 0 ? `<span style="font-size:10px;color:#f87171;"> ${nFail}×FAIL</span>` : "";
 
   card.innerHTML = `
     <div class="case-header">
       <div class="status-dot dot-${c.status}"></div>
       <div class="case-name">${escHtml(c.name)}</div>
-      <div class="case-meta">${dur}</div>
-    </div>
-    <div class="case-detail">
-      ${c.seed != null ? `<div class="failure-label">シード: <code>${c.seed}</code></div>` : ""}
-      ${c.truncated_at != null ? `<div class="failure-label" style="color:#fb923c;">⚠ 波形上限 ${c.truncated_at}ns</div>` : ""}
-      ${c.cancelled ? `<div class="failure-label" style="color:#a3a3b4;">⚠ キャンセル</div>` : ""}
-      ${errMsg ? `<div class="failure-label" style="color:#fb923c;">${escHtml(errMsg)}</div>` : ""}
-      ${_renderFailures(failures)}
-      ${_renderCaseLog(c.log ?? [])}
+      ${failBadge}
+      <div class="case-meta" style="margin-left:auto;">${dur}</div>
     </div>`;
   card.addEventListener("click", () => selectCase(card, c));
   return card;
-}
-
-function _renderFailures(failures) {
-  if (!failures?.length) return '<div class="failure-label">✓ 全チェック合格</div>';
-  return failures.slice(0, 10).map(f =>
-    `<div class="failure-item">cycle=${f.cycle} <b>${escHtml(String(f.signal))}</b> `+
-    `期待:<b>${escHtml(String(f.expected))}</b> 実測:<b>${escHtml(String(f.actual))}</b></div>`
-  ).join("") + (failures.length > 10 ? `<div class="failure-label">… 他 ${failures.length - 10} 件</div>` : "");
-}
-
-function _renderCaseLog(logLines) {
-  if (!logLines?.length) return "";
-  return `<div class="failure-label" style="margin-top:4px;">ログ:</div>`
-    + logLines.slice(0, 5).map(l =>
-        `<div style="font-family:monospace;font-size:10px;color:#a3a3b4;padding:0 4px;">${escHtml(l)}</div>`
-      ).join("")
-    + (logLines.length > 5 ? `<div class="failure-label">… 他 ${logLines.length - 5} 行</div>` : "");
 }
 
 function selectCase(card, c) {
   document.querySelectorAll(".case-card").forEach(el => el.classList.remove("selected"));
   card.classList.add("selected");
   state.selectedCase = c;
+  // 下段に詳細表示
+  _renderCaseDetail(c);
   // 波形カーソルを最初の失敗へジャンプ
-  const firstFail = (c.checks ?? []).find(chk => chk.status !== "PASS");
+  const firstFail = (c.checks ?? []).find(chk => chk.status !== "PASS" && chk.status !== "SKIP");
   if (firstFail && state.waveformData) {
     state.cursorA = firstFail.time_ns ?? (firstFail.cycle ?? 0) * 10;
     drawWaveform();
   }
+}
+
+function _renderCaseDetail(c) {
+  // 下段: 選択ケースの詳細（checks・message・log）
+  const checks = c.checks ?? [];
+  const failures = checks.filter(chk => chk.status !== "PASS" && chk.status !== "SKIP");
+  const passed  = checks.filter(chk => chk.status === "PASS");
+  const errMsg  = (c.errors ?? []).map(e => e.message).join("\n");
+
+  let html = `<div class="detail-section-hdr">${escHtml(c.name)}`;
+  if (c.seed != null) html += ` <span style="font-weight:400;">seed=${c.seed}</span>`;
+  if (c.elapsed_ms != null) html += ` <span style="font-weight:400;">${(c.elapsed_ms/1000).toFixed(3)}s</span>`;
+  html += `</div>`;
+
+  // message フィールド（仕様書：あれば表示、なければ省略）
+  if (c.message) {
+    html += `<div style="padding:2px 4px;color:#a3a3b4;font-size:10px;">${escHtml(c.message)}</div>`;
+  }
+
+  if (c.cancelled) {
+    html += `<div style="padding:2px 4px;color:#a3a3b4;font-size:10px;">⚠ キャンセルされました</div>`;
+  }
+  if (c.truncated_at != null) {
+    html += `<div style="padding:2px 4px;color:#fb923c;font-size:10px;">⚠ 波形記録 ${c.truncated_at}ns で上限到達</div>`;
+  }
+  if (errMsg) {
+    html += `<div style="padding:2px 4px;color:#fb923c;font-size:10px;">${escHtml(errMsg)}</div>`;
+  }
+
+  // 失敗 checks
+  if (failures.length > 0) {
+    html += `<div class="detail-section-hdr">失敗 ${failures.length} 件</div>`;
+    html += failures.slice(0, 50).map(f => `
+      <div class="detail-check-item">
+        <div class="detail-check-dot" style="background:#f87171;"></div>
+        <div class="detail-check-name">${escHtml(f.signal || f.name)}</div>
+        <div class="detail-check-val">
+          cycle=${f.cycle}
+          期待:<b>${escHtml(String(f.expected))}</b>
+          実測:<b>${escHtml(String(f.actual))}</b>
+        </div>
+      </div>`).join("");
+    if (failures.length > 50) html += `<div style="padding:3px 8px;color:#8888aa;font-size:10px;">… 他 ${failures.length-50} 件</div>`;
+  }
+
+  // 合格 checks（折りたたみ表示）
+  if (passed.length > 0) {
+    html += `<div class="detail-section-hdr">合格 ${passed.length} 件</div>`;
+    html += passed.slice(0, 10).map(f => `
+      <div class="detail-check-item">
+        <div class="detail-check-dot" style="background:#4ade80;"></div>
+        <div class="detail-check-name">${escHtml(f.signal || f.name)}</div>
+        <div class="detail-check-val" style="color:#8888aa;">cycle=${f.cycle}</div>
+      </div>`).join("");
+    if (passed.length > 10) html += `<div style="padding:3px 8px;color:#8888aa;font-size:10px;">… 他 ${passed.length-10} 件</div>`;
+  }
+
+  // per-case ログ
+  if ((c.log ?? []).length > 0) {
+    html += `<div class="detail-section-hdr">ログ</div>`;
+    html += (c.log ?? []).slice(0, 10).map(l =>
+      `<div style="padding:1px 4px;font-family:monospace;font-size:10px;color:#a3a3b4;">${escHtml(l)}</div>`
+    ).join("");
+    if (c.log.length > 10) html += `<div style="padding:2px 8px;color:#8888aa;font-size:10px;">… 他 ${c.log.length-10} 行</div>`;
+  }
+
+  dom.caseDetailPanel.innerHTML = html;
 }
 
 async function rerunWithSeed(seed) {
@@ -1223,6 +1285,72 @@ function _drawDebugWaveform(data) {
 }
 
 // =========================================================================
+// ケースフィルタ UI
+// =========================================================================
+
+function parseCaseFilter(raw) {
+  // カンマ区切り or スペース区切り → リストに変換（空 → null）
+  if (!raw || !raw.trim()) return [];
+  return raw.split(/[,\s]+/).map(s => s.trim()).filter(Boolean);
+}
+
+async function loadCaseCandidates() {
+  if (!state.project.specFile) {
+    log("スペックファイルを先に選択してください", "log-error");
+    return;
+  }
+  try {
+    const data = await api.specCases(state.project.specFile.path);
+    const names = data.case_names ?? [];
+    if (!names.length) {
+      log("ケース名が取得できませんでした", "log-warn");
+      return;
+    }
+    showCaseDropdown(names);
+  } catch (e) {
+    log(`ケース候補取得エラー: ${e.message}`, "log-error");
+  }
+}
+
+function showCaseDropdown(names) {
+  const btn = dom.btnCaseList;
+  const rect = btn.getBoundingClientRect();
+  const dd = dom.caseDropdown;
+
+  dd.innerHTML = names.map((n, i) => `
+    <div class="case-candidate" data-name="${escHtml(n)}">${escHtml(n)}</div>
+  `).join("");
+
+  dd.querySelectorAll(".case-candidate").forEach(el => {
+    el.addEventListener("click", () => {
+      // 入力欄に追加（重複排除）
+      const existing = parseCaseFilter(dom.caseFilterInput.value);
+      const name = el.dataset.name;
+      if (!existing.includes(name)) {
+        existing.push(name);
+      }
+      dom.caseFilterInput.value = existing.join(", ");
+      hideCaseDropdown();
+    });
+  });
+
+  dd.style.display = "block";
+  dd.style.left = rect.left + "px";
+  dd.style.top  = (rect.bottom + 4) + "px";
+}
+
+function hideCaseDropdown() {
+  dom.caseDropdown.style.display = "none";
+}
+
+// ドロップダウン外クリックで閉じる
+document.addEventListener("click", e => {
+  if (!dom.caseDropdown.contains(e.target) && e.target !== dom.btnCaseList) {
+    hideCaseDropdown();
+  }
+});
+
+// =========================================================================
 // ユーティリティ
 // =========================================================================
 
@@ -1242,6 +1370,7 @@ dom.btnRunTest.addEventListener("click", runTest);
 dom.btnStop.addEventListener("click", stopTest);
 dom.btnSaveProject.addEventListener("click", saveProject);
 dom.btnDebug.addEventListener("click", openDebugPanel);
+dom.btnCaseList.addEventListener("click", (e) => { e.stopPropagation(); loadCaseCandidates(); });
 dom.btnZoomIn.addEventListener("click", zoomIn);
 dom.btnZoomOut.addEventListener("click", zoomOut);
 dom.btnZoomFit.addEventListener("click", zoomFit);

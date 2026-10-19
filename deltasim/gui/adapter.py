@@ -83,6 +83,23 @@ def load(
 # test(): YAML スペックに従ってテストを実行し、結果 JSON を返す
 # ---------------------------------------------------------------------------
 
+def list_spec_cases(spec_path: str) -> list:
+    """YAML スペックファイルからケース名一覧を返す（GUI フィルタ UI 用）。
+
+    判定ロジックは GUI が持たない原則に従い、scenario.cases[] の name を返すだけ。
+    旧式（cases: なし）は stem から生成される単一ケースを返す。
+    """
+    try:
+        from deltasim.tb.scenario import load_scenario
+        sc = load_scenario(spec_path)
+        if sc.cases:
+            return [c.name for c in sc.cases]
+        # 旧式: ファイル stem が単一ケース名
+        return [sc._stem]
+    except Exception as e:
+        return []  # エラーは呼び出し元でハンドリング
+
+
 def test(
     sv_files: List[str],
     spec_path: str,
@@ -92,15 +109,14 @@ def test(
     vcd_path: Optional[str] = None,
     param_overrides: Optional[Dict[str, int]] = None,
     on_progress: Optional[Callable[[dict], None]] = None,
-    cancel_event=None,  # threading.Event | None
+    cancel_event=None,          # threading.Event | None
+    filter_cases: Optional[List[str]] = None,  # ケース名フィルタ（ワイルドカード可）
 ) -> dict:
-    """テストを実行して結果 JSON を返す（PR#8 cases[] ベース）。
+    """テストを実行して結果 JSON を返す（cases[] ベース）。
 
-    PR#8 変更点:
-      - result.cases[] を使用（per-case: name/status/seed/elapsed_ms/checks/log）
-      - summary.elapsed_ms を全体実時間として使用（top-level elapsed_ms は非推奨）
-      - API は常に TestResult を返す（None 分岐なし）
-      - seed は cases[].seed に入る（top-level result.seed はデフォルト値のまま）
+    filter_cases: ケース名のリスト（fnmatch ワイルドカード可）。
+      - None / [] → 全ケース実行
+      - 一致なし → E_NO_CASE エラーを返す（API が PASS/empty を返す場合に adapter でラップ）
     """
     import deltasim.api as ds
     from deltasim.result import CancelToken
@@ -125,10 +141,40 @@ def test(
         params=param_overrides or {},
         on_progress=_progress,
         cancel=token,
+        filter_cases=filter_cases or None,
     )
 
     # §13.2: cases[] を使用（per-case details）
     cases = [c.to_dict() for c in result.cases]
+
+    # E_NO_CASE: filter_cases が指定されたが一致するケースが0件
+    # 現状の API は PASS/empty を返すので adapter で ERROR に変換
+    e_no_case = (
+        bool(filter_cases)              # フィルタが指定されている
+        and len(result.cases) == 0      # 一致するケースなし
+        and result.status not in ("ERROR",)  # 既に ERROR でない
+    )
+    if e_no_case:
+        patterns = ", ".join(f"'{p}'" for p in (filter_cases or []))
+        no_case_msg = f"E_NO_CASE: フィルタ {patterns} に一致するケースがありません"
+        if on_progress:
+            _progress_to_sse({"type": "finish", "status": "ERROR"}, on_progress)
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "module": result.module or "",
+            "status": "ERROR",
+            "cancelled": False,
+            "summary": {"total": 0, "pass": 0, "fail": 0, "error": 1, "skip": 0,
+                        "elapsed_ms": 0},
+            "cases": [],
+            "checks": [],
+            "log": [],
+            "errors": [{"file": "", "line": 0, "column": 0, "severity": "error",
+                        "message": no_case_msg, "code": "E_NO_CASE"}],
+            "vcd_path": vcd_path,
+            "truncated_at": None,
+            "e_no_case": True,         # GUI で判別用フラグ
+        }
 
     # summary: §13.1 summary.elapsed_ms が推奨
     total_elapsed = result.summary.get("elapsed_ms", result.elapsed_ms) \

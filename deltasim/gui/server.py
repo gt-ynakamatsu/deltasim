@@ -248,6 +248,20 @@ async def save_project(req: ProjectSaveRequest):
 # /api/examples — サンプルプロジェクト一覧
 # ---------------------------------------------------------------------------
 
+@app.get("/api/spec/cases")
+async def spec_cases(path: str = Query(..., description="YAML スペックファイルパス")):
+    """YAML スペックからケース名一覧を返す（ケースフィルタ UI 用）。
+
+    旧式（cases: なし）は stem 名の 1 件を返す。
+    """
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail=f"スペックファイルが見つかりません: {path!r}")
+
+    from deltasim.gui.adapter import list_spec_cases
+    names = await asyncio.to_thread(list_spec_cases, path)
+    return {"path": path, "case_names": names}
+
+
 @app.get("/api/examples")
 async def get_examples():
     examples_dir = Path(__file__).parent.parent.parent / "examples"
@@ -326,6 +340,7 @@ class TestStartRequest(BaseModel):
     seed: Optional[int] = None
     vcd_out: Optional[str] = None
     params: Dict[str, int] = {}
+    filter_cases: Optional[List[str]] = None  # ケース名フィルタ（ワイルドカード可）
 
     @field_validator("sv_files")
     @classmethod
@@ -358,6 +373,7 @@ async def test_start(req: TestStartRequest):
             seed=req.seed,
             vcd_path=req.vcd_out,
             params=req.params,
+            filter_cases=req.filter_cases,
         )
     )
     return {"job_id": job.job_id}
@@ -416,6 +432,7 @@ class TestRequest(BaseModel):
     seed: Optional[int] = None
     vcd_out: Optional[str] = None
     params: Dict[str, int] = {}
+    filter_cases: Optional[List[str]] = None
 
     @field_validator("sv_files")
     @classmethod
@@ -447,6 +464,7 @@ async def api_test(req: TestRequest):
             seed=req.seed,
             vcd_path=req.vcd_out,
             param_overrides=req.params,
+            filter_cases=req.filter_cases,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

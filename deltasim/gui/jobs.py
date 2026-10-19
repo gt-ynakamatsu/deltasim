@@ -132,6 +132,7 @@ async def run_test_job(
     seed: Optional[int] = None,
     vcd_path: Optional[str] = None,
     params: Optional[dict] = None,
+    filter_cases: Optional[list] = None,
 ) -> None:
     """テストジョブを非同期に実行する。"""
     from deltasim.gui.adapter import test as adapter_test
@@ -145,6 +146,7 @@ async def run_test_job(
             param_overrides=params or {},
             on_progress=progress_cb,
             cancel_event=job.cancel_event,
+            filter_cases=filter_cases,
         )
 
     try:

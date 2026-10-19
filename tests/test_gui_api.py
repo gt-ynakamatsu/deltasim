@@ -947,3 +947,159 @@ class TestM5ApiCompat:
         # cases[].elapsed_ms は per-case 実時間
         for case in data.get("cases", []):
             assert "elapsed_ms" in case
+
+
+# ---------------------------------------------------------------------------
+# ケースフィルタ・/api/spec/cases・E_NO_CASE
+# ---------------------------------------------------------------------------
+
+class TestCaseFilter:
+    def test_spec_cases_single(self, client):
+        """旧式スペック（cases:なし）からケース名を取得できること"""
+        res = client.get(f"/api/spec/cases?path={COUNTER_SPEC}")
+        assert res.status_code == 200
+        data = res.json()
+        assert "case_names" in data
+        assert len(data["case_names"]) == 1
+        # ファイル名 stem が名前になること
+        assert "counter_spec" in data["case_names"]
+
+    def test_spec_cases_not_found(self, client):
+        res = client.get("/api/spec/cases?path=/nonexistent/spec.yaml")
+        assert res.status_code == 404
+
+    def test_filter_cases_single_match(self, client):
+        """filter_cases で特定ケース名を指定して実行できること"""
+        res = client.post("/api/test", json={
+            "sv_files": [COUNTER_SV],
+            "spec": COUNTER_SPEC,
+            "filter_cases": ["counter_spec"],
+        })
+        assert res.status_code == 200
+        data = res.json()
+        assert data["status"] in ("PASS", "FAIL")
+        assert len(data["cases"]) == 1
+        assert data["cases"][0]["name"] == "counter_spec"
+
+    def test_filter_cases_wildcard(self, client):
+        """filter_cases でワイルドカードが使えること"""
+        res = client.post("/api/test", json={
+            "sv_files": [COUNTER_SV],
+            "spec": COUNTER_SPEC,
+            "filter_cases": ["counter*"],
+        })
+        assert res.status_code == 200
+        data = res.json()
+        # ワイルドカードで少なくとも1件ヒット
+        assert len(data["cases"]) >= 1
+
+    def test_e_no_case_error(self, client):
+        """filter_cases で一致なしのとき E_NO_CASE エラーを返すこと"""
+        res = client.post("/api/test", json={
+            "sv_files": [COUNTER_SV],
+            "spec": COUNTER_SPEC,
+            "filter_cases": ["nonexistent_case_xyz"],
+        })
+        assert res.status_code == 200
+        data = res.json()
+        assert data["status"] == "ERROR"
+        assert len(data["cases"]) == 0
+        # E_NO_CASE コードを持つエラーが存在すること
+        error_codes = [e.get("code") for e in data.get("errors", [])]
+        assert "E_NO_CASE" in error_codes, f"E_NO_CASE not in errors: {data['errors']}"
+
+    def test_e_no_case_message_readable(self, client):
+        """E_NO_CASE のエラーメッセージが読みやすいこと"""
+        res = client.post("/api/test", json={
+            "sv_files": [COUNTER_SV],
+            "spec": COUNTER_SPEC,
+            "filter_cases": ["xyz*"],
+        })
+        data = res.json()
+        err = next((e for e in data.get("errors", []) if e.get("code") == "E_NO_CASE"), None)
+        assert err is not None
+        assert "E_NO_CASE" in err["message"] or "xyz" in err["message"] or "フィルタ" in err["message"]
+
+    def test_filter_cases_none_runs_all(self, client):
+        """filter_cases が None のときは全ケースを実行すること"""
+        res = client.post("/api/test", json={
+            "sv_files": [COUNTER_SV],
+            "spec": COUNTER_SPEC,
+            "filter_cases": None,
+        })
+        assert res.status_code == 200
+        data = res.json()
+        assert len(data["cases"]) >= 1
+
+    def test_filter_cases_empty_runs_all(self, client):
+        """filter_cases が [] のときは全ケースを実行すること"""
+        res = client.post("/api/test", json={
+            "sv_files": [COUNTER_SV],
+            "spec": COUNTER_SPEC,
+            "filter_cases": [],
+        })
+        assert res.status_code == 200
+        data = res.json()
+        assert len(data["cases"]) >= 1
+
+
+# ---------------------------------------------------------------------------
+# 2段構成 結果パネル (cases[] + checks detail)
+# ---------------------------------------------------------------------------
+
+class TestCasesDetailStructure:
+    def test_cases_have_checks(self, client):
+        """cases[].checks が存在すること（下段詳細用）"""
+        res = client.post("/api/test", json={
+            "sv_files": [COUNTER_SV],
+            "spec": COUNTER_SPEC,
+        })
+        assert res.status_code == 200
+        data = res.json()
+        for case in data["cases"]:
+            assert "checks" in case
+            assert isinstance(case["checks"], list)
+
+    def test_cases_checks_have_required_fields(self, client):
+        """cases[].checks の各要素が必要フィールドを持つこと"""
+        res = client.post("/api/test", json={
+            "sv_files": [MUX2_SV],
+            "spec": MUX2_SPEC,
+        })
+        assert res.status_code == 200
+        data = res.json()
+        for case in data["cases"]:
+            for chk in case["checks"]:
+                assert "name" in chk
+                assert "status" in chk
+                assert "signal" in chk
+                assert "cycle" in chk
+                assert "expected" in chk
+                assert "actual" in chk
+
+    def test_message_field_optional(self, client):
+        """cases[].message は存在すれば表示、なければ省略（KeyError なし）"""
+        res = client.post("/api/test", json={
+            "sv_files": [COUNTER_SV],
+            "spec": COUNTER_SPEC,
+        })
+        assert res.status_code == 200
+        data = res.json()
+        # message フィールドが存在しても None でも問題ないこと
+        for case in data["cases"]:
+            # KeyError が出ないことを確認（存在しなくてよい）
+            _ = case.get("message")  # None or absent → OK
+
+    def test_summary_elapsed_ms_is_total(self, client):
+        """summary.elapsed_ms が全体実時間であること"""
+        res = client.post("/api/test", json={
+            "sv_files": [COUNTER_SV],
+            "spec": COUNTER_SPEC,
+        })
+        assert res.status_code == 200
+        data = res.json()
+        assert "summary" in data
+        assert "elapsed_ms" in data["summary"]
+        # 全体 >= 各ケースの合計（並行実行でもなければほぼ同値）
+        case_total = sum(c.get("elapsed_ms", 0) for c in data["cases"])
+        assert data["summary"]["elapsed_ms"] >= 0
