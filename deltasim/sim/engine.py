@@ -1115,6 +1115,13 @@ class SimEngine:
                 except _FinishSignal:
                     raise
                 nba.extend(ex.nba_queue)
+                # §FIX: Apply blocking-assignment (=) results back to engine signals.
+                # ex.signals starts as a copy of self.signals; only blocking assignments
+                # modify it in-place during execution.  Without this the blocking '='
+                # inside always_ff silently drops its value (only NBA '<=' was returned).
+                for name, new_v in ex.signals.items():
+                    if new_v != self.signals.get(name):
+                        self.signals[name] = new_v
                 for line in ex.display_log:
                     self._result.log.append(line)
                     if self.verbose:

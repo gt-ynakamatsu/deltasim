@@ -267,6 +267,21 @@ def test(
         _emit("finish", status="ERROR", elapsed_ms=result.elapsed_ms)
         return result
 
+    # §15.6: Validate offset_ns for all cases (pre-simulation)
+    from deltasim.tb.scenario import validate_offset_ns
+    offset_errors = validate_offset_ns(scenario, spec_path=str(spec))
+    if offset_errors:
+        result.status = "ERROR"
+        result.errors.extend(offset_errors)
+        result.elapsed_ms = (time.time() - t0) * 1000
+        _emit("finish", status="ERROR", elapsed_ms=result.elapsed_ms)
+        return result
+
+    # §15.12: Propagate scenario-level warnings to result
+    from deltasim.result import WarningInfo
+    if hasattr(scenario, "_warnings") and scenario._warnings:
+        result.warnings.extend(scenario._warnings)
+
     # Elaborate
     _emit("progress", phase="elab")
     top_name = top or scenario.top
@@ -390,20 +405,20 @@ def _run_one_case(
     wave_mem_mb,
     t_parent,
 ) -> "CaseResult":
-    """Run a single CaseSpec and return CaseResult."""
-    from deltasim.result import CaseResult
+    """Run a single CaseSpec and return CaseResult (§15.3 simulation loop)."""
+    from deltasim.result import CaseResult, WarningInfo
     from deltasim.tb.scenario import StimulusSchedule, _expand_at
-    from deltasim.sim.engine import SimEngine, SimError
+    from deltasim.sim.engine import (SimEngine, SimError,
+                                     _InitialScheduler, SimResult)
 
     case_t0 = time.time()
     cr = CaseResult(name=case.name)
 
-    def _emit(type_: str, **kw):
-        if on_progress:
-            ev = ProgressEvent(type=type_, **kw)
-            on_progress(ev.to_dict())
+    # Propagate scenario-level warnings to case result
+    if hasattr(scenario, "_warnings"):
+        cr.warnings = list(scenario._warnings)
 
-    # §14.3 SKIP — message = skip_reason または "skipped"
+    # §14.3 SKIP
     if case.skip:
         cr.status = "SKIP"
         cr.message = case.skip_reason if case.skip_reason else "skipped"
@@ -425,12 +440,11 @@ def _run_one_case(
 
     cr.seed = eff_seed
 
-    # Engine
-    engine = SimEngine(
-        design,
-        half_period_ns=eff_clock.period_ns // 2,
-        reset_cycles=eff_reset.duration_cycles,
-    )
+    period_ns = eff_clock.period_ns       # §15.2 effective period
+    hp = period_ns // 2                   # half-period (posedge→negedge)
+
+    # Engine setup
+    engine = SimEngine(design, half_period_ns=hp, reset_cycles=eff_reset.duration_cycles)
     if eff_clock.signal:
         engine.set_clk(eff_clock.signal)
     if eff_reset.signal:
@@ -450,14 +464,13 @@ def _run_one_case(
                 model.reset()
         except Exception as e:
             cr.status = "ERROR"
-            err = _exc_to_error(e, "E006",
-                                message=f"参照モデルの読み込み失敗: {e}")
+            err = _exc_to_error(e, "E006", message=f"参照モデルの読み込み失敗: {e}")
             cr.errors.append(err)
-            cr.message = err.message   # §14.3 ERROR message
+            cr.message = err.message
             cr.elapsed_ms = (time.time() - case_t0) * 1000
             return cr
 
-    # VCD (case-specific or top-level)
+    # VCD
     vcd_path = scenario.sim.vcd
     vcd_obj = None
     if vcd_path:
@@ -476,95 +489,200 @@ def _run_one_case(
     checks: List[CheckInfo] = []
     overall_status = "PASS"
 
-    def _pre(cycle_num: int, sigs: dict):
-        if cancel and cancel.is_cancelled:
-            raise SimulationCancelled()
-        for sig, val in stim.get(cycle_num).items():
-            engine._write(sig, val)
+    # ---------------------------------------------------------------
+    # §15.5: Initialize engine — assert reset ONCE at start
+    # ---------------------------------------------------------------
+    engine._time = 0
+    engine._result = SimResult()
+    engine._initial_scheduler = _InitialScheduler()
+    for ib in getattr(design, "initial_blocks", []):
+        engine._initial_scheduler.add(ib, engine)
 
-    def _post(cycle_num: int, snap: dict):
-        nonlocal overall_status
-        time_ns = engine._time
+    if engine._rst is not None:
+        rst_assert_val = 0 if engine._rst_active_low else 1
+        engine._write(engine._rst, rst_assert_val)
+    engine._eval_comb_loop()
+    engine._result.history.append(dict(engine.signals))
 
+    # ---------------------------------------------------------------
+    # Build expected schedule: (cycle, offset_ns) -> list of dicts
+    # ---------------------------------------------------------------
+    exp_schedule: Dict = {}
+    for exp in eff_expected:
+        cycs = sorted(_expand_at(exp.at, eff_cycles))
+        for c in cycs:
+            exp_schedule.setdefault((c, exp.offset_ns), []).append(exp)
+
+    def exp_offsets_for_cycle(cycle: int) -> set:
+        return {off for (c, off) in exp_schedule if c == cycle}
+
+    # ---------------------------------------------------------------
+    # §15.4: Apply stimulus — write values + edge-triggered NBA
+    # ---------------------------------------------------------------
+    def apply_stimulus(vals: dict):
+        changed = []
+        for s, v in vals.items():
+            old = engine.signals.get(s, 0)
+            engine._write(s, v)
+            new = engine.signals.get(s, 0)
+            if new != old:
+                changed.append((s, old, new))
+        engine._eval_comb_loop()
+        if changed:
+            nba = []
+            for s, o, n in changed:
+                nba += engine._collect_nba_for_edge(s, o, n)
+            engine._apply_nba(nba)
+            engine._eval_comb_loop()
+            if engine._initial_scheduler:
+                for s, o, n in changed:
+                    engine._initial_scheduler.notify_edge(s, o, n, engine._time, engine)
+
+    def drive_clock(val: int):
+        prev = engine.signals.get(engine._clk, 0) if engine._clk else 0
+        if engine._clk:
+            engine._write(engine._clk, val)
+        nba = engine._collect_nba_for_edge(engine._clk, prev, val) if engine._clk else []
+        engine._apply_nba(nba)
+        engine._eval_comb_loop()
+        if engine._initial_scheduler and engine._clk:
+            engine._initial_scheduler.notify_edge(engine._clk, prev, val, engine._time, engine)
+
+    def record_vcd_and_db(time_ns: int):
+        if vcd_obj:
+            vcd_obj.record(time_ns, engine.signals)
         for sname, sinfo in design.signals.items():
-            change_db.record(time_ns, sname, snap.get(sname), sinfo.width)
+            change_db.record(time_ns, sname, engine.signals.get(sname), sinfo.width)
 
-        if change_db.truncated_at == time_ns and not cr.truncated_at:
-            cr.truncated_at = time_ns
-
-        for exp in eff_expected:
-            if cycle_num not in _expand_at(exp.at, eff_cycles):
-                continue
+    def do_checks(cycle_num: int, off: int):
+        nonlocal overall_status
+        t_ns = (cycle_num - 1) * period_ns + hp + off
+        for exp in exp_schedule.get((cycle_num, off), []):
             if exp.check:
                 for sig, expected_val in exp.check.items():
-                    actual_raw = snap.get(sig, 0)
+                    actual_raw = engine.signals.get(sig, 0)
                     w = design.signals.get(sig)
                     w_bits = w.width if w else 1
                     passed = (actual_raw == expected_val)
                     st = "PASS" if passed else "FAIL"
                     if not passed:
                         overall_status = "FAIL"
+                    # §15.7 name format
+                    if off == 0:
+                        name = f"{sig}@cycle{cycle_num}[spec]"
+                    else:
+                        name = f"{sig}@cycle{cycle_num}+{off}ns[spec]"
                     checks.append(CheckInfo(
-                        name=f"{sig}@cycle{cycle_num}[spec]",
-                        status=st, signal=sig,
-                        cycle=cycle_num, time_ns=time_ns,
+                        name=name, status=st, signal=sig,
+                        cycle=cycle_num, time_ns=t_ns, offset_ns=off,
                         expected=val_to_4state(expected_val, w_bits),
                         actual=val_to_4state(actual_raw, w_bits),
                         source="spec", seed=eff_seed,
-                        message=None if passed else f"expected {expected_val}, got {actual_raw}",
+                        message=None if passed else
+                                f"expected {expected_val}, got {actual_raw}",
                     ))
             elif exp.expr:
-                ns = dict(snap)
-                ns["_cycle"] = cycle_num
+                ns_ctx = dict(engine.signals); ns_ctx["_cycle"] = cycle_num
                 try:
-                    passed = bool(eval(exp.expr, {"__builtins__": {}}, ns))
+                    passed = bool(eval(exp.expr, {"__builtins__": {}}, ns_ctx))
                 except Exception:
                     passed = False
                 st = "PASS" if passed else "FAIL"
                 if not passed:
                     overall_status = "FAIL"
+                name_e = (f"expr@cycle{cycle_num}[spec]" if off == 0
+                          else f"expr@cycle{cycle_num}+{off}ns[spec]")
                 checks.append(CheckInfo(
-                    name=f"expr@cycle{cycle_num}[spec]",
-                    status=st, signal="<expr>",
-                    cycle=cycle_num, time_ns=time_ns,
-                    expected=exp.expr, actual="",
+                    name=name_e, status=st, signal="<expr>",
+                    cycle=cycle_num, time_ns=t_ns, offset_ns=off,
+                    expected=str(exp.expr), actual="",
                     source="spec", seed=eff_seed,
                     message=None if passed else f"expression failed: {exp.expr}",
                 ))
 
-        if model:
-            inp = {n: engine.signals.get(n, 0)
-                   for n, info in design.signals.items()
-                   if info.direction == "input"}
-            try:
-                exp_out = model.step(inp)
-            except Exception:
-                exp_out = {}
-            for sig, expected_val in exp_out.items():
-                if sig not in snap:
-                    continue
-                actual_raw = snap.get(sig, 0)
-                w = design.signals.get(sig)
-                w_bits = w.width if w else 1
-                passed = (actual_raw == expected_val)
-                st = "PASS" if passed else "FAIL"
-                if not passed:
-                    overall_status = "FAIL"
-                checks.append(CheckInfo(
-                    name=f"{sig}@cycle{cycle_num}[model]",
-                    status=st, signal=sig,
-                    cycle=cycle_num, time_ns=time_ns,
-                    expected=val_to_4state(expected_val, w_bits),
-                    actual=val_to_4state(actual_raw, w_bits),
-                    source="model", seed=eff_seed,
-                    message=None if passed else f"model: expected {expected_val}, got {actual_raw}",
-                ))
-
-        _emit("progress", phase="sim", cycle=cycle_num,
-              total_cycles=eff_cycles, time_ns=time_ns)
-
+    # ---------------------------------------------------------------
+    # §15.3: Main simulation loop
+    # ---------------------------------------------------------------
     try:
-        engine.run(eff_cycles, pre_posedge_hook=_pre, post_posedge_hook=_post)
+        for cycle_idx in range(eff_cycles):
+            if cancel and cancel.is_cancelled:
+                raise SimulationCancelled()
+
+            N = cycle_idx + 1
+            t0_ns = cycle_idx * period_ns + hp   # posedge time (t = (N-1)*T + T/2)
+
+            # §15.5: Release reset ONCE (at start of cycle reset_cycles+1)
+            if engine._rst is not None and cycle_idx == engine.reset_cycles:
+                rst_rel_val = 1 if engine._rst_active_low else 0
+                apply_stimulus({engine._rst: rst_rel_val})
+
+            # Collect all offsets for this cycle (posedge, negedge, + any stim/exp)
+            stim_offs = stim.offsets_for_cycle(N)
+            exp_offs = exp_offsets_for_cycle(N)
+            all_offs = sorted({0, hp} | stim_offs | exp_offs)
+
+            for off in all_offs:
+                engine._time = t0_ns + off
+
+                # §15.3.2: Apply stimuli for (N, off)
+                vals = stim.get(N, off)
+                if vals:
+                    apply_stimulus(vals)
+
+                # §15.3.4: Clock edge
+                if off == 0 and engine._clk:
+                    drive_clock(1)    # posedge
+                elif off == hp and engine._clk:
+                    drive_clock(0)    # negedge
+
+                # §15.8: Record VCD and signal-change DB at this time
+                record_vcd_and_db(engine._time)
+
+                # §15.3.5: Check expects
+                do_checks(N, off)
+
+                # §15.3.6: Reference model (posedge only, offset_ns=0)
+                if off == 0 and model:
+                    inp = {nm: engine.signals.get(nm, 0)
+                           for nm, info in design.signals.items()
+                           if info.direction == "input"}
+                    try:
+                        exp_out = model.step(inp)
+                    except Exception:
+                        exp_out = {}
+                    for sig, expected_val in exp_out.items():
+                        if sig not in engine.signals:
+                            continue
+                        actual_raw = engine.signals.get(sig, 0)
+                        w = design.signals.get(sig)
+                        w_bits = w.width if w else 1
+                        passed = (actual_raw == expected_val)
+                        st = "PASS" if passed else "FAIL"
+                        if not passed:
+                            overall_status = "FAIL"
+                        checks.append(CheckInfo(
+                            name=f"{sig}@cycle{N}[model]",
+                            status=st, signal=sig,
+                            cycle=N, time_ns=t0_ns, offset_ns=0,
+                            expected=val_to_4state(expected_val, w_bits),
+                            actual=val_to_4state(actual_raw, w_bits),
+                            source="model", seed=eff_seed,
+                            message=None if passed else
+                                    f"model: expected {expected_val}, got {actual_raw}",
+                        ))
+
+            engine._result.history.append(dict(engine.signals))
+            _emit_fn = lambda type_, **kw: (
+                on_progress(ProgressEvent(type=type_, **kw).to_dict())
+                if on_progress else None
+            )
+            if on_progress:
+                on_progress(ProgressEvent(
+                    type="progress", phase="sim",
+                    cycle=N, total_cycles=eff_cycles,
+                    time_ns=engine._time,
+                ).to_dict())
+
     except SimulationCancelled:
         cr.cancelled = True
         if not checks:
@@ -583,25 +701,19 @@ def _run_one_case(
     else:
         final_status = overall_status
 
+    # §14.3 message
+    if cr.cancelled and final_status == "SKIP":
+        cr.message = "cancelled"
+    elif final_status == "ERROR" and cr.errors:
+        cr.message = cr.errors[0].message
+
     cr.status = final_status
     cr.checks = checks
     cr.log = engine._result.log if engine._result else []
-    # §13.1: case elapsed_ms = this case's execution time
+    cr.truncated_at = change_db.truncated_at
     cr.elapsed_ms = (time.time() - case_t0) * 1000
-
-    # §14.3: message フィールド設定
-    if cr.cancelled and cr.status == "SKIP":
-        cr.message = "cancelled"
-    elif cr.status == "ERROR" and cr.errors:
-        cr.message = cr.errors[0].message
-    # PASS/FAIL: §14 では未定義 → 空文字列のまま（docs/api.md に記載）
-
     return cr
 
-
-# ---------------------------------------------------------------------------
-# run()
-# ---------------------------------------------------------------------------
 
 def run(
     files: FilesOrDesign,

@@ -141,28 +141,97 @@ class TestRunner:
             vcd_obj.record_initial(0, engine.signals)
             engine.vcd_writer = vcd_obj
 
-        # Reset model
         if model and hasattr(model, "reset"):
             model.reset()
 
-        def pre_hook(cycle_num: int, signals: dict):
-            for sig, val in stim.get(cycle_num).items():
-                engine._write(sig, val)
+        hp = engine.half_period
+        period_ns = hp * 2
 
-        def post_hook(cycle_num: int, snap: dict):
-            self._check_expected(result, sc, cycle_num, snap)
-            if model:
-                self._check_model(result, engine, model, cycle_num, snap)
-            _emit("progress", phase="sim",
-                  cycle=cycle_num, total_cycles=sc.sim.cycles,
-                  time_ns=engine._time)
+        # §15.5: Initialize — assert reset ONCE at start
+        from deltasim.sim.engine import SimResult, _InitialScheduler
+        engine._time = 0
+        engine._result = SimResult()
+        engine._initial_scheduler = _InitialScheduler()
+        if engine._rst is not None:
+            engine._write(engine._rst, 0 if engine._rst_active_low else 1)
+        engine._eval_comb_loop()
+        engine._result.history.append(dict(engine.signals))
+
+        # Build expected schedule: (cycle, offset_ns) -> list of entries
+        exp_sched = {}
+        for exp in sc.expected:
+            for c in _expand_at(exp.at, sc.sim.cycles):
+                off = exp.offset_ns if hasattr(exp, 'offset_ns') else 0
+                exp_sched.setdefault((c, off), []).append(exp)
+
+        def exp_offs(cycle):
+            return {o for (c, o) in exp_sched if c == cycle}
+
+        # §15.4: apply_stimulus with edge detection
+        def apply_stimulus(vals):
+            changed = []
+            for s, v in vals.items():
+                old = engine.signals.get(s, 0)
+                engine._write(s, v)
+                new = engine.signals.get(s, 0)
+                if new != old:
+                    changed.append((s, old, new))
+            engine._eval_comb_loop()
+            if changed:
+                nba = []
+                for s, o, n in changed:
+                    nba += engine._collect_nba_for_edge(s, o, n)
+                engine._apply_nba(nba)
+                engine._eval_comb_loop()
+
+        def drive_clock(val):
+            prev = engine.signals.get(engine._clk, 0) if engine._clk else 0
+            if engine._clk:
+                engine._write(engine._clk, val)
+            nba = engine._collect_nba_for_edge(engine._clk, prev, val) if engine._clk else []
+            engine._apply_nba(nba)
+            engine._eval_comb_loop()
 
         try:
-            engine.run(
-                sc.sim.cycles,
-                pre_posedge_hook=pre_hook,
-                post_posedge_hook=post_hook,
-            )
+            for cycle_idx in range(sc.sim.cycles):
+                N = cycle_idx + 1
+                t0_ns = cycle_idx * period_ns + hp
+
+                # §15.5: release reset once
+                if engine._rst is not None and cycle_idx == engine.reset_cycles:
+                    apply_stimulus({engine._rst: 1 if engine._rst_active_low else 0})
+
+                stim_offs = stim.offsets_for_cycle(N)
+                exp_offs_n = exp_offs(N)
+                all_offs = sorted({0, hp} | stim_offs | exp_offs_n)
+
+                for off in all_offs:
+                    engine._time = t0_ns + off
+
+                    vals = stim.get(N, off)
+                    if vals:
+                        apply_stimulus(vals)
+
+                    if off == 0 and engine._clk:
+                        drive_clock(1)
+                    elif off == hp and engine._clk:
+                        drive_clock(0)
+
+                    if vcd_obj:
+                        vcd_obj.record(engine._time, engine.signals)
+
+                    snap = dict(engine.signals)
+                    for exp in exp_sched.get((N, off), []):
+                        self._check_expected_entry(result, exp, N, off, engine._time, snap)
+
+                    if off == 0 and model:
+                        self._check_model(result, engine, model, N, snap)
+
+                engine._result.history.append(dict(engine.signals))
+                _emit("progress", phase="sim",
+                      cycle=N, total_cycles=sc.sim.cycles,
+                      time_ns=engine._time)
+
         finally:
             if vcd_obj:
                 vcd_obj.close()
@@ -172,8 +241,54 @@ class TestRunner:
         return result
 
     # ------------------------------------------------------------------
-    # Expected value checking
+    # Expected value checking (offset-aware)
     # ------------------------------------------------------------------
+
+    def _check_expected_entry(
+        self,
+        result: TestRunResult,
+        exp,
+        cycle_num: int,
+        offset_ns: int,
+        time_ns: int,
+        snap: dict,
+    ) -> None:
+        if exp.check:
+            for sig, expected_val in exp.check.items():
+                actual = snap.get(sig, 0)
+                passed = actual == expected_val
+                cr = CheckResult(
+                    cycle=cycle_num,
+                    signal=sig,
+                    expected=expected_val,
+                    actual=actual,
+                    passed=passed,
+                    source="spec",
+                )
+                result.checks.append(cr)
+                if self.verbose:
+                    print(cr)
+
+        elif exp.expr:
+            ns = {k: v for k, v in snap.items()}
+            ns["_cycle"] = cycle_num
+            try:
+                passed = bool(eval(exp.expr, {"__builtins__": {}}, ns))  # noqa: S307
+                actual_str = repr(ns.get(exp.expr.split()[0], snap))
+            except Exception as e:
+                passed = False
+                actual_str = f"<eval error: {e}>"
+            cr = CheckResult(
+                cycle=cycle_num,
+                signal="<expr>",
+                expected=exp.expr,
+                actual=actual_str,
+                passed=passed,
+                source="spec",
+            )
+            result.checks.append(cr)
+            if self.verbose:
+                print(cr)
 
     def _check_expected(
         self,
@@ -182,47 +297,14 @@ class TestRunner:
         cycle_num: int,
         snap: dict,
     ) -> None:
+        """Legacy method — kept for backward compat; delegates to _check_expected_entry."""
         for exp in sc.expected:
             cycles = _expand_at(exp.at, sc.sim.cycles)
             if cycle_num not in cycles:
                 continue
-
-            if exp.check:
-                for sig, expected_val in exp.check.items():
-                    actual = snap.get(sig, 0)
-                    passed = actual == expected_val
-                    cr = CheckResult(
-                        cycle=cycle_num,
-                        signal=sig,
-                        expected=expected_val,
-                        actual=actual,
-                        passed=passed,
-                        source="spec",
-                    )
-                    result.checks.append(cr)
-                    if self.verbose:
-                        print(cr)
-
-            elif exp.expr:
-                ns = {k: v for k, v in snap.items()}
-                ns["_cycle"] = cycle_num
-                try:
-                    passed = bool(eval(exp.expr, {"__builtins__": {}}, ns))  # noqa: S307
-                    actual_str = repr(ns.get(exp.expr.split()[0], snap))
-                except Exception as e:
-                    passed = False
-                    actual_str = f"<eval error: {e}>"
-                cr = CheckResult(
-                    cycle=cycle_num,
-                    signal="<expr>",
-                    expected=exp.expr,
-                    actual=actual_str,
-                    passed=passed,
-                    source="spec",
-                )
-                result.checks.append(cr)
-                if self.verbose:
-                    print(cr)
+            off = exp.offset_ns if hasattr(exp, 'offset_ns') else 0
+            t_ns = (cycle_num - 1) * (self.engine.half_period * 2) + self.engine.half_period
+            self._check_expected_entry(result, exp, cycle_num, off, t_ns + off, snap)
 
     # ------------------------------------------------------------------
     # Reference model comparison

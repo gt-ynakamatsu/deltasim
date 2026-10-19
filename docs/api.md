@@ -141,7 +141,7 @@ for ev in ds.test_events(["counter.sv"], "spec.yaml"):
       "status": "PASS",
       "signal": "count",
       "cycle": 11,
-      "time_ns": 110,
+      "time_ns": 105,  // §15修正: posedge時刻は(N-1)*period+hp=105ns
       "expected": "00000001",
       "actual": "00000001",
       "source": "spec",
@@ -326,7 +326,7 @@ sim.release("rst_n")
 ```json
 {
   "schema_version": "2",
-  "time_ns": 110,
+  "time_ns": 105,  // §15修正: posedge時刻は(N-1)*period+hp=105ns
   "signals": {"clk": 1, "rst_n": 1, "count": 10},
   "changes": [["count", 10]],
   "breakpoint_hit": 0
@@ -729,6 +729,109 @@ CIで「何も実行されずにPASS」を防ぐための仕様です。
 
 > **未定義事項 (§14.3)**: PASS / FAIL の `message` に何を入れるかは仕様書に記載がありません。
 > 現実装は空文字列（`""`）としており、最終報告に記載しています。
+
+---
+
+
+---
+
+## §15 サイクル途中の刺激と確認（offset_ns）（2026-10-19 17:10 確定）
+
+### §15.1 現行の時刻の決まり
+
+`at: N`（1始まり）はN回目の立ち上りで、時刻 = `(N-1)×period_ns + period_ns/2`。  
+**例**: period_ns=10 で at:N → `10N-5ns`（5, 15, 25, 35…）
+
+> **注意**: docs §2.2 の例に `cycle: 11, time_ns: 110` とありますが、  
+> 正しくは `time_ns: 105` です（posedge の時刻）。
+
+### §15.2 offset_ns 書式
+
+stimulus / expect の各項目に `offset_ns`（整数、省略時 = 0）を追加できます:
+
+```yaml
+cases:
+  - name: hold_between_edges
+    stimulus:
+      - {at: 3, set: {d: 1}}                 # 25ns（省略 = offset_ns:0）
+      - {at: 3, offset_ns: 3, set: {d: 0}}   # 28ns
+    expect:
+      - {at: 3, offset_ns: 4, check: {q: 1}} # 29ns
+```
+
+- 時刻 = `(at:N の時刻) + offset_ns`
+- 値: `0 ≤ offset_ns < period_ns`（ケースの実効 period_ns）
+- `at` が範囲 / `"*"` の場合は各サイクルに同じ offset_ns を適用
+- `offset_ns: 0` と省略は完全に同じ動き（name も同じ）
+
+### §15.3 同一時刻での処理順
+
+各時刻 T で以下の順に処理します:
+1. `offset_ns=0` のみ: エンジンのリセット制御（§15.5）
+2. その時刻の刺激をすべて書き込む（YAML記載順・同一信号は後勝ち）
+3. 値が変わった信号のエッジ検出 → NBA反映 → デルタサイクル収束（§15.4）
+4. T がクロックエッジならクロックを変えて NBA反映 → 収束
+5. その時刻の expect を確認
+6. `offset_ns=0` のみ: 参照モデルとの比較
+
+### §15.4 刺激でのエッジ検出
+
+刺激で値が変わった信号について、`posedge`/`negedge` を感度に持つ `always_ff` を起動します。
+
+### §15.5 リセット信号の扱い
+
+エンジンのリセット制御が書き込むのは **2回のみ**:
+1. 開始時（シミュレーション初期化）: リセットをアサート
+2. `duration_cycles` 経過時: 解除（`N = duration_cycles+1` のポーズ前）
+
+解除後はリセット信号を普通の入力として扱います（刺激で上書き可）。  
+※ リセット期間中に刺激でリセット信号を書くことは推奨しません（解除時刻に解除されます）。
+
+### §15.6 範囲外エラー (E_OFFSET_RANGE)
+
+| 条件 | 挙動 |
+|------|------|
+| 負の値 | `status="ERROR"`, `errors[].code="E_OFFSET_RANGE"` |
+| `period_ns` 以上 | 同上 |
+| 整数でない（小数・文字列・bool） | 同上 |
+
+エラーメッセージ例:  
+`cases[hold_between_edges].expect[2]: offset_ns=10 は範囲外です（0 以上 10 未満の整数）`
+
+仕様YAML読み込み時（シミュレーション開始前）に全項目を検査し、まとめて報告します。
+
+### §15.7 結果JSON の変更点
+
+```json
+{
+  "checks": [
+    {
+      "name": "q@cycle3[spec]",     // offset_ns=0: 従来どおり
+      "cycle": 3,
+      "time_ns": 25,                // 実際の確認時刻
+      "offset_ns": 0                // 追加フィールド
+    },
+    {
+      "name": "q@cycle3+4ns[spec]", // offset_ns>0: +Xns が付く
+      "cycle": 3,
+      "time_ns": 29,
+      "offset_ns": 4
+    }
+  ]
+}
+```
+
+- `time_ns`: at:N の時刻 + offset_ns（実際の確認時刻）
+- `offset_ns`: 追加フィールド（省略時は 0）
+- `schema_version`: "2" のまま（任意フィールドの追加のため）
+
+### §15.12 未知キーの扱い (W_UNKNOWN_KEY)
+
+仕様YAMLに知らないキーがあると、結果JSON の `warnings[]` に `W_UNKNOWN_KEY` を出力します:
+
+```json
+{"warnings": [{"code": "W_UNKNOWN_KEY", "message": "stimulus[0]: 不明なキー 'foo' は無視されます"}]}
+```
 
 ---
 

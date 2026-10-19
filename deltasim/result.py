@@ -99,20 +99,38 @@ class ErrorInfo:
 # ---------------------------------------------------------------------------
 
 @dataclass
-@dataclass
 class CheckInfo:
     """§12.5: elapsed_ms はケース（シナリオ）単位で TestResult.elapsed_ms に入る。
-    CheckInfo はチェック個別の合否を表す。"""
+    CheckInfo はチェック個別の合否を表す。
+    §15.7: offset_ns フィールドを追加。time_ns は at:N + offset_ns の実際の確認時刻。"""
     name: str = ""
     status: str = "PASS"        # PASS | FAIL | ERROR | SKIP
     signal: str = ""
     cycle: int = 0
     time_ns: int = 0
+    offset_ns: int = 0          # §15.7: 追加フィールド。省略時(offset_ns=0)は既存と同じ
     expected: str = ""          # 4-state bit string
     actual: str = ""            # 4-state bit string
     source: str = "spec"        # "spec" | "model"
     seed: int = 0
     message: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+# ---------------------------------------------------------------------------
+# Warning (§15.12)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class WarningInfo:
+    """§15.12: 未知キーなど非致命的な問題の警告。"""
+    message: str = ""
+    code: str = ""             # e.g. "W_UNKNOWN_KEY"
+    file: str = ""
+    line: int = 0
+    column: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -214,11 +232,12 @@ class CaseResult:
     checks: List[CheckInfo] = field(default_factory=list)
     log: List[str] = field(default_factory=list)
     errors: List[ErrorInfo] = field(default_factory=list)
+    warnings: List[WarningInfo] = field(default_factory=list)  # §15.12
     cancelled: bool = False
     truncated_at: Optional[int] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        d = {
             "name": self.name,
             "status": self.status,
             "seed": self.seed,
@@ -230,6 +249,9 @@ class CaseResult:
             "log": self.log,
             "errors": [e.to_dict() for e in self.errors],
         }
+        if self.warnings:
+            d["warnings"] = [w.to_dict() for w in self.warnings]
+        return d
 
 
 # ---------------------------------------------------------------------------
@@ -253,6 +275,7 @@ class TestResult:
     checks: List[CheckInfo] = field(default_factory=list)   # 全ケース集計 (compat)
     cases: List[CaseResult] = field(default_factory=list)   # §13.2 per-case details
     errors: List[ErrorInfo] = field(default_factory=list)
+    warnings: List[WarningInfo] = field(default_factory=list)  # §15.12
     cancelled: bool = False
     truncated_at: Optional[int] = None
 
@@ -269,21 +292,23 @@ class TestResult:
         return sum(1 for c in self.checks if c.status == "FAIL")
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        d = {
             "schema_version": self.schema_version,
             "module": self.module,
             "status": self.status,
             "seed": self.seed,
-            # §13.1: elapsed_ms = total (非推奨、summary.elapsed_ms と同値)
             "elapsed_ms": self.elapsed_ms,
             "summary": {"elapsed_ms": self.elapsed_ms},
             "cancelled": self.cancelled,
             "truncated_at": self.truncated_at,
             "log": self.log,
             "cases": [c.to_dict() for c in self.cases],
-            "checks": [c.to_dict() for c in self.checks],   # aggregate, backward compat
+            "checks": [c.to_dict() for c in self.checks],
             "errors": [e.to_dict() for e in self.errors],
         }
+        if self.warnings:
+            d["warnings"] = [w.to_dict() for w in self.warnings]
+        return d
 
     def to_json(self, indent: int = 2) -> str:
         return json.dumps(self.to_dict(), ensure_ascii=False, indent=indent)

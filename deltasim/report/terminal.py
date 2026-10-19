@@ -74,18 +74,29 @@ def print_results_v2(
             loc = f"{err.file}:{err.line}" if err.file else ""
             print(f"  [{sev}] {err.code}: {loc} {err.message}")
 
+    # §15.12: top-level warnings (W_UNKNOWN_KEY 等)
+    for w in getattr(result, "warnings", []):
+        print(f"  [WARNING] {w.code}: {w.message}")
+
     # Print per-case details if multi-case, or flat if single-case
     if result.cases:
         for cr in result.cases:
             case_st = STATUS_CLR.get(cr.status, cr.status)
             print(f"  [{case_st}] case: {cr.name}  seed={cr.seed}  elapsed={cr.elapsed_ms:.0f}ms")
+            # §15.12: W_UNKNOWN_KEY warnings
+            for w in getattr(cr, "warnings", []):
+                print(f"  [WARNING] {w.code}: {w.message}", flush=True)
             if verbose or cr.status != "PASS":
                 for ci in cr.checks:
                     st = STATUS_CLR.get(ci.status, ci.status)
                     src = f"[{ci.source}]" if ci.source != "spec" else ""
                     msg = f"  → {ci.message}" if ci.message and ci.status != "PASS" else ""
+                    # §15.7.6: offset_ns>0 → "cycle=4 +3ns (38ns)"
+                    off = getattr(ci, "offset_ns", 0)
+                    cycle_str = (f"cycle={ci.cycle:4d} +{off}ns ({ci.time_ns}ns)"
+                                 if off else f"cycle={ci.cycle:4d} ({ci.time_ns}ns)")
                     print(
-                        f"    {st} cycle={ci.cycle:4d}  {ci.signal}{src}: "
+                        f"    {st} {cycle_str}  {ci.signal}{src}: "
                         f"expected={ci.expected!r}  actual={ci.actual!r}{msg}"
                     )
     else:
@@ -95,8 +106,11 @@ def print_results_v2(
                 st = STATUS_CLR.get(ci.status, ci.status)
                 src = f"[{ci.source}]" if ci.source != "spec" else ""
                 msg = f"  → {ci.message}" if ci.message and ci.status != "PASS" else ""
+                off = getattr(ci, "offset_ns", 0)
+                cycle_str = (f"cycle={ci.cycle:4d} +{off}ns ({ci.time_ns}ns)"
+                             if off else f"cycle={ci.cycle:4d} ({ci.time_ns}ns)")
                 print(
-                    f"  {st} cycle={ci.cycle:4d}  {ci.signal}{src}: "
+                    f"  {st} {cycle_str}  {ci.signal}{src}: "
                     f"expected={ci.expected!r}  actual={ci.actual!r}{msg}"
                 )
 
