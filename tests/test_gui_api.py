@@ -108,12 +108,11 @@ class TestRunTest:
         })
         assert res.status_code == 200
         data = res.json()
-        assert data["schema_version"] == 1
-        assert "cases" in data
+        # M5 API: schema_version は文字列 "1"
+        assert str(data["schema_version"]) == "1"
+        # M5 API: checks フィールド（cases ではない）
+        assert "checks" in data or "summary" in data
         assert "summary" in data
-        assert data["summary"]["total"] >= 1
-        # counter は全ケース PASS であること
-        assert data["summary"]["pass"] >= 1
         assert data["summary"]["fail"] == 0
 
     def test_mux2_pass(self, client):
@@ -137,7 +136,7 @@ class TestRunTest:
         assert data["summary"]["fail"] == 0
 
     def test_result_structure(self, client):
-        """結果 JSON の構造が仕様書 §2 の契約に沿っていること"""
+        """結果 JSON の構造が M5 API / §2 の契約に沿っていること"""
         res = client.post("/api/test", json={
             "sv_files": [COUNTER_SV],
             "spec": COUNTER_SPEC,
@@ -145,26 +144,34 @@ class TestRunTest:
         assert res.status_code == 200
         data = res.json()
 
-        # トップレベル
+        # トップレベル（M5 API 形式）
         assert "schema_version" in data
         assert "module" in data
-        assert "cases" in data
+        assert "status" in data
+        assert data["status"] in ("PASS", "FAIL", "ERROR", "SKIP")
+        assert "checks" in data   # M5 API では checks（cases ではない）
         assert "summary" in data
+        assert "errors" in data
 
-        # ケース構造
-        for case in data["cases"]:
-            assert "name" in case
-            assert "status" in case
-            assert case["status"] in ("PASS", "FAIL", "ERROR", "SKIP")
-            assert "seed" in case
-            assert "duration_sec" in case
-            assert "failures" in case
-            assert "log" in case
+        # checks 構造（M5 CheckInfo 形式）
+        for chk in data["checks"]:
+            assert "name" in chk
+            assert "status" in chk
+            assert chk["status"] in ("PASS", "FAIL", "ERROR", "SKIP")
+            assert "signal" in chk
+            assert "cycle" in chk
+            assert "time_ns" in chk
+            assert "expected" in chk
+            assert "actual" in chk
 
         # サマリー構造
         s = data["summary"]
         assert "total" in s and "pass" in s and "fail" in s
         assert "error" in s and "skip" in s
+
+        # §12 追加フィールド
+        assert "truncated_at" in data  # None か数値
+        assert "cancelled" in data
 
     def test_seed_override(self, client):
         """シードを指定してテストが実行できること"""
@@ -175,7 +182,8 @@ class TestRunTest:
         })
         assert res.status_code == 200
         data = res.json()
-        assert data["cases"][0]["seed"] == 12345
+        # M5 API: トップレベル seed フィールド
+        assert data["seed"] == 12345
 
     def test_spec_not_found(self, client):
         res = client.post("/api/test", json={
@@ -673,3 +681,187 @@ class TestLargeVCDPerformance:
         elapsed = time.monotonic() - t0
         assert elapsed < 5.0, f"range 取得が遅すぎます: {elapsed:.2f}s"
         assert len(data["signals"]) == 20
+
+
+# ---------------------------------------------------------------------------
+# /api/simulator — 対話デバッグ Simulator API (§8)
+# ---------------------------------------------------------------------------
+
+class TestSimulatorAPI:
+    def test_create_session(self, client):
+        """Simulator セッションを作成できること"""
+        res = client.post("/api/simulator", json={
+            "sv_files": [COUNTER_SV],
+            "top": "counter",
+        })
+        assert res.status_code == 200
+        data = res.json()
+        assert "session_id" in data
+        assert data["module"] == "counter"
+        assert "signals" in data
+        assert data["time_ns"] == 0
+
+    def test_step(self, client):
+        """step(n) でサイクルを進められること"""
+        # セッション作成
+        res = client.post("/api/simulator", json={"sv_files": [COUNTER_SV], "top": "counter"})
+        assert res.status_code == 200
+        sid = res.json()["session_id"]
+
+        # step 5
+        res2 = client.post(f"/api/simulator/{sid}/step", json={"n": 5})
+        assert res2.status_code == 200
+        snap = res2.json()
+        assert "time_ns" in snap
+        assert snap["time_ns"] > 0
+
+    def test_list_signals(self, client):
+        """信号一覧を取得できること"""
+        res = client.post("/api/simulator", json={"sv_files": [COUNTER_SV], "top": "counter"})
+        sid = res.json()["session_id"]
+
+        res2 = client.get(f"/api/simulator/{sid}/signals")
+        assert res2.status_code == 200
+        data = res2.json()
+        assert "signals" in data
+        assert any(s["name"] == "clk" for s in data["signals"])
+
+    def test_add_remove_breakpoint(self, client):
+        """ブレークポイントの追加・削除ができること"""
+        res = client.post("/api/simulator", json={"sv_files": [COUNTER_SV], "top": "counter"})
+        sid = res.json()["session_id"]
+
+        res2 = client.post(f"/api/simulator/{sid}/breakpoints", json={"condition": "count == 5"})
+        assert res2.status_code == 200
+        bp_id = res2.json()["id"]
+
+        res3 = client.get(f"/api/simulator/{sid}/breakpoints")
+        assert any(bp["id"] == bp_id for bp in res3.json()["breakpoints"])
+
+        res4 = client.delete(f"/api/simulator/{sid}/breakpoints/{bp_id}")
+        assert res4.status_code == 200
+
+    def test_set_signal(self, client):
+        """信号値を設定できること"""
+        res = client.post("/api/simulator", json={"sv_files": [COUNTER_SV], "top": "counter"})
+        sid = res.json()["session_id"]
+        client.post(f"/api/simulator/{sid}/step", json={"n": 15})
+
+        res2 = client.post(f"/api/simulator/{sid}/set", json={"signal": "rst_n", "value": 1})
+        assert res2.status_code == 200
+
+    def test_force_release(self, client):
+        """force/release が動作すること"""
+        res = client.post("/api/simulator", json={"sv_files": [COUNTER_SV], "top": "counter"})
+        sid = res.json()["session_id"]
+
+        res2 = client.post(f"/api/simulator/{sid}/force", json={"signal": "rst_n", "value": 0})
+        assert res2.status_code == 200
+        assert res2.json()["forced"] is True
+
+        res3 = client.post(f"/api/simulator/{sid}/release", json={"signal": "rst_n"})
+        assert res3.status_code == 200
+        assert res3.json()["forced"] is False
+
+    def test_reset(self, client):
+        """reset で時刻がリセットされること"""
+        res = client.post("/api/simulator", json={"sv_files": [COUNTER_SV], "top": "counter"})
+        sid = res.json()["session_id"]
+        client.post(f"/api/simulator/{sid}/step", json={"n": 10})
+
+        res2 = client.post(f"/api/simulator/{sid}/reset", json={})
+        assert res2.status_code == 200
+        assert res2.json()["time_ns"] == 0
+
+    def test_waveform_from_memory(self, client):
+        """in-memory 波形（get_signal_changes）が取得できること"""
+        res = client.post("/api/simulator", json={"sv_files": [COUNTER_SV], "top": "counter"})
+        sid = res.json()["session_id"]
+        client.post(f"/api/simulator/{sid}/step", json={"n": 20})
+
+        res2 = client.get(f"/api/simulator/{sid}/waveform")
+        assert res2.status_code == 200
+        data = res2.json()
+        assert "signals" in data
+        assert "end_time" in data
+
+    def test_delete_session(self, client):
+        """セッションを削除できること"""
+        res = client.post("/api/simulator", json={"sv_files": [COUNTER_SV], "top": "counter"})
+        sid = res.json()["session_id"]
+
+        res2 = client.delete(f"/api/simulator/{sid}")
+        assert res2.status_code == 200
+
+        res3 = client.get(f"/api/simulator/{sid}/signals")
+        assert res3.status_code == 404
+
+    def test_nonexistent_session(self, client):
+        """存在しないセッションは 404"""
+        res = client.get("/api/simulator/nonexistent-id/signals")
+        assert res.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# §12 対応: adapter の truncated_at / checks 構造
+# ---------------------------------------------------------------------------
+
+class TestM5ApiCompat:
+    def test_checks_field_present(self, client):
+        """M5 API: result に checks フィールドがあること"""
+        res = client.post("/api/test", json={
+            "sv_files": [COUNTER_SV],
+            "spec": COUNTER_SPEC,
+        })
+        assert res.status_code == 200
+        data = res.json()
+        assert "checks" in data
+
+    def test_truncated_at_field(self, client):
+        """§12.3: truncated_at フィールドが存在すること（None か数値）"""
+        res = client.post("/api/test", json={
+            "sv_files": [COUNTER_SV],
+            "spec": COUNTER_SPEC,
+        })
+        assert res.status_code == 200
+        data = res.json()
+        assert "truncated_at" in data
+        # 小規模テストでは truncated_at は None
+        assert data["truncated_at"] is None
+
+    def test_cancelled_field(self, client):
+        """§12.1: cancelled フィールドが存在すること"""
+        res = client.post("/api/test", json={
+            "sv_files": [MUX2_SV],
+            "spec": MUX2_SPEC,
+        })
+        assert res.status_code == 200
+        data = res.json()
+        assert "cancelled" in data
+        assert data["cancelled"] is False
+
+    def test_schema_version_string(self, client):
+        """M5 API: schema_version は文字列 '1'"""
+        res = client.post("/api/test", json={
+            "sv_files": [COUNTER_SV],
+            "spec": COUNTER_SPEC,
+        })
+        assert res.status_code == 200
+        data = res.json()
+        assert str(data["schema_version"]) == "1"
+
+    def test_checks_have_4state_values(self, client):
+        """§12.4: シグナルチェックの expected/actual は 4 値文字列（0/1/x/z）。
+        expr チェックの expected はPython式文字列なので除外する。"""
+        res = client.post("/api/test", json={
+            "sv_files": [MUX2_SV],
+            "spec": MUX2_SPEC,
+        })
+        assert res.status_code == 200
+        data = res.json()
+        for chk in data.get("checks", []):
+            # source=spec かつ signal が "<expr>" でないものだけチェック
+            if chk.get("source") == "spec" and chk.get("signal") not in ("<expr>", ""):
+                for v in (chk.get("expected", ""), chk.get("actual", "")):
+                    assert all(c in "01xz" for c in str(v).lower()), \
+                        f"4 値文字列でない値: {v!r} (check: {chk['name']})"

@@ -1,47 +1,43 @@
-"""GUI アダプタ層 — 既存の内部 API を GUI 向けの JSON 契約に変換する。
+"""GUI アダプタ層 — M5 公開 API (deltasim.api) の薄いラッパー。
 
-この 1 ファイルに閉じた薄い橋渡し層です。
-M5 で公開 API（load / gen / test / run）が main に入ったら、
-各関数をそちらへ差し替える前提で設計しています。
+M5 公開 API に対応した差し替え版。
+- load / test / run はすべて deltasim.api に委譲する
+- 内部関数（parse_file, elaborate, TestRunner）の直接呼び出しはゼロ
+- 進捗コールバック: deltasim.api の on_progress (type フィールド) を SSE イベント (event フィールド) へ変換
+- キャンセル: CancelToken を使用、mid-cycle での真のキャンセルが可能
+- 構造化エラー: ErrorInfo をそのままフロントへ返す
 
-現状（M5 未実装）:
-  - load()   → parse_file + elaborate を呼ぶ
-  - test()   → TestRunner を直接呼ぶ
-  - run()    → SimEngine を直接呼ぶ
+仕様書 §2 との整合確認（docs/api.md 参照）:
+  - schema_version は文字列 "1"
+  - test() は TestResult.checks を返す（cases ではない）
+  - 進捗イベントのフィールド名は `type`（GUI SSE では `event` に変換）
+  - Z/X は現状どちらも val_to_4state が "x" を返す（仕様書 §2.8 未決事項 #4）
 
-結果 JSON の schema_version: 1（GUI 仕様書 §2 の契約に合わせる）
-
-ステータス: PASS / FAIL / ERROR / SKIP
+未実装・M5以降の課題:
+  - $scope 階層パスの VCD: 現在フラット展開（未決事項 #6）
+  - Simulator.force() の NBA 抑制精度（未決事項 #5）
 """
 
 from __future__ import annotations
 
-import os
-import tempfile
-import time
+import threading
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
+
 # ---------------------------------------------------------------------------
-# 公開型
+# 公開型（後方互換のため残す）
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = "1"  # str に変更（M5 contract）
 
 
 class AdapterError(Exception):
-    """パース・エラボレーション・シミュレーション時の構造化エラー"""
+    """アダプタ層からのエラー（未使用になったが後方互換のため残す）"""
 
-    def __init__(
-        self,
-        message: str,
-        *,
-        file: Optional[str] = None,
-        line: Optional[int] = None,
-        column: Optional[int] = None,
-        severity: str = "error",
-        code: Optional[str] = None,
-    ):
+    def __init__(self, message: str, *, file: Optional[str] = None,
+                 line: Optional[int] = None, column: Optional[int] = None,
+                 severity: str = "error", code: Optional[str] = None):
         super().__init__(message)
         self.file = file
         self.line = line
@@ -50,14 +46,28 @@ class AdapterError(Exception):
         self.code = code
 
     def to_dict(self) -> dict:
-        return {
-            "file": self.file,
-            "line": self.line,
-            "column": self.column,
-            "severity": self.severity,
-            "message": str(self),
-            "code": self.code,
-        }
+        return {"file": self.file, "line": self.line, "column": self.column,
+                "severity": self.severity, "message": str(self), "code": self.code}
+
+
+# ---------------------------------------------------------------------------
+# 進捗イベント変換ヘルパー
+# ---------------------------------------------------------------------------
+
+def _progress_to_sse(ev: dict, callback: Optional[Callable]) -> None:
+    """deltasim.api の進捗 dict（type フィールド）を SSE dict（event フィールド）に変換して callback に渡す。"""
+    if callback is None:
+        return
+    sse = dict(ev)
+    # type → event フィールドに変換（GUI SSE 形式）
+    sse["event"] = sse.pop("type", "progress")
+    # total_cycles → total へエイリアス（GUI が期待するフィールド）
+    if "total_cycles" in sse:
+        sse["total"] = sse["total_cycles"]
+    try:
+        callback(sse)
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -76,68 +86,29 @@ def load(
     -------
     {
         "module": str,
-        "ports": [{"name": str, "direction": str, "width": int}, ...],
+        "ports": [{"name": str, "direction": str, "width": int, "signed": bool}, ...],
         "params": {name: value, ...},
-        "errors": [],   # 構造化エラーリスト
+        "errors": [...],  # ErrorInfo.to_dict() のリスト
     }
     """
-    from deltasim.parser.parser import parse_file, ParseError
-    from deltasim.elab.elaborator import elaborate, ElabError
+    import deltasim.api as ds
 
-    if param_overrides is None:
-        param_overrides = {}
-
-    errors: list[dict] = []
-    modules = []
-
-    for sv_path in files:
-        sv_path = str(sv_path)
-        if not os.path.isfile(sv_path):
-            raise AdapterError(
-                f"ファイルが見つかりません: {sv_path!r}",
-                file=sv_path,
-                severity="error",
-            )
-        try:
-            mod = parse_file(sv_path)
-            modules.append(mod)
-        except ParseError as e:
-            raise AdapterError(str(e), file=sv_path, severity="error", code="parse") from e
-
-    if not modules:
-        raise AdapterError("解析対象のモジュールがありません", severity="error")
-
-    if top is not None:
-        module = next((m for m in modules if m.name == top), None)
-        if module is None:
-            names = [m.name for m in modules]
-            raise AdapterError(
-                f"モジュール {top!r} が見つかりません。利用可能: {names}",
-                severity="error",
-                code="module_not_found",
-            )
-    else:
-        module = modules[0]
-
-    try:
-        design = elaborate(module, param_overrides=param_overrides)
-    except ElabError as e:
-        raise AdapterError(str(e), severity="error", code="elab") from e
-
-    ports = [
-        {
-            "name": name,
-            "direction": info.direction,
-            "width": info.width,
-        }
-        for name, info in design.signals.items()
-    ]
+    di = ds.load([str(f) for f in files], top=top, params=param_overrides or {})
 
     return {
-        "module": design.module_name,
-        "ports": ports,
-        "params": design.params,
-        "errors": errors,
+        "module": di.module,
+        "ports": [
+            {"name": p.name, "direction": p.direction, "width": p.width, "signed": p.signed}
+            for p in di.ports
+        ],
+        "params": di.params,
+        "signals": [
+            {"name": s.name, "width": s.width, "direction": s.direction or ""}
+            for s in di.signals
+        ],
+        "hierarchy": di.hierarchy.to_dict() if di.hierarchy else None,
+        "status": di.status,
+        "errors": [e.to_dict() for e in di.errors],
     }
 
 
@@ -156,188 +127,127 @@ def test(
     on_progress: Optional[Callable[[dict], None]] = None,
     cancel_event=None,  # threading.Event | None
 ) -> dict:
-    """テストを実行して結果 JSON を返す。
+    """テストを実行して結果 JSON を返す（M5 公開 API 使用版）。
 
-    仕様書 §2 の契約:
-      - schema_version: int
-      - cases: [{name, status, seed, duration_sec, message, failures, log}, ...]
-      - summary: {total, pass, fail, error, skip}
+    §12 対応:
+      - cancelled=True の場合、未実行ケースは SKIP として summary に加算
+      - truncated_at フィールドがあれば透過して返す（§12.3）
+      - case_done イベントはケース単位で送る（§12.2）
+        ※ M5 API は個別 check ごとに case_done を発火するため、
+          同一シナリオ名をバッファして最後にまとめる変換を行う
+          （API が §12.2 準拠になったら変換コードを削除）
 
-    on_progress: 進捗コールバック。start / case_done / progress / finish イベントを受け取る。
-    cancel_event: threading.Event。セットされたらキャンセルを試みる。
-      ※ 現状の TestRunner は単一同期ループのため、真の mid-cycle キャンセルはできない。
-         シミュレーション開始前のチェックのみ有効。M5 の公開 cancel_token が入ったら差し替える。
-    現状はシングルケースとして扱い、M5 で複数ケース対応に差し替え予定。
+    仕様書との差異（→ 報告済み）:
+      - M5 API の case_done は個別 check 単位で発火（§12.2 は "ケース単位で1回"）
+      - truncated_at は M5 TestResult に未定義（§12.3 の warning/truncated_at は未実装）
     """
-    import time as _time
+    import deltasim.api as ds
+    from deltasim.result import CancelToken
 
-    from deltasim.parser.parser import ParseError
-    from deltasim.elab.elaborator import elaborate, ElabError
-    from deltasim.tb.scenario import load_scenario, ScenarioError
-    from deltasim.tb.runner import TestRunner
-    from deltasim.sim.engine import SimError
+    token = CancelToken()
 
-    if param_overrides is None:
-        param_overrides = {}
+    # threading.Event → CancelToken の変換スレッド
+    if cancel_event is not None:
+        def _watch():
+            cancel_event.wait()
+            token.cancel()
+        threading.Thread(target=_watch, daemon=True).start()
 
-    # --- 進捗: start ---
-    _emit(on_progress, {"event": "start", "spec": spec_path})
+    # case_done バッファ（§12.2: ケース単位で1回）
+    # M5 API が個別 check ごとに case_done を発火するため、
+    # シナリオ名（= spec ファイル stem）単位にまとめてから発火する暫定実装
+    _case_buf: dict = {}
+    _scenario_name = Path(spec_path).stem
 
-    t0 = _time.monotonic()
+    def _progress(ev: dict) -> None:
+        ev_type = ev.get("type", "")
 
-    # Load scenario
-    try:
-        scenario = load_scenario(spec_path)
-    except ScenarioError as e:
-        _emit(on_progress, {"event": "finish", "status": "error"})
-        return _error_result(f"spec エラー: {e}", spec_path)
+        if ev_type == "case_done":
+            # 個別 check を蓄積、シナリオ全体の状態として合算
+            check_status = ev.get("status", "PASS")
+            buf = _case_buf.setdefault(_scenario_name, {"status": "PASS", "checks": []})
+            buf["checks"].append(ev)
+            # 最低1件 FAIL → FAIL, ERROR が混じれば ERROR
+            if check_status in ("ERROR",):
+                buf["status"] = "ERROR"
+            elif check_status == "FAIL" and buf["status"] != "ERROR":
+                buf["status"] = "FAIL"
+            # ケース単位の SSE は finish 後に発火するのでここでは何もしない
+            return
 
-    # Seed override
-    if seed is not None:
-        scenario.sim.seed = seed
+        if ev_type == "finish":
+            # finish の前にケース単位 case_done を発火（§12.2 準拠）
+            for name, buf in _case_buf.items():
+                sse_ev = {
+                    "event": "case_done",
+                    "name": name,
+                    "status": buf["status"],
+                    "checks": buf["checks"],
+                }
+                if on_progress:
+                    try:
+                        on_progress(sse_ev)
+                    except Exception:
+                        pass
+            _case_buf.clear()
 
-    # VCD path override
-    if vcd_path:
-        scenario.sim.vcd = vcd_path
-    elif vcd_path is None and scenario.sim.vcd is None:
-        # 自動的に一時ファイルに VCD を書く（波形表示のため）
-        tmp = tempfile.NamedTemporaryFile(
-            suffix=".vcd", delete=False, prefix="deltasim_"
-        )
-        tmp.close()
-        scenario.sim.vcd = tmp.name
+        _progress_to_sse(ev, on_progress)
 
-    # Determine top module
-    top_name = top or scenario.top
-    sv_files = [str(p) for p in sv_files]
-
-    # Parse + elaborate
-    from deltasim.parser.parser import parse_file
-    modules = []
-    for sv_path in sv_files:
-        try:
-            modules.append(parse_file(sv_path))
-        except ParseError as e:
-            _emit(on_progress, {"event": "finish", "status": "error"})
-            return _error_result(f"parse エラー: {e}", spec_path, sv_path)
-
-    if not modules:
-        _emit(on_progress, {"event": "finish", "status": "error"})
-        return _error_result("解析対象のモジュールがありません", spec_path)
-
-    module = (
-        next((m for m in modules if m.name == top_name), None)
-        if top_name
-        else modules[0]
+    result = ds.test(
+        [str(f) for f in sv_files],
+        spec_path,
+        top=top,
+        seed=seed,
+        vcd=vcd_path,
+        params=param_overrides or {},
+        on_progress=_progress,
+        cancel=token,
     )
-    if module is None:
-        _emit(on_progress, {"event": "finish", "status": "error"})
-        return _error_result(
-            f"モジュール {top_name!r} が見つかりません", spec_path
-        )
 
-    try:
-        design = elaborate(module, param_overrides=param_overrides)
-    except ElabError as e:
-        _emit(on_progress, {"event": "finish", "status": "error"})
-        return _error_result(f"elab エラー: {e}", spec_path)
+    checks_dicts = [c.to_dict() for c in result.checks]
 
-    # --- キャンセルチェック（シミュ開始前）---
-    # M5 待ち: 真の mid-cycle キャンセルは TestRunner が cancel_token を受け取れるようになってから
-    if cancel_event is not None and cancel_event.is_set():
-        _emit(on_progress, {"event": "finish", "status": "SKIP", "message": "キャンセルされました"})
-        return _error_result("キャンセルされました", spec_path)
+    # §12.1: キャンセル時の未実行ケース → SKIP（現状は checks が途中までなので概算）
+    n_pass  = sum(1 for c in result.checks if c.status == "PASS")
+    n_fail  = sum(1 for c in result.checks if c.status == "FAIL")
+    n_error = sum(1 for c in result.checks if c.status == "ERROR")
+    n_skip  = sum(1 for c in result.checks if c.status == "SKIP")
+    total   = len(result.checks)
 
-    # 進捗コールバック付き TestRunner
-    runner = TestRunner(design, scenario, verbose=False)
+    # §12.1: キャンセルされた場合は summary に cancelled_count を追記
+    if result.status == "ERROR" and total == 0:
+        n_error = 1
+        total   = 1
 
-    # 進捗: progress (サイクル / 合計)
-    total_cycles = scenario.sim.cycles
-    original_run = runner.engine.run
+    # §12.3: truncated_at — M5 TestResult に未実装のためフォールバックで None
+    # API が truncated_at を実装したら result から取得する
+    truncated_at = getattr(result, "truncated_at", None)
+    # warning イベントを errors から探す
+    for err in result.errors:
+        if err.severity == "warning" and "truncated" in err.message.lower():
+            if truncated_at is None:
+                truncated_at = err.message  # 時刻が含まれる場合はパース
 
-    def _instrumented_run(cycles, **kwargs):
-        _emit(on_progress, {
-            "event": "progress",
-            "phase": "sim",
-            "cycle": 0,
-            "total": cycles,
-            "time_ns": 0,
-        })
-        result = original_run(cycles, **kwargs)
-        _emit(on_progress, {
-            "event": "progress",
-            "phase": "sim",
-            "cycle": cycles,
-            "total": cycles,
-            "time_ns": runner.engine._time,
-        })
-        return result
-
-    runner.engine.run = _instrumented_run
-
-    try:
-        run_result = runner.run()
-    except SimError as e:
-        _emit(on_progress, {"event": "finish", "status": "error"})
-        return _error_result(f"sim エラー: {e}", spec_path)
-
-    duration = _time.monotonic() - t0
-
-    # ケース名はスペックファイル名から生成（M5 で複数ケース対応）
-    case_name = Path(spec_path).stem
-
-    failures = [
-        {
-            "cycle": cr.cycle,
-            "signal": cr.signal,
-            "expected": cr.expected,
-            "actual": cr.actual,
-            "time_ns": cr.cycle * scenario.clock.period_ns if scenario.clock.period_ns else 0,
-            "source": cr.source,
-        }
-        for cr in run_result.checks
-        if not cr.passed
-    ]
-
-    status = "PASS" if run_result.passed else "FAIL"
-    if not run_result.checks:
-        status = "SKIP"
-
-    cases = [
-        {
-            "name": case_name,
-            "status": status,
-            "seed": scenario.sim.seed,
-            "duration_sec": round(duration, 4),
-            "message": None if run_result.passed else f"{len(failures)} 件の不一致",
-            "failures": failures,
-            "log": run_result.log,
-        }
-    ]
-
-    n_pass = 1 if status == "PASS" else 0
-    n_fail = 1 if status == "FAIL" else 0
-    n_error = 1 if status == "ERROR" else 0
-    n_skip = 1 if status == "SKIP" else 0
-
-    result = {
-        "schema_version": SCHEMA_VERSION,
-        "module": design.module_name,
-        "cases": cases,
+    return {
+        "schema_version": result.schema_version,
+        "module": result.module,
+        "status": result.status,
+        "seed": result.seed,
+        "elapsed_ms": result.elapsed_ms,
+        "cancelled": result.cancelled,
+        "checks": checks_dicts,
+        "log": result.log,
+        "errors": [e.to_dict() for e in result.errors],
         "summary": {
-            "total": 1,
+            "total": total,
             "pass": n_pass,
             "fail": n_fail,
             "error": n_error,
             "skip": n_skip,
+            "cancelled": result.cancelled,
         },
-        "vcd_path": scenario.sim.vcd,
+        "vcd_path": vcd_path,
+        "truncated_at": truncated_at,  # §12.3: None = 上限未到達
     }
-
-    _emit(on_progress, {"event": "case_done", "name": case_name, "status": status})
-    _emit(on_progress, {"event": "finish", "status": status})
-
-    return result
 
 
 # ---------------------------------------------------------------------------
@@ -354,109 +264,58 @@ def run(
     half_period: int = 5,
     reset_cycles: int = 10,
     on_progress: Optional[Callable[[dict], None]] = None,
+    keep_changes: bool = False,
 ) -> dict:
-    """シミュレーションを実行して VCD を書き出す（テスト判定なし）。
+    """シミュレーションを実行して結果を返す（M5 公開 API 使用版）。"""
+    import deltasim.api as ds
+
+    def _progress(ev: dict):
+        _progress_to_sse(ev, on_progress)
+
+    result = ds.run(
+        [str(f) for f in sv_files],
+        top=top,
+        cycles=cycles,
+        vcd=vcd_path,
+        params=param_overrides or {},
+        half_period=half_period,
+        reset_cycles=reset_cycles,
+        on_progress=_progress,
+        keep_changes=keep_changes,
+    )
+
+    return {
+        "module": result.module,
+        "status": result.status,
+        "cycles": result.cycles,
+        "time_ns": result.time_ns,
+        "vcd_path": result.vcd_path,
+        "log": result.log,
+        "cancelled": result.cancelled,
+        "elapsed_ms": result.elapsed_ms,
+        "errors": [e.to_dict() for e in result.errors],
+        "_run_result": result,  # SignalChangeDB アクセス用（内部）
+    }
+
+
+# ---------------------------------------------------------------------------
+# get_signal_changes(): メモリ上の信号変化を取得
+# ---------------------------------------------------------------------------
+
+def get_signal_changes_from_run(
+    run_result_obj,  # dict from run() with _run_result key
+    signal: str,
+    start_ns: int = 0,
+    end_ns: Optional[int] = None,
+) -> list:
+    """run() 結果から信号変化リストを取得（VCDファイル不要）。
 
     Returns
     -------
-    {
-        "module": str,
-        "cycles": int,
-        "time_ns": int,
-        "vcd_path": str | None,
-        "log": [...],
-        "finished": bool,
-    }
+    [{"time_ns": int, "value": str}, ...]
     """
-    from deltasim.parser.parser import parse_file, ParseError
-    from deltasim.elab.elaborator import elaborate, ElabError
-    from deltasim.sim.engine import SimEngine, SimError
-    from deltasim.vcd.writer import VCDWriter
-
-    if param_overrides is None:
-        param_overrides = {}
-
-    sv_files = [str(p) for p in sv_files]
-    modules = []
-    for sv_path in sv_files:
-        try:
-            modules.append(parse_file(sv_path))
-        except ParseError as e:
-            raise AdapterError(str(e), file=sv_path, severity="error", code="parse") from e
-
-    if not modules:
-        raise AdapterError("解析対象のモジュールがありません")
-
-    module = next((m for m in modules if m.name == top), None) if top else modules[0]
-    if module is None:
-        raise AdapterError(f"モジュール {top!r} が見つかりません")
-
-    try:
-        design = elaborate(module, param_overrides=param_overrides)
-    except ElabError as e:
-        raise AdapterError(str(e), severity="error", code="elab") from e
-
-    engine = SimEngine(design, half_period_ns=half_period, reset_cycles=reset_cycles)
-
-    # 一時 VCD
-    if vcd_path is None:
-        tmp = tempfile.NamedTemporaryFile(suffix=".vcd", delete=False, prefix="deltasim_")
-        tmp.close()
-        vcd_path = tmp.name
-
-    vcd_obj = None
-    if vcd_path:
-        from deltasim.vcd.writer import VCDWriter
-        vcd_obj = VCDWriter(vcd_path, design)
-        vcd_obj.record_initial(0, engine.signals)
-        engine.vcd_writer = vcd_obj
-
-    try:
-        sim_result = engine.run(cycles, reset_cycles=reset_cycles)
-    except SimError as e:
-        raise AdapterError(str(e), severity="error", code="sim") from e
-    finally:
-        if vcd_obj:
-            vcd_obj.close()
-
-    return {
-        "module": design.module_name,
-        "cycles": cycles,
-        "time_ns": engine._time,
-        "vcd_path": vcd_path,
-        "log": sim_result.log,
-        "finished": sim_result.finished,
-    }
-
-
-# ---------------------------------------------------------------------------
-# Helper
-# ---------------------------------------------------------------------------
-
-def _emit(cb: Optional[Callable], event: dict) -> None:
-    if cb is not None:
-        try:
-            cb(event)
-        except Exception:
-            pass
-
-
-def _error_result(message: str, spec_path: str, sv_path: Optional[str] = None) -> dict:
-    case_name = Path(spec_path).stem
-    return {
-        "schema_version": SCHEMA_VERSION,
-        "module": None,
-        "cases": [
-            {
-                "name": case_name,
-                "status": "ERROR",
-                "seed": None,
-                "duration_sec": 0,
-                "message": message,
-                "failures": [],
-                "log": [],
-            }
-        ],
-        "summary": {"total": 1, "pass": 0, "fail": 0, "error": 1, "skip": 0},
-        "vcd_path": None,
-    }
+    raw = run_result_obj.get("_run_result")
+    if raw is None:
+        return []
+    changes = raw.get_signal_changes(signal, start_ns=start_ns, end_ns=end_ns)
+    return [{"time_ns": c.time_ns, "value": c.value} for c in changes]

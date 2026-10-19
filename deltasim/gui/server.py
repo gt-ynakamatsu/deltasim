@@ -544,7 +544,277 @@ async def api_run(req: RunRequest):
     except AdapterError as e:
         raise HTTPException(status_code=500, detail=e.to_dict())
 
-    return result
+    # _run_result は内部オブジェクトなので除外して返す
+    return {k: v for k, v in result.items() if k != "_run_result"}
+
+
+# ---------------------------------------------------------------------------
+# /api/simulator — 対話デバッグ（Simulator API §8）
+# ---------------------------------------------------------------------------
+
+class SimCreateRequest(BaseModel):
+    sv_files: List[str]
+    top: Optional[str] = None
+    params: Dict[str, int] = {}
+    half_period: int = 5
+    reset_cycles: int = 10
+
+
+@app.post("/api/simulator")
+async def sim_create(req: SimCreateRequest):
+    """新しい Simulator セッションを作成する（§8）。"""
+    from deltasim.gui.sim_session import create_session
+
+    for f in req.sv_files:
+        if not os.path.isfile(f):
+            raise HTTPException(status_code=422, detail=f"SV ファイルが見つかりません: {f!r}")
+
+    try:
+        sess = await asyncio.to_thread(
+            create_session,
+            req.sv_files, req.top, req.params,
+            req.half_period, req.reset_cycles,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return {
+        "session_id": sess.session_id,
+        "module": sess.sim._di.module,
+        "signals": sess.sim.list_signals(),
+        "time_ns": sess.sim.time_ns,
+        "cycle": sess.sim.cycle,
+    }
+
+
+@app.get("/api/simulator")
+async def sim_list():
+    """アクティブな Simulator セッション一覧を返す。"""
+    from deltasim.gui.sim_session import list_sessions
+    return {"sessions": list_sessions()}
+
+
+@app.delete("/api/simulator/{session_id}")
+async def sim_delete(session_id: str):
+    """Simulator セッションを削除する。"""
+    from deltasim.gui.sim_session import delete_session
+    if not delete_session(session_id):
+        raise HTTPException(status_code=404, detail=f"セッションが見つかりません: {session_id}")
+    return {"ok": True}
+
+
+class SimStepRequest(BaseModel):
+    n: int = 1
+
+
+@app.post("/api/simulator/{session_id}/step")
+async def sim_step(session_id: str, req: SimStepRequest):
+    """n サイクル進める（§8）。"""
+    from deltasim.gui.sim_session import get_session
+
+    sess = get_session(session_id)
+    if sess is None:
+        raise HTTPException(status_code=404, detail=f"セッションが見つかりません: {session_id}")
+
+    try:
+        snap = await asyncio.to_thread(sess.sim.step, req.n)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return snap.to_dict()
+
+
+class SimRunUntilRequest(BaseModel):
+    time_ns: int
+
+
+@app.post("/api/simulator/{session_id}/run_until")
+async def sim_run_until(session_id: str, req: SimRunUntilRequest):
+    """指定時刻まで実行する（§8）。"""
+    from deltasim.gui.sim_session import get_session
+
+    sess = get_session(session_id)
+    if sess is None:
+        raise HTTPException(status_code=404, detail=f"セッションが見つかりません: {session_id}")
+
+    try:
+        snap = await asyncio.to_thread(sess.sim.run_until, req.time_ns)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return snap.to_dict()
+
+
+@app.get("/api/simulator/{session_id}/signals")
+async def sim_signals(session_id: str):
+    """信号一覧を返す（§8）。"""
+    from deltasim.gui.sim_session import get_session
+
+    sess = get_session(session_id)
+    if sess is None:
+        raise HTTPException(status_code=404, detail=f"セッションが見つかりません: {session_id}")
+
+    return {
+        "session_id": session_id,
+        "time_ns": sess.sim.time_ns,
+        "cycle": sess.sim.cycle,
+        "signals": sess.sim.list_signals(),
+    }
+
+
+class SimSetRequest(BaseModel):
+    signal: str
+    value: int
+
+
+@app.post("/api/simulator/{session_id}/set")
+async def sim_set(session_id: str, req: SimSetRequest):
+    """信号値を設定する（§8）。"""
+    from deltasim.gui.sim_session import get_session
+
+    sess = get_session(session_id)
+    if sess is None:
+        raise HTTPException(status_code=404, detail=f"セッションが見つかりません: {session_id}")
+
+    try:
+        sess.sim.set(req.signal, req.value)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return {"ok": True, "signal": req.signal, "value": req.value}
+
+
+@app.post("/api/simulator/{session_id}/force")
+async def sim_force(session_id: str, req: SimSetRequest):
+    """信号を強制固定する（§8）。"""
+    from deltasim.gui.sim_session import get_session
+
+    sess = get_session(session_id)
+    if sess is None:
+        raise HTTPException(status_code=404, detail=f"セッションが見つかりません: {session_id}")
+
+    try:
+        sess.sim.force(req.signal, req.value)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return {"ok": True, "signal": req.signal, "value": req.value, "forced": True}
+
+
+class SimReleaseRequest(BaseModel):
+    signal: str
+
+
+@app.post("/api/simulator/{session_id}/release")
+async def sim_release(session_id: str, req: SimReleaseRequest):
+    """force を解除する（§8）。"""
+    from deltasim.gui.sim_session import get_session
+
+    sess = get_session(session_id)
+    if sess is None:
+        raise HTTPException(status_code=404, detail=f"セッションが見つかりません: {session_id}")
+
+    try:
+        sess.sim.release(req.signal)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return {"ok": True, "signal": req.signal, "forced": False}
+
+
+@app.post("/api/simulator/{session_id}/reset")
+async def sim_reset(session_id: str):
+    """シミュレーションをリセットする（§8）。"""
+    from deltasim.gui.sim_session import get_session
+
+    sess = get_session(session_id)
+    if sess is None:
+        raise HTTPException(status_code=404, detail=f"セッションが見つかりません: {session_id}")
+
+    try:
+        sess.sim.reset()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return {"ok": True, "time_ns": sess.sim.time_ns, "cycle": sess.sim.cycle}
+
+
+class SimBreakpointRequest(BaseModel):
+    condition: str
+
+
+@app.post("/api/simulator/{session_id}/breakpoints")
+async def sim_add_bp(session_id: str, req: SimBreakpointRequest):
+    """ブレークポイントを追加する（§8）。"""
+    from deltasim.gui.sim_session import get_session
+
+    sess = get_session(session_id)
+    if sess is None:
+        raise HTTPException(status_code=404, detail=f"セッションが見つかりません: {session_id}")
+
+    try:
+        bp_id = sess.sim.add_breakpoint(req.condition)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return {"ok": True, "id": bp_id, "condition": req.condition}
+
+
+@app.get("/api/simulator/{session_id}/breakpoints")
+async def sim_list_bp(session_id: str):
+    """ブレークポイント一覧を返す（§8）。"""
+    from deltasim.gui.sim_session import get_session
+
+    sess = get_session(session_id)
+    if sess is None:
+        raise HTTPException(status_code=404, detail=f"セッションが見つかりません: {session_id}")
+
+    return {"breakpoints": sess.sim.list_breakpoints()}
+
+
+@app.delete("/api/simulator/{session_id}/breakpoints/{bp_id}")
+async def sim_del_bp(session_id: str, bp_id: int):
+    """ブレークポイントを削除する（§8）。"""
+    from deltasim.gui.sim_session import get_session
+
+    sess = get_session(session_id)
+    if sess is None:
+        raise HTTPException(status_code=404, detail=f"セッションが見つかりません: {session_id}")
+
+    try:
+        sess.sim.remove_breakpoint(bp_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return {"ok": True}
+
+
+@app.get("/api/simulator/{session_id}/waveform")
+async def sim_waveform(
+    session_id: str,
+    signals: Optional[str] = Query(None, description="カンマ区切り信号名"),
+    t_start: int = Query(0),
+    t_end: Optional[int] = Query(None),
+):
+    """Simulator の in-memory 変化履歴から波形データを返す（§2.6 get_signal_changes 使用）。
+
+    VCD ファイル不要のメモリルート。§12.3 の truncated_at に対応する警告も返す。
+    """
+    from deltasim.gui.sim_session import get_all_signal_changes, get_session
+
+    sess = get_session(session_id)
+    if sess is None:
+        raise HTTPException(status_code=404, detail=f"セッションが見つかりません: {session_id}")
+
+    data = await asyncio.to_thread(
+        get_all_signal_changes, session_id, t_start, t_end
+    )
+
+    if signals:
+        sig_set = set(s.strip() for s in signals.split(","))
+        data["signals"] = {k: v for k, v in data["signals"].items() if k in sig_set}
+
+    return data
 
 
 # ---------------------------------------------------------------------------

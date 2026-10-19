@@ -1,11 +1,16 @@
 /**
- * deltasim GUI v2 — メインアプリケーション
+ * deltasim GUI v3 — M5公開API対応版
  *
- * 変更点 (§11 対応):
- *  - CodeMirror 5 によるエディタ（SV/YAML構文ハイライト + エラー行表示 + 保存）
- *  - サーバー側ファイルブラウザ（127.0.0.1限定・パストラバーサル防止）
- *  - SSE によるテスト進捗表示（REST POST + SSE GET）
- *  - VCD 遅延読み込み（index → range）、最大200信号・初期20信号
+ * §12 対応:
+ *  - Z/X 区別色（z=青系 #60a5fa, x=橙系 #fb923c）
+ *  - truncated_at 警告バナー + VCDを開く導線
+ *  - case_done をケース単位表示（individual checks をリスト内に）
+ *  - cancelled 時の未実行ケース SKIP 表示
+ *
+ * §8 対応:
+ *  - 対話デバッグパネル（Simulator API / REST POST + SSE不要）
+ *  - step / run_until / set / force / release / breakpoint
+ *  - in-memory 波形（get_signal_changes）
  */
 
 "use strict";
@@ -18,22 +23,25 @@ const state = {
   project: { svFiles: [], specFile: null, top: null },
   module: null,
   testResult: null,
-  waveformData: null,   // { timescale, signals: {name: {width, changes:[]}}, end_time }
-  vcdIndex: null,       // { timescale, signals: {name: {width, vcd_id}}, end_time }
+  waveformData: null,
+  vcdIndex: null,
   vcdPath: null,
   selectedCase: null,
-  selectedSignals: [],  // 波形ビューアに表示する信号名[]
+  selectedSignals: [],
   radix: "hex",
   zoom: 1.0,
   cursorA: -1,
   cursorB: -1,
   running: false,
   currentJobId: null,
-  editorPath: null,     // 現在エディタに開いているファイルパス
+  editorPath: null,
   editorLang: "text",
-  errorLines: [],       // エラー行番号リスト（1-indexed）
-  browserPath: null,    // ファイルブラウザの現在パス
-  browserSelected: null,// ブラウザで選択中のエントリ
+  errorLines: [],
+  browserPath: null,
+  browserSelected: null,
+  // デバッグパネル
+  debugSession: null,   // {session_id, module, signals:[]}
+  debugWaveData: null,
 };
 
 // =========================================================================
@@ -48,6 +56,7 @@ const dom = {
   btnRunTest: $("btn-run-test"),
   btnStop: $("btn-stop"),
   btnSaveProject: $("btn-save-project"),
+  btnDebug: $("btn-debug"),
   btnZoomIn: $("btn-zoom-in"),
   btnZoomOut: $("btn-zoom-out"),
   btnZoomFit: $("btn-zoom-fit"),
@@ -56,29 +65,25 @@ const dom = {
   seedInput: $("seed-input"),
   statusBarTop: $("status-bar-top"),
   progressBar: $("progress-bar"),
-  // Sidebar
   fileList: $("file-list"),
   specList: $("spec-list"),
   moduleSelect: $("module-select"),
   exampleList: $("example-list"),
-  // Editor
   editorFilename: $("editor-filename"),
   editorErrorsBadge: $("editor-errors-badge"),
-  // Waveform
   signalNames: $("signal-names"),
   waveformCanvas: $("waveform-canvas"),
   waveformWrapper: $("waveform-canvas-wrapper"),
   waveSigCount: $("wave-sig-count"),
-  // Results
   summaryBar: $("summary-bar"),
   resultList: $("result-list"),
-  // Log
+  truncatedBanner: $("truncated-banner"),
+  truncatedMsg: $("truncated-msg"),
+  btnOpenVcd: $("btn-open-vcd"),
   logOutput: $("log-output"),
-  // Statusbar
   statusbar: $("statusbar"),
   statusText: $("status-text"),
   dropOverlay: $("drop-overlay"),
-  // File browser dialog
   fileBrowserOverlay: $("file-browser-overlay"),
   browserBreadcrumb: $("browser-breadcrumb"),
   browserBody: $("browser-body"),
@@ -86,6 +91,26 @@ const dom = {
   btnBrowserClose: $("btn-browser-close"),
   btnBrowserCancel: $("btn-browser-cancel"),
   btnBrowserOpen: $("btn-browser-open"),
+  // Debug panel
+  debugOverlay: $("debug-overlay"),
+  btnDebugClose: $("btn-debug-close"),
+  debugTime: $("debug-time"),
+  btnDbgStep: $("btn-dbg-step"),
+  dbgStepN: $("dbg-step-n"),
+  btnDbgRunUntil: $("btn-dbg-run-until"),
+  dbgUntilNs: $("dbg-until-ns"),
+  btnDbgReset: $("btn-dbg-reset"),
+  debugSignalsList: $("debug-signals-list"),
+  dbgSigName: $("dbg-sig-name"),
+  dbgSigVal: $("dbg-sig-val"),
+  btnDbgForce: $("btn-dbg-force"),
+  btnDbgSet: $("btn-dbg-set"),
+  btnDbgRelease: $("btn-dbg-release"),
+  dbgBpExpr: $("dbg-bp-expr"),
+  btnDbgBpAdd: $("btn-dbg-bp-add"),
+  debugBps: $("debug-bps"),
+  debugWaveformCanvas: $("debug-waveform-canvas"),
+  debugLog: $("debug-log"),
 };
 
 // =========================================================================
@@ -100,15 +125,10 @@ function initEditor() {
     theme: "dracula",
     lineNumbers: true,
     mode: "text/x-systemverilog",
-    indentUnit: 2,
-    tabSize: 2,
-    indentWithTabs: false,
+    indentUnit: 2, tabSize: 2,
     lineWrapping: false,
     gutters: ["CodeMirror-linenumbers", "error-gutter"],
-    extraKeys: {
-      "Ctrl-S": saveFile,
-      "Cmd-S":  saveFile,
-    },
+    extraKeys: { "Ctrl-S": saveFile, "Cmd-S": saveFile },
   });
   cmEditor.setSize("100%", "100%");
 }
@@ -130,18 +150,18 @@ function setEditorContent(content, lang) {
   clearEditorErrors();
 }
 
-function setEditorErrors(lines) {
+function setEditorErrors(errors) {
   if (!cmEditor) return;
   clearEditorErrors();
-  state.errorLines = lines;
-  for (const ln of lines) {
-    const lineIdx = ln - 1;
-    cmEditor.setGutterMarker(lineIdx, "error-gutter", makeErrorMarker());
-    cmEditor.addLineClass(lineIdx, "background", "cm-error-line");
+  state.errorLines = errors.filter(e => e.line > 0).map(e => e.line);
+  for (const ln of state.errorLines) {
+    const idx = ln - 1;
+    cmEditor.setGutterMarker(idx, "error-gutter", makeErrorMarker(errors.find(e => e.line === ln)));
+    cmEditor.addLineClass(idx, "background", "cm-error-line");
   }
-  if (lines.length > 0) {
+  if (state.errorLines.length > 0) {
     dom.editorErrorsBadge.style.display = "";
-    dom.editorErrorsBadge.textContent = `⚠ ${lines.length} エラー行`;
+    dom.editorErrorsBadge.textContent = `⚠ ${state.errorLines.length} エラー行`;
   }
 }
 
@@ -153,14 +173,13 @@ function clearEditorErrors() {
   }
   state.errorLines = [];
   dom.editorErrorsBadge.style.display = "none";
-  dom.editorErrorsBadge.textContent = "";
 }
 
-function makeErrorMarker() {
+function makeErrorMarker(err) {
   const el = document.createElement("div");
   el.className = "cm-error-gutter";
   el.textContent = "●";
-  el.title = "エラー行";
+  el.title = err ? `[${err.code || err.severity}] ${err.message}` : "エラー行";
   return el;
 }
 
@@ -181,25 +200,47 @@ async function apiFetch(method, path, body) {
 }
 
 const api = {
-  examples:     ()              => apiFetch("GET", "/api/examples"),
-  load:         (files, top)    => apiFetch("POST", "/api/load", { files, top }),
-  browseRoots:  ()              => apiFetch("GET", "/api/browse/roots"),
-  browse:       (path)          => apiFetch("GET", `/api/browse?path=${encodeURIComponent(path)}`),
-  fileRead:     (path)          => apiFetch("GET", `/api/file/read?path=${encodeURIComponent(path)}`),
-  fileWrite:    (path, content) => apiFetch("POST", "/api/file/write", { path, content }),
-  testStart:    (sv_files, spec, top, seed) => apiFetch("POST", "/api/test/start", {
-    sv_files, spec, top: top ?? null, seed: seed !== "" ? parseInt(seed) : null,
+  examples:     ()                  => apiFetch("GET", "/api/examples"),
+  load:         (files, top)        => apiFetch("POST", "/api/load", { files, top }),
+  browseRoots:  ()                  => apiFetch("GET", "/api/browse/roots"),
+  browse:       (path)              => apiFetch("GET", `/api/browse?path=${encodeURIComponent(path)}`),
+  fileRead:     (path)              => apiFetch("GET", `/api/file/read?path=${encodeURIComponent(path)}`),
+  fileWrite:    (path, content)     => apiFetch("POST", "/api/file/write", { path, content }),
+  testStart:    (sv, spec, top, seed) => apiFetch("POST", "/api/test/start", {
+    sv_files: sv, spec, top: top ?? null, seed: seed !== "" ? parseInt(seed) : null,
   }),
-  testCancel:   (jid)           => apiFetch("POST", `/api/test/${jid}/cancel`, {}),
-  testResult:   (jid)           => apiFetch("GET",  `/api/test/${jid}/result`),
-  waveIndex:    (path)          => apiFetch("GET", `/api/waveform/index?path=${encodeURIComponent(path)}`),
+  testCancel:   (jid)               => apiFetch("POST", `/api/test/${jid}/cancel`, {}),
+  testResult:   (jid)               => apiFetch("GET",  `/api/test/${jid}/result`),
+  waveIndex:    (path)              => apiFetch("GET", `/api/waveform/index?path=${encodeURIComponent(path)}`),
   waveRange:    (path, sigs, t0, t1) => {
     const p = new URLSearchParams({ path, t_start: t0 ?? 0 });
     if (t1 != null) p.append("t_end", t1);
     if (sigs?.length) p.append("signals", sigs.join(","));
     return apiFetch("GET", `/api/waveform/range?${p}`);
   },
-  projectSave: (path, data)  => apiFetch("POST", "/api/project", { path, ...data }),
+  projectSave:  (path, data)        => apiFetch("POST", "/api/project", { path, ...data }),
+  // Simulator API (§8)
+  simCreate:    (sv, top, params, hp, rc) => apiFetch("POST", "/api/simulator", {
+    sv_files: sv, top: top ?? null, params: params ?? {}, half_period: hp ?? 5, reset_cycles: rc ?? 10,
+  }),
+  simList:      ()                  => apiFetch("GET", "/api/simulator"),
+  simDelete:    (sid)               => apiFetch("DELETE", `/api/simulator/${sid}`),
+  simStep:      (sid, n)            => apiFetch("POST", `/api/simulator/${sid}/step`, { n }),
+  simRunUntil:  (sid, ns)           => apiFetch("POST", `/api/simulator/${sid}/run_until`, { time_ns: ns }),
+  simSignals:   (sid)               => apiFetch("GET", `/api/simulator/${sid}/signals`),
+  simSet:       (sid, sig, val)     => apiFetch("POST", `/api/simulator/${sid}/set`, { signal: sig, value: val }),
+  simForce:     (sid, sig, val)     => apiFetch("POST", `/api/simulator/${sid}/force`, { signal: sig, value: val }),
+  simRelease:   (sid, sig)          => apiFetch("POST", `/api/simulator/${sid}/release`, { signal: sig }),
+  simReset:     (sid)               => apiFetch("POST", `/api/simulator/${sid}/reset`, {}),
+  simBpAdd:     (sid, cond)         => apiFetch("POST", `/api/simulator/${sid}/breakpoints`, { condition: cond }),
+  simBpList:    (sid)               => apiFetch("GET", `/api/simulator/${sid}/breakpoints`),
+  simBpDel:     (sid, id)           => apiFetch("DELETE", `/api/simulator/${sid}/breakpoints/${id}`),
+  simWaveform:  (sid, sigs, t0, t1) => {
+    const p = new URLSearchParams({ t_start: t0 ?? 0 });
+    if (t1 != null) p.append("t_end", t1);
+    if (sigs?.length) p.append("signals", sigs.join(","));
+    return apiFetch("GET", `/api/simulator/${sid}/waveform?${p}`);
+  },
 };
 
 // =========================================================================
@@ -215,6 +256,14 @@ function log(msg, cls = "log-line") {
 }
 function logClear() { dom.logOutput.innerHTML = ""; }
 
+function dbgLog(msg, cls = "dbg-log-line") {
+  const el = document.createElement("div");
+  el.className = cls;
+  el.textContent = msg;
+  dom.debugLog.appendChild(el);
+  dom.debugLog.scrollTop = dom.debugLog.scrollHeight;
+}
+
 // =========================================================================
 // ステータスバー / 進捗
 // =========================================================================
@@ -223,7 +272,6 @@ function setStatus(text, cls = "idle") {
   dom.statusbar.className = cls;
   dom.statusText.textContent = text;
 }
-
 function setProgress(pct) {
   dom.progressBar.style.width = `${Math.min(100, Math.max(0, pct))}%`;
 }
@@ -243,18 +291,15 @@ function renderFileList() {
     li.addEventListener("click", () => openFileInEditor(f.path));
     dom.fileList.appendChild(li);
   });
-
   dom.specList.innerHTML = "";
   if (state.project.specFile) {
     const name = state.project.specFile.path.split(/[\\/]/).pop();
     const li = document.createElement("li");
     li.className = "file-item active";
     li.innerHTML = `<span>📋</span><span>${name}</span>`;
-    li.title = state.project.specFile.path;
     li.addEventListener("click", () => openFileInEditor(state.project.specFile.path));
     dom.specList.appendChild(li);
   }
-
   dom.moduleSelect.innerHTML = "";
   if (state.module) {
     const opt = document.createElement("option");
@@ -275,10 +320,7 @@ async function openFileInEditor(path) {
     state.editorPath = path;
     dom.editorFilename.textContent = path.split(/[\\/]/).pop();
     setEditorContent(data.content, data.lang);
-    log(`ファイルを開きました: ${path}`, "log-info");
-  } catch (e) {
-    log(`ファイル読み込みエラー: ${e.message}`, "log-error");
-  }
+  } catch (e) { log(`ファイル読み込みエラー: ${e.message}`, "log-error"); }
 }
 
 // =========================================================================
@@ -287,22 +329,14 @@ async function openFileInEditor(path) {
 
 async function saveFile() {
   if (!state.editorPath || !cmEditor) return;
-  const content = cmEditor.getValue();
   try {
-    await api.fileWrite(state.editorPath, content);
+    await api.fileWrite(state.editorPath, cmEditor.getValue());
     log(`保存しました: ${state.editorPath}`, "log-info");
-
-    // SV ファイルの場合は再ロード
     const ext = state.editorPath.split(".").pop().toLowerCase();
-    if (ext === "sv" || ext === "v") {
-      const svPaths = state.project.svFiles.map(f => f.path);
-      if (svPaths.length > 0) {
-        await loadModule(svPaths, state.project.top);
-      }
+    if ((ext === "sv" || ext === "v") && state.project.svFiles.length > 0) {
+      await loadModule(state.project.svFiles.map(f => f.path), state.project.top);
     }
-  } catch (e) {
-    log(`保存エラー: ${e.message}`, "log-error");
-  }
+  } catch (e) { log(`保存エラー: ${e.message}`, "log-error"); }
 }
 
 // =========================================================================
@@ -313,18 +347,17 @@ async function loadModule(svPaths, top) {
   try {
     const data = await api.load(svPaths, top);
     state.module = data;
-    const portSummary = data.ports.map(p => `${p.direction.padEnd(7)} [${p.width-1}:0] ${p.name}`).join("\n");
     log(`ロード成功: ${data.module} (${data.ports.length} ポート)`, "log-info");
-
-    // エラー情報をエディタに反映
+    // 構造化エラーをエディタに反映（M5 ErrorInfo 形式）
     if (data.errors?.length > 0) {
-      const errorLines = data.errors.filter(e => e.line).map(e => e.line);
-      setEditorErrors(errorLines);
-      data.errors.forEach(e => log(`[${e.severity}] ${e.message}${e.line ? ` (行 ${e.line})` : ""}`, "log-error"));
+      setEditorErrors(data.errors.filter(e => e.severity === "error" || e.severity === "warning"));
+      data.errors.forEach(e =>
+        log(`[${e.severity}] ${e.message}${e.line ? ` (行 ${e.line})` : ""}`,
+            e.severity === "error" ? "log-error" : "log-warn")
+      );
     } else {
       clearEditorErrors();
     }
-
     renderFileList();
     setStatus(`${data.module} ロード済み`, "idle");
   } catch (e) {
@@ -349,9 +382,7 @@ async function loadExamplesList() {
       dom.exampleList.appendChild(btn);
     });
     if (!data.examples.length) dom.exampleList.textContent = "(サンプルなし)";
-  } catch (e) {
-    log(`サンプル取得エラー: ${e.message}`, "log-error");
-  }
+  } catch (e) { log(`サンプル取得エラー: ${e.message}`, "log-error"); }
 }
 
 async function loadExample(ex) {
@@ -375,7 +406,6 @@ async function runTest() {
     log("SV ファイルとスペックファイルを選択してください", "log-error");
     return;
   }
-
   state.running = true;
   dom.btnRunTest.disabled = true;
   dom.btnStop.disabled = false;
@@ -385,6 +415,7 @@ async function runTest() {
   log("▶ テスト実行開始 (SSE)", "log-info");
   clearResults();
   clearWaveform();
+  hideTruncatedBanner();
 
   try {
     const svPaths = state.project.svFiles.map(f => f.path);
@@ -394,8 +425,6 @@ async function runTest() {
 
     const { job_id } = await api.testStart(svPaths, specPath, top, seed);
     state.currentJobId = job_id;
-    log(`ジョブ開始: ${job_id}`, "log-info");
-
     await consumeSSE(`/api/test/${job_id}/events`);
 
     const { done, result } = await api.testResult(job_id);
@@ -404,9 +433,16 @@ async function runTest() {
       state.vcdPath = result.vcd_path;
       renderResults(result);
 
+      // §12.3: truncated_at 警告
+      if (result.truncated_at != null) {
+        showTruncatedBanner(result.truncated_at, result.vcd_path);
+      }
+
       const s = result.summary;
       const cls = s.fail > 0 ? "fail" : s.error > 0 ? "error" : "pass";
-      const msg = `完了: ${s.pass} PASS / ${s.fail} FAIL / ${s.error} ERROR`;
+      const msg = `完了: ${s.pass} PASS / ${s.fail} FAIL / ${s.error} ERROR`
+        + (s.skip > 0 ? ` / ${s.skip} SKIP` : "")
+        + (result.cancelled ? " [キャンセル]" : "");
       setStatus(msg, cls);
       log(`✓ ${msg}`, cls === "pass" ? "log-pass" : "log-fail");
       setProgress(100);
@@ -415,8 +451,7 @@ async function runTest() {
         log(`波形読み込み中: ${result.vcd_path}`, "log-info");
         await loadWaveformIndex(result.vcd_path);
       }
-
-      (result.cases?.[0]?.log ?? []).forEach(l => log(l));
+      (result.log ?? []).forEach(l => log(l));
     }
   } catch (e) {
     log(`エラー: ${e.message}`, "log-error");
@@ -430,40 +465,40 @@ async function runTest() {
 }
 
 async function consumeSSE(url) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     const es = new EventSource(url);
     es.onmessage = (e) => {
       try {
         const event = JSON.parse(e.data);
         handleSSEEvent(event);
         if (event.event === "finish" || event.event === "error") {
-          es.close();
-          resolve();
+          es.close(); resolve();
         }
       } catch (_) {}
     };
-    es.onerror = (e) => {
-      es.close();
-      resolve(); // エラーでも result を取得して続行
-    };
+    es.onerror = () => { es.close(); resolve(); };
   });
 }
 
 function handleSSEEvent(event) {
-  switch (event.event) {
+  const evType = event.event || event.type;
+  switch (evType) {
     case "start":
       log(`シミュ開始: ${event.spec ?? ""}`, "log-info");
       setProgress(10);
       break;
     case "progress": {
-      const pct = event.total > 0 ? Math.round(10 + 80 * event.cycle / event.total) : 50;
+      const total = event.total ?? event.total_cycles ?? 0;
+      const pct = total > 0 ? Math.round(10 + 80 * (event.cycle ?? 0) / total) : 50;
       setProgress(pct);
-      const phase = event.phase ?? "sim";
-      dom.statusBarTop.textContent = `[${phase}] ${event.cycle}/${event.total} cycles  t=${event.time_ns ?? 0}ns`;
+      dom.statusBarTop.textContent =
+        `[${event.phase ?? "sim"}] ${event.cycle ?? 0}/${total} cycles  t=${event.time_ns ?? 0}ns`;
       break;
     }
     case "case_done":
-      log(`ケース完了: ${event.name} → ${event.status}`, event.status === "PASS" ? "log-pass" : "log-fail");
+      // §12.2: ケース単位 case_done（checks リスト付き）
+      log(`ケース完了: ${event.name} → ${event.status}${event.checks?.length ? ` (${event.checks.length} checks)` : ""}`,
+          event.status === "PASS" ? "log-pass" : "log-fail");
       break;
     case "finish":
       setProgress(95);
@@ -479,16 +514,40 @@ async function stopTest() {
   try {
     await api.testCancel(state.currentJobId);
     log("キャンセルリクエストを送信しました", "log-warn");
-  } catch (e) {
-    log(`キャンセルエラー: ${e.message}`, "log-error");
-  }
+  } catch (e) { log(`キャンセルエラー: ${e.message}`, "log-error"); }
 }
 
 // =========================================================================
-// 結果表示
+// §12.3: truncated_at 警告バナー
 // =========================================================================
 
-function clearResults() { dom.resultList.innerHTML = ""; dom.summaryBar.innerHTML = ""; }
+function showTruncatedBanner(truncated_at, vcdPath) {
+  dom.truncatedBanner.style.display = "flex";
+  dom.truncatedMsg.textContent =
+    `⚠ 波形記録が上限に達しました（truncated_at: ${truncated_at}ns）。` +
+    `VCD を読み込むと全体を見られます。`;
+  dom.btnOpenVcd.style.display = vcdPath ? "" : "none";
+  dom.btnOpenVcd.onclick = vcdPath ? () => loadWaveformFromVcd(vcdPath) : null;
+}
+
+function hideTruncatedBanner() {
+  dom.truncatedBanner.style.display = "none";
+}
+
+async function loadWaveformFromVcd(vcdPath) {
+  log(`VCD から波形を読み込み中: ${vcdPath}`, "log-info");
+  await loadWaveformIndex(vcdPath);
+}
+
+// =========================================================================
+// 結果表示（§12.1/§12.2 対応）
+// =========================================================================
+
+function clearResults() {
+  dom.resultList.innerHTML = "";
+  dom.summaryBar.innerHTML = "";
+  state.selectedCase = null;
+}
 
 function renderResults(result) {
   const s = result.summary;
@@ -497,52 +556,99 @@ function renderResults(result) {
     ["fail",  s.fail,  "badge-fail"],
     ["error", s.error, "badge-error"],
     ["skip",  s.skip,  "badge-skip"],
-  ].map(([l,c,cls]) => `<span class="count-badge ${cls}">${c} ${l.toUpperCase()}</span>`).join("");
+  ].map(([l, c, cls]) => `<span class="count-badge ${cls}">${c} ${l.toUpperCase()}</span>`).join("")
+  + (result.cancelled ? `<span class="count-badge" style="background:#2d2d44;color:#a3a3b4;">キャンセル</span>` : "");
 
   dom.resultList.innerHTML = "";
-  result.cases.forEach((c, i) => {
-    const card = document.createElement("div");
-    card.className = "case-card";
-    const dur = c.duration_sec != null ? `${c.duration_sec.toFixed(2)}s` : "";
-    card.innerHTML = `
-      <div class="case-header">
-        <div class="status-dot dot-${c.status}"></div>
-        <div class="case-name">${escHtml(c.name)}</div>
-        <div class="case-meta">${dur}</div>
-      </div>
-      <div class="case-detail">
-        ${c.seed != null ? `<div class="failure-label">シード: ${c.seed}</div>` : ""}
-        ${c.message ? `<div class="failure-label">${escHtml(c.message)}</div>` : ""}
-        ${renderFailures(c.failures)}
-        <div class="case-actions">
-          <button class="btn btn-secondary" style="font-size:10px;padding:2px 7px;" onclick="rerunWithSeed(${c.seed})">↺ このシードで再実行</button>
-        </div>
-      </div>`;
-    card.addEventListener("click", () => selectCase(card, c));
+
+  // §12.2: checks をケース名単位でグループ化して表示
+  const groups = _groupChecks(result.checks ?? []);
+  const caseCount = groups.length;
+
+  if (caseCount === 0 && result.status === "ERROR") {
+    // パース失敗等: チェックなしでエラー表示
+    const card = _makeCaseCard({
+      name: result.module || "error",
+      status: "ERROR",
+      message: result.errors?.map(e => e.message).join("; ") ?? "エラー",
+      checks: [],
+      seed: result.seed,
+      duration_sec: (result.elapsed_ms ?? 0) / 1000,
+    });
     dom.resultList.appendChild(card);
-    if (i === 0) selectCase(card, c);
+    return;
+  }
+
+  groups.forEach((grp, i) => {
+    const card = _makeCaseCard(grp);
+    dom.resultList.appendChild(card);
+    if (i === 0) selectCase(card, grp);
   });
 }
 
-function renderFailures(failures) {
-  if (!failures?.length) return '<div class="failure-label">✓ 全チェック合格</div>';
-  return failures.map(f =>
-    `<div class="failure-item">cycle=${f.cycle} <b>${escHtml(String(f.signal))}</b> 期待:<b>${escHtml(String(f.expected))}</b> 実測:<b>${escHtml(String(f.actual))}</b></div>`
-  ).join("");
+function _groupChecks(checks) {
+  // §12.2: checks を scenario (name の共通プレフィックス) 単位にまとめる
+  // M5 API の check name は "<signal>@cycle<N>[spec]" 形式
+  // シナリオ = spec ファイル名（全チェックが同一シナリオ）
+  if (!checks.length) return [];
+
+  const overall_status = checks.some(c => c.status === "FAIL") ? "FAIL"
+    : checks.some(c => c.status === "ERROR") ? "ERROR"
+    : "PASS";
+  const fails = checks.filter(c => c.status !== "PASS");
+
+  return [{
+    name: state.project.specFile?.path.split(/[\\/]/).pop()?.replace(/_spec\.yaml$/, "") ?? "test",
+    status: overall_status,
+    checks,
+    failures: fails,
+    seed: checks[0]?.seed ?? 0,
+    duration_sec: null,
+  }];
 }
 
-function selectCase(card, c) {
+function _makeCaseCard(grp) {
+  const card = document.createElement("div");
+  card.className = "case-card";
+  const dur = grp.duration_sec != null ? `${grp.duration_sec.toFixed(2)}s` : "";
+  card.innerHTML = `
+    <div class="case-header">
+      <div class="status-dot dot-${grp.status}"></div>
+      <div class="case-name">${escHtml(grp.name)}</div>
+      <div class="case-meta">${dur}</div>
+    </div>
+    <div class="case-detail">
+      ${grp.seed != null ? `<div class="failure-label">シード: ${grp.seed}</div>` : ""}
+      ${grp.message ? `<div class="failure-label">${escHtml(grp.message)}</div>` : ""}
+      ${_renderFailures(grp.failures ?? [])}
+      <div class="case-actions">
+        ${grp.seed != null ? `<button class="btn btn-secondary" style="font-size:10px;padding:2px 7px;" onclick="rerunWithSeed(${grp.seed})">↺ このシードで再実行</button>` : ""}
+      </div>
+    </div>`;
+  card.addEventListener("click", () => selectCase(card, grp));
+  return card;
+}
+
+function _renderFailures(failures) {
+  if (!failures?.length) return '<div class="failure-label">✓ 全チェック合格</div>';
+  return failures.slice(0, 10).map(f =>
+    `<div class="failure-item">cycle=${f.cycle} <b>${escHtml(String(f.signal))}</b> `+
+    `期待:<b>${escHtml(String(f.expected))}</b> 実測:<b>${escHtml(String(f.actual))}</b></div>`
+  ).join("") + (failures.length > 10 ? `<div class="failure-label">… 他 ${failures.length - 10} 件</div>` : "");
+}
+
+function selectCase(card, grp) {
   document.querySelectorAll(".case-card").forEach(el => el.classList.remove("selected"));
   card.classList.add("selected");
-  state.selectedCase = c;
-  if (c.failures?.length > 0 && state.waveformData) {
-    state.cursorA = c.failures[0].time_ns ?? c.failures[0].cycle * 10;
+  state.selectedCase = grp;
+  // 波形カーソルを最初の失敗へジャンプ
+  if (grp.failures?.length > 0 && state.waveformData) {
+    state.cursorA = grp.failures[0].time_ns ?? grp.failures[0].cycle * 10;
     drawWaveform();
   }
 }
 
 async function rerunWithSeed(seed) {
-  if (!seed) return;
   dom.seedInput.value = String(seed);
   await runTest();
 }
@@ -559,37 +665,23 @@ async function loadWaveformIndex(vcdPath) {
     const idx = await api.waveIndex(vcdPath);
     state.vcdIndex = idx;
     state.vcdPath = vcdPath;
-
     const allSigs = Object.keys(idx.signals);
     state.selectedSignals = allSigs.slice(0, INIT_DISPLAY_SIGNALS);
     dom.waveSigCount.textContent = `${allSigs.length} 信号中 ${state.selectedSignals.length} 表示`;
-
-    log(`波形インデックス: ${allSigs.length} 信号, 終端≈${idx.end_time}ns（概算）`, "log-info");
-
-    // 初期20信号分の値変化を取得
+    log(`波形インデックス: ${allSigs.length} 信号`, "log-info");
     await fetchWaveRange();
-  } catch (e) {
-    log(`波形インデックスエラー: ${e.message}`, "log-error");
-  }
+  } catch (e) { log(`波形インデックスエラー: ${e.message}`, "log-error"); }
 }
 
 async function fetchWaveRange() {
   if (!state.vcdPath || !state.selectedSignals.length) return;
   try {
-    const data = await api.waveRange(
-      state.vcdPath,
-      state.selectedSignals,
-      0,
-      null  // 全範囲
-    );
+    const data = await api.waveRange(state.vcdPath, state.selectedSignals, 0, null);
     state.waveformData = data;
     renderSignalNames();
-    state.zoom = 1.0;
     zoomFit();
     log(`波形データ取得: ${state.selectedSignals.length} 信号`, "log-info");
-  } catch (e) {
-    log(`波形データエラー: ${e.message}`, "log-error");
-  }
+  } catch (e) { log(`波形データエラー: ${e.message}`, "log-error"); }
 }
 
 function clearWaveform() {
@@ -604,7 +696,7 @@ function clearWaveform() {
 
 function renderSignalNames() {
   dom.signalNames.innerHTML = "";
-  state.selectedSignals.forEach((name) => {
+  state.selectedSignals.forEach(name => {
     const row = document.createElement("div");
     row.className = "sig-name-row";
     row.textContent = name;
@@ -615,11 +707,37 @@ function renderSignalNames() {
 }
 
 // =========================================================================
-// 波形描画（Canvas）
+// 波形描画（Canvas）— §12.4 Z/X 区別色
 // =========================================================================
 
 const WAVE_ROW_H = 28;
 const WAVE_RULER_H = 24;
+
+// §12.4: Z は "z"（青系）、X は "x"（橙系）
+const COLOR_SIG  = "#7c6af7"; // 通常信号
+const COLOR_X    = "#fb923c"; // X（不定）
+const COLOR_Z    = "#60a5fa"; // Z（ハイインピーダンス）
+const COLOR_FILL_SIG = "rgba(124,106,247,0.12)";
+const COLOR_FILL_X   = "rgba(251,146,60,0.15)";
+const COLOR_FILL_Z   = "rgba(96,165,250,0.12)";
+
+function _sigColor(v) {
+  const s = String(v).toLowerCase();
+  if (s === "z" || (s.includes("z") && !s.includes("x"))) return COLOR_Z;
+  if (s.includes("x") || s === "x") return COLOR_X;
+  return COLOR_SIG;
+}
+function _sigFill(v) {
+  const s = String(v).toLowerCase();
+  if (s === "z" || (s.includes("z") && !s.includes("x"))) return COLOR_FILL_Z;
+  if (s.includes("x") || s === "x") return COLOR_FILL_X;
+  return COLOR_FILL_SIG;
+}
+function _isX(v) { return String(v).toLowerCase().includes("x"); }
+function _isZ(v) {
+  const s = String(v).toLowerCase();
+  return s === "z" || (s.includes("z") && !s.includes("x"));
+}
 
 function drawWaveform() {
   if (!state.waveformData) return;
@@ -633,63 +751,47 @@ function drawWaveform() {
   const totalW = Math.max(wrapper.clientWidth, Math.ceil(endTime * pxPerNs) + 60);
   const totalH = WAVE_RULER_H + sigs.length * WAVE_ROW_H + 4;
 
-  canvas.width = totalW;
-  canvas.height = totalH;
-  canvas.style.width = totalW + "px";
-  canvas.style.height = totalH + "px";
+  canvas.width = totalW; canvas.height = totalH;
+  canvas.style.width = totalW + "px"; canvas.style.height = totalH + "px";
 
   const ctx = canvas.getContext("2d");
   ctx.fillStyle = "#12121f";
   ctx.fillRect(0, 0, totalW, totalH);
 
-  // グリッド
   const step = _niceStep(endTime, Math.floor(totalW / 60));
-  ctx.strokeStyle = "#2a2a40";
-  ctx.lineWidth = 1;
+  ctx.strokeStyle = "#2a2a40"; ctx.lineWidth = 1;
   for (let t = 0; t <= endTime + step; t += step) {
     const x = Math.round(t * pxPerNs) + 0.5;
     ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, totalH); ctx.stroke();
   }
-
-  // ルーラー
   ctx.fillStyle = "#3d3d5c";
   ctx.fillRect(0, 0, totalW, WAVE_RULER_H);
-  ctx.fillStyle = "#a3a3b4";
-  ctx.font = "10px monospace";
-  ctx.textAlign = "left";
+  ctx.fillStyle = "#a3a3b4"; ctx.font = "10px monospace"; ctx.textAlign = "left";
   for (let t = 0; t <= endTime + step; t += step) {
-    const x = Math.round(t * pxPerNs);
-    ctx.fillText(`${t}ns`, x + 3, 15);
+    ctx.fillText(`${t}ns`, Math.round(t * pxPerNs) + 3, 15);
   }
 
-  // 信号描画
   sigs.forEach((name, si) => {
     const sigData = state.waveformData.signals[name];
     if (!sigData) return;
     _drawSignal(ctx, sigData, WAVE_RULER_H + si * WAVE_ROW_H, WAVE_ROW_H, totalW, endTime, pxPerNs);
   });
 
-  // カーソル A
-  if (state.cursorA >= 0) {
-    const x = state.cursorA * pxPerNs;
-    ctx.strokeStyle = "#f9c74f"; ctx.lineWidth = 1.5;
-    ctx.setLineDash([4, 3]);
-    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, totalH); ctx.stroke();
-    ctx.setLineDash([]);
-  }
-
-  // カーソル B
-  if (state.cursorB >= 0) {
-    const x = state.cursorB * pxPerNs;
-    ctx.strokeStyle = "#60a5fa"; ctx.lineWidth = 1.5;
-    ctx.setLineDash([4, 3]);
-    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, totalH); ctx.stroke();
-    ctx.setLineDash([]);
-  }
+  _drawCursor(ctx, state.cursorA, "#f9c74f", totalH);
+  _drawCursor(ctx, state.cursorB, "#60a5fa", totalH);
 
   if (state.cursorA >= 0 && state.cursorB >= 0) {
     dom.statusBarTop.textContent = `ΔT = ${Math.abs(state.cursorB - state.cursorA)} ns`;
   }
+}
+
+function _drawCursor(ctx, t, color, h) {
+  if (t < 0) return;
+  const x = t * state.zoom * 0.8;
+  ctx.strokeStyle = color; ctx.lineWidth = 1.5;
+  ctx.setLineDash([4, 3]);
+  ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
+  ctx.setLineDash([]);
 }
 
 function _drawSignal(ctx, sigData, y0, rowH, totalW, endTime, pxPerNs) {
@@ -697,62 +799,62 @@ function _drawSignal(ctx, sigData, y0, rowH, totalW, endTime, pxPerNs) {
   const width = sigData.width;
   const is1bit = width === 1;
   const highY = y0 + 4, lowY = y0 + rowH - 6, midY = (highY + lowY) / 2;
-
   if (!changes?.length) return;
-  const pts = [...changes.map(([t,v]) => ({t, v})), {t: endTime + 1, v: changes[changes.length-1][1]}];
+
+  const pts = [...changes.map(([t, v]) => ({ t, v })),
+               { t: endTime + 1, v: changes[changes.length - 1][1] }];
 
   ctx.lineWidth = 1.5;
-  ctx.font = "9px monospace";
-  ctx.textAlign = "center";
+  ctx.font = "9px monospace"; ctx.textAlign = "center";
 
   for (let i = 0; i < pts.length - 1; i++) {
-    const {t: t0, v: v0} = pts[i], {t: t1} = pts[i+1];
+    const { t: t0, v: v0 } = pts[i], { t: t1 } = pts[i + 1];
     const x0 = t0 * pxPerNs, x1 = t1 * pxPerNs;
     if (x1 < 0 || x0 > totalW) continue;
 
-    const isX = typeof v0 === "string" && v0.includes("x");
-    const isZ = typeof v0 === "string" && v0.includes("z");
+    const stroke = _sigColor(v0);
+    ctx.strokeStyle = stroke;
 
     if (is1bit) {
-      const isHigh = !isX && !isZ && v0 === "1";
-      const y = isHigh ? highY : lowY;
-      ctx.strokeStyle = isX ? "#fb923c" : isZ ? "#60a5fa" : "#7c6af7";
+      // §12.4: Z=青 / X=橙 / 1=紫（高位） / 0=紫（低位）
+      const y = (_isZ(v0) || _isX(v0)) ? midY : (v0 === "1" ? highY : lowY);
       ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(x1, y); ctx.stroke();
       if (i > 0) {
-        const prevY = pts[i-1].v === "1" ? highY : lowY;
+        const prev_v = pts[i - 1].v;
+        const prevY = (_isZ(prev_v) || _isX(prev_v)) ? midY : (prev_v === "1" ? highY : lowY);
         ctx.beginPath(); ctx.moveTo(x0, prevY); ctx.lineTo(x0, y); ctx.stroke();
       }
     } else {
       const mw = 5, lx1 = x0 + mw, rx0 = x1 - mw;
-      ctx.strokeStyle = isX ? "#fb923c" : isZ ? "#60a5fa" : "#7c6af7";
-      ctx.fillStyle = isX ? "rgba(251,146,60,0.15)" : isZ ? "rgba(96,165,250,0.12)" : "rgba(124,106,247,0.12)";
+      ctx.fillStyle = _sigFill(v0);
       ctx.beginPath();
       ctx.moveTo(x0, midY); ctx.lineTo(lx1, highY);
-      ctx.lineTo(Math.max(lx1, rx0), highY);
-      ctx.lineTo(x1, midY);
-      ctx.lineTo(Math.max(lx1, rx0), lowY);
-      ctx.lineTo(lx1, lowY);
-      ctx.closePath();
-      ctx.fill(); ctx.stroke();
-
+      ctx.lineTo(Math.max(lx1, rx0), highY); ctx.lineTo(x1, midY);
+      ctx.lineTo(Math.max(lx1, rx0), lowY); ctx.lineTo(lx1, lowY);
+      ctx.closePath(); ctx.fill(); ctx.stroke();
       const segW = x1 - x0;
       if (segW > 18) {
-        ctx.fillStyle = isX ? "#fb923c" : isZ ? "#60a5fa" : "#e2e2f0";
-        const dv = fmtVal(v0, width, state.radix);
-        ctx.fillText(_truncate(dv, segW - 10, ctx), (x0 + x1) / 2, midY + 3.5);
+        ctx.fillStyle = stroke;
+        ctx.fillText(_truncate(fmtVal(v0, width, state.radix), segW - 10, ctx),
+                     (x0 + x1) / 2, midY + 3.5);
       }
     }
   }
 }
 
+// §12.4: Z と X の区別（大文字小文字は正規化済み）
 function fmtVal(binStr, width, radix) {
   if (typeof binStr !== "string") binStr = String(binStr);
-  if (binStr === "x" || binStr === "z") return binStr.toUpperCase();
-  if (binStr.includes("x") || binStr.includes("z")) return binStr;
-  if (radix === "bin") return "b" + binStr.padStart(width, "0");
-  const n = parseInt(binStr, 2);
+  const lower = binStr.toLowerCase();
+  // 単一文字 x/z はそのまま大文字表示
+  if (lower === "x") return "X";
+  if (lower === "z") return "Z";
+  // 混在バイナリ → そのまま
+  if (lower.includes("x") || lower.includes("z")) return binStr;
+  if (radix === "bin") return "b" + lower.padStart(width, "0");
+  const n = parseInt(lower, 2);
   if (isNaN(n)) return binStr;
-  if (radix === "hex") return "0x" + n.toString(16).toUpperCase().padStart(Math.ceil(width/4), "0");
+  if (radix === "hex") return "0x" + n.toString(16).toUpperCase().padStart(Math.ceil(width / 4), "0");
   if (radix === "dec") return String(n);
   return binStr;
 }
@@ -781,14 +883,11 @@ function zoomFit() {
   if (!state.waveformData) return;
   const end = state.waveformData.end_time || 1;
   const w = dom.waveformWrapper.clientWidth || 400;
-  state.zoom = (w - 40) / (end * 0.8) / 1;
+  state.zoom = (w - 40) / (end * 0.8);
   drawWaveform();
 }
 
-// =========================================================================
 // Canvas インタラクション
-// =========================================================================
-
 (function setupCanvasEvents() {
   let dragging = false, dragStartX = 0;
   dom.waveformCanvas.addEventListener("mousedown", e => { dragging = true; dragStartX = e.clientX; });
@@ -810,10 +909,7 @@ function zoomFit() {
   }, { passive: false });
 })();
 
-// =========================================================================
 // 基数切替
-// =========================================================================
-
 function setRadix(r) {
   state.radix = r;
   document.querySelectorAll(".radix-btn").forEach(b => b.classList.toggle("active", b.dataset.radix === r));
@@ -827,11 +923,8 @@ function setRadix(r) {
 async function openFileBrowser() {
   dom.fileBrowserOverlay.style.display = "flex";
   if (!state.browserPath) {
-    // 許可ルート一覧を取得
     const roots = await api.browseRoots();
-    if (roots.roots.length > 0) {
-      state.browserPath = roots.roots[0];
-    }
+    if (roots.roots.length > 0) state.browserPath = roots.roots[0];
   }
   await browseTo(state.browserPath);
 }
@@ -841,25 +934,19 @@ async function browseTo(path) {
   try {
     const data = await api.browse(path);
     renderBrowser(data.path, data.entries);
-  } catch (e) {
-    log(`ブラウザエラー: ${e.message}`, "log-error");
-  }
+  } catch (e) { log(`ブラウザエラー: ${e.message}`, "log-error"); }
 }
 
 function renderBrowser(currentPath, entries) {
-  // パンくず
   const parts = currentPath.replace(/\\/g, "/").split("/").filter(Boolean);
   dom.browserBreadcrumb.innerHTML = parts.map((p, i) => {
     const partPath = "/" + parts.slice(0, i + 1).join("/");
-    return `<a href="#" data-path="${partPath}" class="breadcrumb-link" style="color:#7c6af7; text-decoration:none;">${p}</a>`;
+    return `<a href="#" data-path="${partPath}" class="breadcrumb-link" style="color:#7c6af7;text-decoration:none;">${p}</a>`;
   }).join(" / ");
   dom.browserBreadcrumb.querySelectorAll(".breadcrumb-link").forEach(a => {
     a.addEventListener("click", e => { e.preventDefault(); browseTo(a.dataset.path); });
   });
-
-  // エントリ一覧
   dom.browserBody.innerHTML = "";
-  // 上の階層
   const parentPath = currentPath.replace(/[\\/][^\\/]+$/, "") || currentPath;
   if (parentPath !== currentPath) {
     const up = document.createElement("div");
@@ -868,7 +955,6 @@ function renderBrowser(currentPath, entries) {
     up.addEventListener("click", () => browseTo(parentPath));
     dom.browserBody.appendChild(up);
   }
-
   entries.forEach(entry => {
     const el = document.createElement("div");
     const ext = entry.ext ?? "";
@@ -876,40 +962,26 @@ function renderBrowser(currentPath, entries) {
     el.dataset.ext = ext;
     el.innerHTML = `<span class="fb-icon"></span><span class="fb-name">${escHtml(entry.name)}</span>`;
     el.title = entry.path;
-
     el.addEventListener("click", e => {
-      if (entry.type === "dir") {
-        browseTo(entry.path);
-        return;
-      }
+      if (entry.type === "dir") { browseTo(entry.path); return; }
       document.querySelectorAll("#browser-body .fb-entry").forEach(el2 => el2.classList.remove("selected"));
       el.classList.add("selected");
       state.browserSelected = entry;
       dom.browserSelectedPath.textContent = entry.path;
     });
-
-    el.addEventListener("dblclick", () => {
-      if (entry.type === "dir") return;
-      state.browserSelected = entry;
-      confirmBrowserOpen();
-    });
-
+    el.addEventListener("dblclick", () => { if (entry.type === "dir") return; state.browserSelected = entry; confirmBrowserOpen(); });
     dom.browserBody.appendChild(el);
   });
 }
 
-function closeBrowser() {
-  dom.fileBrowserOverlay.style.display = "none";
-}
+function closeBrowser() { dom.fileBrowserOverlay.style.display = "none"; }
 
 async function confirmBrowserOpen() {
   const entry = state.browserSelected;
   if (!entry) return;
   closeBrowser();
-
   const p = entry.path;
   const ext = (entry.ext ?? "").toLowerCase();
-
   if (ext === ".sv" || ext === ".v") {
     state.project.svFiles.push({ path: p });
     renderFileList();
@@ -922,17 +994,11 @@ async function confirmBrowserOpen() {
   } else {
     await openFileInEditor(p);
   }
-
   log(`ファイルを追加: ${p}`, "log-info");
 }
 
-// =========================================================================
 // プロジェクト保存
-// =========================================================================
-
 async function saveProject() {
-  const projPath = `${window.location.origin}` + "/deltasim.project.yaml";
-  // デフォルトはカレントディレクトリ
   try {
     await api.projectSave("deltasim.project.yaml", {
       sv_files: state.project.svFiles.map(f => f.path),
@@ -941,9 +1007,215 @@ async function saveProject() {
       params: {},
     });
     log("プロジェクトを deltasim.project.yaml に保存しました", "log-info");
-  } catch (e) {
-    log(`プロジェクト保存エラー: ${e.message}`, "log-error");
+  } catch (e) { log(`プロジェクト保存エラー: ${e.message}`, "log-error"); }
+}
+
+// =========================================================================
+// 対話デバッグパネル（§8）
+// =========================================================================
+
+async function openDebugPanel() {
+  if (!state.project.svFiles.length) {
+    log("SV ファイルを先に読み込んでください", "log-error");
+    return;
   }
+  dom.debugOverlay.style.display = "flex";
+
+  if (!state.debugSession) {
+    try {
+      const sess = await api.simCreate(
+        state.project.svFiles.map(f => f.path),
+        state.project.top,
+        {}
+      );
+      state.debugSession = sess;
+      dbgLog(`セッション作成: ${sess.module}  signals: ${sess.signals.length}`, "dbg-log-info");
+      renderDebugSignals(sess.signals);
+      updateDebugTime(sess.time_ns, 0);
+    } catch (e) {
+      dbgLog(`セッション作成エラー: ${e.message}`, "dbg-log-line");
+    }
+  }
+}
+
+function closeDebugPanel() {
+  dom.debugOverlay.style.display = "none";
+}
+
+function updateDebugTime(time_ns, cycle) {
+  dom.debugTime.textContent = `t=${time_ns}ns  cycle=${cycle}`;
+}
+
+function renderDebugSignals(signals) {
+  dom.debugSignalsList.innerHTML = "";
+  signals.forEach(s => {
+    const row = document.createElement("div");
+    row.className = "dbg-sig-row";
+    const valStr = fmtVal(s.value ?? "0", s.width, state.radix);
+    row.innerHTML = `
+      <span class="dbg-sig-dir">${s.direction || ""}</span>
+      <span class="dbg-sig-name">${escHtml(s.name)}</span>
+      <span class="dbg-sig-val" data-sig="${escHtml(s.name)}">${escHtml(valStr)}</span>`;
+    dom.debugSignalsList.appendChild(row);
+  });
+}
+
+async function dbgRefreshSignals() {
+  if (!state.debugSession) return;
+  try {
+    const data = await api.simSignals(state.debugSession.session_id);
+    state.debugSession.signals = data.signals;
+    updateDebugTime(data.time_ns, data.cycle);
+    // 値を更新
+    data.signals.forEach(s => {
+      const el = dom.debugSignalsList.querySelector(`[data-sig="${s.name}"]`);
+      if (el) el.textContent = fmtVal(s.value ?? "0", s.width, state.radix);
+    });
+    // 波形を更新
+    await dbgRefreshWaveform();
+  } catch (e) { dbgLog(`signals エラー: ${e.message}`); }
+}
+
+async function dbgStep() {
+  if (!state.debugSession) return;
+  const n = parseInt(dom.dbgStepN.value) || 1;
+  try {
+    const snap = await api.simStep(state.debugSession.session_id, n);
+    updateDebugTime(snap.time_ns, state.debugSession.cycle ?? 0);
+    if (snap.breakpoint_hit != null) {
+      dbgLog(`[bp ${snap.breakpoint_hit} hit]  t=${snap.time_ns}ns`, "dbg-log-hit");
+    } else {
+      dbgLog(`step ${n} → t=${snap.time_ns}ns`, "dbg-log-info");
+    }
+    await dbgRefreshSignals();
+  } catch (e) { dbgLog(`step エラー: ${e.message}`); }
+}
+
+async function dbgRunUntil() {
+  if (!state.debugSession) return;
+  const ns = parseInt(dom.dbgUntilNs.value) || 100;
+  try {
+    const snap = await api.simRunUntil(state.debugSession.session_id, ns);
+    updateDebugTime(snap.time_ns, state.debugSession.cycle ?? 0);
+    dbgLog(`run_until ${ns}ns → t=${snap.time_ns}ns${snap.breakpoint_hit != null ? ` [bp ${snap.breakpoint_hit}]` : ""}`,
+           snap.breakpoint_hit != null ? "dbg-log-hit" : "dbg-log-info");
+    await dbgRefreshSignals();
+  } catch (e) { dbgLog(`run_until エラー: ${e.message}`); }
+}
+
+async function dbgReset() {
+  if (!state.debugSession) return;
+  try {
+    const data = await api.simReset(state.debugSession.session_id);
+    updateDebugTime(data.time_ns, data.cycle);
+    dbgLog("シミュレーションをリセットしました", "dbg-log-info");
+    await dbgRefreshSignals();
+  } catch (e) { dbgLog(`reset エラー: ${e.message}`); }
+}
+
+async function dbgForce() {
+  if (!state.debugSession) return;
+  const sig = dom.dbgSigName.value.trim();
+  const val = parseInt(dom.dbgSigVal.value, 0);
+  if (!sig || isNaN(val)) { dbgLog("信号名と値を入力してください"); return; }
+  try {
+    await api.simForce(state.debugSession.session_id, sig, val);
+    dbgLog(`force ${sig} = ${val}`, "dbg-log-info");
+  } catch (e) { dbgLog(`force エラー: ${e.message}`); }
+}
+
+async function dbgSet() {
+  if (!state.debugSession) return;
+  const sig = dom.dbgSigName.value.trim();
+  const val = parseInt(dom.dbgSigVal.value, 0);
+  if (!sig || isNaN(val)) { dbgLog("信号名と値を入力してください"); return; }
+  try {
+    await api.simSet(state.debugSession.session_id, sig, val);
+    dbgLog(`set ${sig} = ${val}`, "dbg-log-info");
+    await dbgRefreshSignals();
+  } catch (e) { dbgLog(`set エラー: ${e.message}`); }
+}
+
+async function dbgRelease() {
+  if (!state.debugSession) return;
+  const sig = dom.dbgSigName.value.trim();
+  if (!sig) { dbgLog("信号名を入力してください"); return; }
+  try {
+    await api.simRelease(state.debugSession.session_id, sig);
+    dbgLog(`release ${sig}`, "dbg-log-info");
+  } catch (e) { dbgLog(`release エラー: ${e.message}`); }
+}
+
+async function dbgAddBp() {
+  if (!state.debugSession) return;
+  const cond = dom.dbgBpExpr.value.trim();
+  if (!cond) return;
+  try {
+    const { id } = await api.simBpAdd(state.debugSession.session_id, cond);
+    dbgLog(`bp [${id}] 追加: ${cond}`, "dbg-log-info");
+    dom.dbgBpExpr.value = "";
+    await dbgRefreshBps();
+  } catch (e) { dbgLog(`bp 追加エラー: ${e.message}`); }
+}
+
+async function dbgRefreshBps() {
+  if (!state.debugSession) return;
+  try {
+    const { breakpoints } = await api.simBpList(state.debugSession.session_id);
+    dom.debugBps.innerHTML = breakpoints.map(bp =>
+      `<div class="dbg-bp-entry">
+        <span class="bp-id">[${bp.id}]</span>
+        <span class="bp-cond">${escHtml(bp.condition)}</span>
+        <span class="bp-del" onclick="dbgDelBp(${bp.id})">✕</span>
+      </div>`
+    ).join("");
+  } catch (e) {}
+}
+
+async function dbgDelBp(id) {
+  if (!state.debugSession) return;
+  try {
+    await api.simBpDel(state.debugSession.session_id, id);
+    await dbgRefreshBps();
+  } catch (e) { dbgLog(`bp 削除エラー: ${e.message}`); }
+}
+
+async function dbgRefreshWaveform() {
+  if (!state.debugSession) return;
+  try {
+    const data = await api.simWaveform(state.debugSession.session_id, null, 0, null);
+    state.debugWaveData = data;
+    _drawDebugWaveform(data);
+  } catch (e) {}
+}
+
+function _drawDebugWaveform(data) {
+  const canvas = dom.debugWaveformCanvas;
+  if (!canvas || !data?.signals) return;
+  const sigs = Object.keys(data.signals).slice(0, 20);
+  if (!sigs.length) return;
+  const endTime = data.end_time || 1;
+  const pxPerNs = 0.4;
+  const totalW = Math.max(canvas.parentElement?.clientWidth ?? 400, Math.ceil(endTime * pxPerNs) + 40);
+  const totalH = WAVE_RULER_H + sigs.length * WAVE_ROW_H;
+  canvas.width = totalW; canvas.height = totalH;
+  canvas.style.width = totalW + "px"; canvas.style.height = totalH + "px";
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#12121f"; ctx.fillRect(0, 0, totalW, totalH);
+
+  ctx.fillStyle = "#3d3d5c"; ctx.fillRect(0, 0, totalW, WAVE_RULER_H);
+  ctx.fillStyle = "#a3a3b4"; ctx.font = "9px monospace"; ctx.textAlign = "left";
+  const step = _niceStep(endTime, Math.floor(totalW / 50));
+  for (let t = 0; t <= endTime + step; t += step) {
+    const x = Math.round(t * pxPerNs);
+    ctx.fillText(`${t}`, x + 2, 13);
+  }
+
+  sigs.forEach((name, si) => {
+    const sigData = data.signals[name];
+    if (!sigData) return;
+    _drawSignal(ctx, sigData, WAVE_RULER_H + si * WAVE_ROW_H, WAVE_ROW_H, totalW, endTime, pxPerNs);
+  });
 }
 
 // =========================================================================
@@ -965,6 +1237,7 @@ dom.btnLoadExamples.addEventListener("click", loadExamplesList);
 dom.btnRunTest.addEventListener("click", runTest);
 dom.btnStop.addEventListener("click", stopTest);
 dom.btnSaveProject.addEventListener("click", saveProject);
+dom.btnDebug.addEventListener("click", openDebugPanel);
 dom.btnZoomIn.addEventListener("click", zoomIn);
 dom.btnZoomOut.addEventListener("click", zoomOut);
 dom.btnZoomFit.addEventListener("click", zoomFit);
@@ -982,6 +1255,17 @@ document.querySelectorAll(".radix-btn").forEach(btn => {
   btn.addEventListener("click", () => setRadix(btn.dataset.radix));
 });
 
+// デバッグパネル
+dom.btnDebugClose.addEventListener("click", closeDebugPanel);
+dom.debugOverlay.addEventListener("click", e => { if (e.target === dom.debugOverlay) closeDebugPanel(); });
+dom.btnDbgStep.addEventListener("click", dbgStep);
+dom.btnDbgRunUntil.addEventListener("click", dbgRunUntil);
+dom.btnDbgReset.addEventListener("click", dbgReset);
+dom.btnDbgForce.addEventListener("click", dbgForce);
+dom.btnDbgSet.addEventListener("click", dbgSet);
+dom.btnDbgRelease.addEventListener("click", dbgRelease);
+dom.btnDbgBpAdd.addEventListener("click", dbgAddBp);
+
 window.addEventListener("resize", () => { if (state.waveformData) drawWaveform(); });
 
 // =========================================================================
@@ -992,11 +1276,11 @@ window.addEventListener("resize", () => { if (state.waveformData) drawWaveform()
   initEditor();
   setStatus("ready", "idle");
   dom.btnStop.disabled = true;
-  log("deltasim GUI v2 起動", "log-info");
+  log("deltasim GUI v3 起動（M5 API + §12 対応）", "log-info");
   log("サンプルを読み込むか、「📂 開く」でファイルを選択してください。", "log-line");
   await loadExamplesList();
 
-  // 環境変数経由の初期プロジェクト（CLI引数から）を取得
+  // CLI 引数からの初期プロジェクト（環境変数経由）
   try {
     const res = await fetch("/api/initial-project");
     if (res.ok) {
@@ -1006,11 +1290,9 @@ window.addEventListener("resize", () => { if (state.waveformData) drawWaveform()
         state.project.specFile = proj.spec ? { path: proj.spec } : null;
         state.project.top = proj.top;
         renderFileList();
-        if (proj.sv_files.length > 0) {
-          await loadModule(proj.sv_files, proj.top);
-          await openFileInEditor(proj.sv_files[0]);
-          log("CLI引数からプロジェクトを読み込みました", "log-info");
-        }
+        await loadModule(proj.sv_files, proj.top);
+        if (proj.sv_files.length > 0) await openFileInEditor(proj.sv_files[0]);
+        log("CLI引数からプロジェクトを読み込みました", "log-info");
       }
     }
   } catch (_) {}

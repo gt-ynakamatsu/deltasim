@@ -3,15 +3,15 @@
 アーキテクチャ:
   1. クライアントが POST /api/test/start → job_id を受け取る
   2. クライアントが GET /api/test/{job_id}/events で SSE を購読
-  3. テストはスレッドプールで実行し、進捗コールバックで asyncio.Queue にイベントを積む
+  3. テストはスレッドプールで実行し、on_progress コールバックで asyncio.Queue にイベントを積む
   4. SSE レスポンスはキューからイベントを読んで "data: {...}\\n\\n" 形式で流す
   5. キャンセルは POST /api/test/{job_id}/cancel → threading.Event をセット
+     → adapter.py が CancelToken を通じて deltasim.api に mid-cycle キャンセルを通知
 
-キャンセル限界（M5 待ち）:
-  現状の TestRunner は単一の同期ループで動くため、シミュレーション途中での
-  真の中断はできない。threading.Event をチェックするのは各サイクル境界のみで、
-  シミュレーション開始前と完了後のイミュ時刻ポイントで止まる。
-  真の mid-cycle キャンセルは M5 の公開 API (cancel_token) が入ったら差し替える。
+イベントフィールド:
+  - GUI SSE は "event" フィールドを使う
+  - deltasim.api は "type" フィールドを使う
+  - 変換は adapter._progress_to_sse() が行う
 """
 
 from __future__ import annotations
@@ -49,7 +49,10 @@ _lock = threading.Lock()
 
 def create_job() -> Job:
     job_id = str(uuid.uuid4())
-    loop = asyncio.get_event_loop()
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = None
     job = Job(job_id=job_id, queue=asyncio.Queue(), loop=loop)
     with _lock:
         _jobs[job_id] = job
@@ -89,7 +92,6 @@ async def event_stream(job: Job, timeout_sec: float = 300.0):
         try:
             event = await asyncio.wait_for(job.queue.get(), timeout=timeout_sec)
         except asyncio.TimeoutError:
-            # keepalive ping
             yield ": keepalive\n\n"
             continue
         except asyncio.CancelledError:
@@ -97,7 +99,8 @@ async def event_stream(job: Job, timeout_sec: float = 300.0):
 
         yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
-        if event.get("event") in ("finish", "error"):
+        evt_type = event.get("event") or event.get("type")
+        if evt_type in ("finish", "error"):
             break
 
 
@@ -106,7 +109,7 @@ async def event_stream(job: Job, timeout_sec: float = 300.0):
 # ---------------------------------------------------------------------------
 
 def make_progress_callback(job: Job) -> Callable[[dict], None]:
-    """スレッド内から呼ばれる進捗コールバックを生成する。"""
+    """スレッド内から呼ばれる進捗コールバック（すでに event フィールドに変換済み）。"""
     def callback(event: dict) -> None:
         if job.loop and job.loop.is_running():
             asyncio.run_coroutine_threadsafe(
@@ -117,7 +120,7 @@ def make_progress_callback(job: Job) -> Callable[[dict], None]:
 
 
 # ---------------------------------------------------------------------------
-# ジョブ実行ラッパー
+# テストジョブ実行
 # ---------------------------------------------------------------------------
 
 async def run_test_job(
@@ -137,11 +140,8 @@ async def run_test_job(
 
     def _run_in_thread():
         return adapter_test(
-            sv_files,
-            spec,
-            top=top,
-            seed=seed,
-            vcd_path=vcd_path,
+            sv_files, spec,
+            top=top, seed=seed, vcd_path=vcd_path,
             param_overrides=params or {},
             on_progress=progress_cb,
             cancel_event=job.cancel_event,
@@ -157,6 +157,10 @@ async def run_test_job(
         job.done = True
 
 
+# ---------------------------------------------------------------------------
+# シミュレーションジョブ実行
+# ---------------------------------------------------------------------------
+
 async def run_sim_job(
     job: Job,
     sv_files: list[str],
@@ -167,6 +171,7 @@ async def run_sim_job(
     params: Optional[dict] = None,
     half_period: int = 5,
     reset_cycles: int = 10,
+    keep_changes: bool = False,
 ) -> None:
     """シミュレーションジョブを非同期に実行する。"""
     from deltasim.gui.adapter import run as adapter_run
@@ -176,19 +181,18 @@ async def run_sim_job(
     def _run_in_thread():
         return adapter_run(
             sv_files,
-            top=top,
-            cycles=cycles,
-            vcd_path=vcd_path,
+            top=top, cycles=cycles, vcd_path=vcd_path,
             param_overrides=params or {},
-            half_period=half_period,
-            reset_cycles=reset_cycles,
-            on_progress=progress_cb,
+            half_period=half_period, reset_cycles=reset_cycles,
+            on_progress=progress_cb, keep_changes=keep_changes,
         )
 
     try:
         result = await asyncio.to_thread(_run_in_thread)
         job.result = result
-        await job.queue.put({"event": "finish", "result": result})
+        await job.queue.put({"event": "finish", "result": {
+            k: v for k, v in result.items() if k != "_run_result"
+        }})
     except Exception as e:
         job.result = {"error": str(e)}
         await job.queue.put({"event": "error", "message": str(e)})
