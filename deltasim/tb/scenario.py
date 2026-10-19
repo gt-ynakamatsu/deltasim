@@ -173,8 +173,17 @@ def load_scenario(path: str) -> Scenario:
         vcd=sim.get("vcd"),
     )
 
-    s.inputs = _parse_inputs(data.get("inputs") or [], s._warnings)
-    s.expected = _parse_expected(data.get("expected") or [], s._warnings)
+    # §15.13: 実際に使われたキー名を parent_path に反映
+    _top_inp_key  = "inputs"  if "inputs"  in data else "stimulus"
+    _top_exp_key  = "expected" if "expected" in data else "expect"
+    s.inputs = _parse_inputs(
+        data.get("inputs") or data.get("stimulus") or [],
+        s._warnings, parent_path=_top_inp_key,
+    )
+    s.expected = _parse_expected(
+        data.get("expected") or data.get("expect") or [],
+        s._warnings, parent_path=_top_exp_key,
+    )
 
     if data.get("model"):
         m = data["model"]
@@ -221,10 +230,19 @@ def load_scenario(path: str) -> Scenario:
                     duration_cycles=int(rst2.get("duration_cycles", 10)),
                 )
             # Stimulus/expect — support both "inputs"/"expected" and "stimulus"/"expect"
+            # §15.13: 実際に使われたキー名を parent_path に反映
+            _inp_key = "inputs" if "inputs" in rc else "stimulus"
+            _exp_key = "expected" if "expected" in rc else "expect"
             inp_raw = rc.get("inputs") or rc.get("stimulus") or []
             exp_raw = rc.get("expected") or rc.get("expect") or []
-            case.inputs = _parse_inputs(inp_raw, s._warnings)
-            case.expected = _parse_expected(exp_raw, s._warnings)
+            case.inputs = _parse_inputs(
+                inp_raw, s._warnings,
+                parent_path=f"cases[{i_rc}].{_inp_key}",
+            )
+            case.expected = _parse_expected(
+                exp_raw, s._warnings,
+                parent_path=f"cases[{i_rc}].{_exp_key}",
+            )
 
             if "model" in rc:
                 m = rc["model"]
@@ -240,7 +258,8 @@ def load_scenario(path: str) -> Scenario:
     # §15.13: W_UNKNOWN_KEY — check all YAML layers AFTER parsing
     # ----------------------------------------------------------------
     # (constants defined below this function, forward-ref OK in Python)
-    _warn_unknown(data, _KNOWN_TOP_KEYS, "top-level", s._warnings)
+    # トップレベルは path="" → "{key}: 不明なキーは無視されます"
+    _warn_unknown(data, _KNOWN_TOP_KEYS, "", s._warnings)
     if isinstance(data.get("clock"), dict):
         _warn_unknown(data["clock"], _KNOWN_CLOCK_KEYS, "clock", s._warnings)
     if isinstance(data.get("reset"), dict):
@@ -296,20 +315,29 @@ _KNOWN_CASE_KEYS = frozenset({
 
 
 def _warn_unknown(data: dict, known: frozenset, path: str, warnings_out) -> None:
-    """Emit W_UNKNOWN_KEY for any key in data not in known set."""
+    """Emit W_UNKNOWN_KEY for any key in data not in known set.
+
+    §15.13: message は「{path}.{key}: 不明なキーは無視されます」形式。
+    path が空文字のときは「{key}: ...」（トップレベル）。
+    """
     if warnings_out is None or not isinstance(data, dict):
         return
     from deltasim.result import WarningInfo
     for k in data:
         if k not in known:
+            key_path = f"{path}.{k}" if path else k
             warnings_out.append(WarningInfo(
-                message=f"{path}: 不明なキー {k!r} は無視されます",
+                message=f"{key_path}: 不明なキーは無視されます",
                 code="W_UNKNOWN_KEY",
             ))
 
 
-def _parse_inputs(raw: list, warnings_out=None) -> List[InputEntry]:
-    """Parse inputs list. Collects W_UNKNOWN_KEY warnings into warnings_out."""
+def _parse_inputs(raw: list, warnings_out=None, parent_path: str = "stimulus") -> List[InputEntry]:
+    """Parse inputs list. Collects W_UNKNOWN_KEY warnings into warnings_out.
+
+    §15.13: parent_path は呼び出し側が渡す（例: "stimulus", "cases[0].inputs"）。
+    メッセージ例: "cases[0].stimulus[2].ofset_ns: 不明なキーは無視されます"
+    """
     from deltasim.result import WarningInfo
     result = []
     for i, entry in enumerate(raw):
@@ -329,15 +357,18 @@ def _parse_inputs(raw: list, warnings_out=None) -> List[InputEntry]:
             for k in entry:
                 if k not in _KNOWN_INPUT_KEYS:
                     warnings_out.append(WarningInfo(
-                        message=f"stimulus[{i}]: 不明なキー {k!r} は無視されます",
+                        message=f"{parent_path}[{i}].{k}: 不明なキーは無視されます",
                         code="W_UNKNOWN_KEY",
                     ))
         result.append(inp)
     return result
 
 
-def _parse_expected(raw: list, warnings_out=None) -> List[ExpectedEntry]:
-    """Parse expected list. Collects W_UNKNOWN_KEY warnings into warnings_out."""
+def _parse_expected(raw: list, warnings_out=None, parent_path: str = "expect") -> List[ExpectedEntry]:
+    """Parse expected list. Collects W_UNKNOWN_KEY warnings into warnings_out.
+
+    §15.13: parent_path は呼び出し側が渡す（例: "expect", "cases[0].expected"）。
+    """
     from deltasim.result import WarningInfo
     result = []
     for i, entry in enumerate(raw):
@@ -357,7 +388,7 @@ def _parse_expected(raw: list, warnings_out=None) -> List[ExpectedEntry]:
             for k in entry:
                 if k not in _KNOWN_EXPECT_KEYS:
                     warnings_out.append(WarningInfo(
-                        message=f"expect[{i}]: 不明なキー {k!r} は無視されます",
+                        message=f"{parent_path}[{i}].{k}: 不明なキーは無視されます",
                         code="W_UNKNOWN_KEY",
                     ))
         result.append(exp)

@@ -830,7 +830,7 @@ cases:
 仕様YAMLに知らないキーがあると、結果JSON の `warnings[]` に `W_UNKNOWN_KEY` を出力します:
 
 ```json
-{"warnings": [{"code": "W_UNKNOWN_KEY", "message": "stimulus[0]: 不明なキー 'foo' は無視されます"}]}
+{"warnings": [{"code": "W_UNKNOWN_KEY", "message": "stimulus[0].foo: 不明なキーは無視されます"}]}
 ```
 
 ---
@@ -858,17 +858,22 @@ cases:
 
 **メッセージの例:**
 
+`message` はキーまでを含むドット区切りパスで始まります（`{path}: 不明なキーは無視されます`）。
+トップレベルはパスなしでキー名がそのまま先頭になります。
+
 | 未知キーの場所 | message の例 |
 |--------------|------------|
-| トップレベル | `top-level: 不明なキー 'BOGUS' は無視されます` |
-| `clock` 配下 | `clock: 不明なキー 'jitter' は無視されます` |
-| `reset` 配下 | `reset: 不明なキー 'polarity' は無視されます` |
-| `sim` 配下 | `sim: 不明なキー 'timeout' は無視されます` |
-| `cases[0]` 直下 | `cases[0]: 不明なキー 'skpi' は無視されます` |
-| `cases[1].clock` 配下 | `cases[1].clock: 不明なキー 'edge' は無視されます` |
-| `cases[2].reset` 配下 | `cases[2].reset: 不明なキー 'hold' は無視されます` |
-| `stimulus[0]` アイテム | `stimulus[0]: 不明なキー 'foo' は無視されます` |
-| `expect[1]` アイテム | `expect[1]: 不明なキー 'bar' は無視されます` |
+| トップレベル | `BOGUS: 不明なキーは無視されます` |
+| `clock` 配下 | `clock.jitter: 不明なキーは無視されます` |
+| `reset` 配下 | `reset.polarity: 不明なキーは無視されます` |
+| `sim` 配下 | `sim.timeout: 不明なキーは無視されます` |
+| `cases[0]` 直下 | `cases[0].skpi: 不明なキーは無視されます` |
+| `cases[1].clock` 配下 | `cases[1].clock.edge: 不明なキーは無視されます` |
+| `cases[2].reset` 配下 | `cases[2].reset.hold: 不明なキーは無視されます` |
+| `stimulus[0]` アイテム（トップレベル or `cases[i]` 内） | `stimulus[0].foo: 不明なキーは無視されます` |
+| `cases[0].stimulus[2]` アイテム | `cases[0].stimulus[2].ofset_ns: 不明なキーは無視されます` |
+| `cases[0].inputs[0]` アイテム（`inputs` と書いた場合） | `cases[0].inputs[0].foo: 不明なキーは無視されます` |
+| `expect[1]` アイテム | `expect[1].bar: 不明なキーは無視されます` |
 
 ### §15.13.2 `warnings` の常時出力
 
