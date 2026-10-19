@@ -30,7 +30,7 @@ class TestTBGenerator:
         """TB SV に module 宣言が含まれること"""
         out = str(tmp_path / "counter_tb.sv")
         generate_tb_sv(counter_design, out)
-        text = open(out).read()
+        text = open(out, encoding='utf-8').read()
         assert "module counter_tb" in text
         assert "endmodule" in text
 
@@ -38,7 +38,7 @@ class TestTBGenerator:
         """TB SV に DUT インスタンスが含まれること"""
         out = str(tmp_path / "counter_tb.sv")
         generate_tb_sv(counter_design, out)
-        text = open(out).read()
+        text = open(out, encoding='utf-8').read()
         assert "counter" in text
         assert "dut" in text
         assert "clk" in text
@@ -49,14 +49,14 @@ class TestTBGenerator:
         """TB SV にクロック生成が含まれること"""
         out = str(tmp_path / "counter_tb.sv")
         generate_tb_sv(counter_design, out)
-        text = open(out).read()
+        text = open(out, encoding='utf-8').read()
         assert "always #5" in text
 
     def test_tb_sv_has_initial(self, counter_design, tmp_path):
         """TB SV に initial ブロックが含まれること"""
         out = str(tmp_path / "counter_tb.sv")
         generate_tb_sv(counter_design, out)
-        text = open(out).read()
+        text = open(out, encoding='utf-8').read()
         assert "initial" in text
         assert "$finish" in text
 
@@ -64,7 +64,7 @@ class TestTBGenerator:
         """TB SV に VCD ダンプ設定が含まれること"""
         out = str(tmp_path / "counter_tb.sv")
         generate_tb_sv(counter_design, out)
-        text = open(out).read()
+        text = open(out, encoding='utf-8').read()
         assert "$dumpfile" in text
         assert "$dumpvars" in text
 
@@ -79,7 +79,7 @@ class TestTBGenerator:
         import yaml
         out = str(tmp_path / "counter_spec.yaml")
         generate_yaml_spec(counter_design, out)
-        data = yaml.safe_load(open(out))
+        data = yaml.safe_load(open(out, encoding='utf-8'))
         assert data.get("version") == 1
         assert data.get("top") == "counter"
         assert "clock" in data
@@ -91,7 +91,7 @@ class TestTBGenerator:
         import yaml
         out = str(tmp_path / "counter_spec.yaml")
         generate_yaml_spec(counter_design, out)
-        data = yaml.safe_load(open(out))
+        data = yaml.safe_load(open(out, encoding='utf-8'))
         assert data["clock"]["signal"] == "clk"
 
     def test_yaml_spec_has_reset_signal(self, counter_design, tmp_path):
@@ -99,7 +99,7 @@ class TestTBGenerator:
         import yaml
         out = str(tmp_path / "counter_spec.yaml")
         generate_yaml_spec(counter_design, out)
-        data = yaml.safe_load(open(out))
+        data = yaml.safe_load(open(out, encoding='utf-8'))
         assert data["reset"]["signal"] == "rst_n"
         assert data["reset"]["active_low"] is True
 
@@ -107,7 +107,7 @@ class TestTBGenerator:
         """組み合わせ回路の TB には always clock がないこと"""
         out = str(tmp_path / "mux2_tb.sv")
         generate_tb_sv(mux2_design, out)
-        text = open(out).read()
+        text = open(out, encoding='utf-8').read()
         # クロックが検出されないので always #5 は不要
         assert "module mux2_tb" in text
 

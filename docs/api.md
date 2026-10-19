@@ -32,7 +32,7 @@ RTL ファイルを解析・エラボレートし設計オブジェクトを返�
 
 ```json
 {
-  "schema_version": "1",
+  "schema_version": "2",
   "status": "PASS",
   "module": "counter",
   "ports": [
@@ -96,7 +96,7 @@ YAML スペックに従ってシミュレーションを実行し、結果を返
 
 ```json
 {
-  "schema_version": "1",
+  "schema_version": "2",
   "module": "counter",
   "status": "PASS",
   "cycles": 100,
@@ -128,7 +128,7 @@ for ev in ds.test_events(["counter.sv"], "spec.yaml"):
 
 ```json
 {
-  "schema_version": "1",
+  "schema_version": "2",
   "module": "counter",
   "status": "PASS",
   "seed": 42,
@@ -325,7 +325,7 @@ sim.release("rst_n")
 
 ```json
 {
-  "schema_version": "1",
+  "schema_version": "2",
   "time_ns": 110,
   "signals": {"clk": 1, "rst_n": 1, "count": 10},
   "changes": [["count", 10]],
@@ -492,20 +492,164 @@ assert result.status == "SKIP"
 
 ### §12.5 elapsed_ms の定義
 
+> **§13.1 により更新（2026-10-19）**
+
 | フィールド | 意味 |
 |-----------|------|
-| `checks[i].elapsed_ms` | そのチェックの実時間（ms）|
-| `elapsed_ms` / `summary.elapsed_ms` | テスト全体の実時間（ms）|
-
-`to_dict()` には両方が含まれます:
+| `elapsed_ms` | 全体の実時間 (= `summary.elapsed_ms`, 非推奨) |
+| `summary.elapsed_ms` | 全体の実時間（推奨フィールド） |
+| `cases[].elapsed_ms` | **そのケース（シナリオ）の実時間**（§13.1 の確定定義）|
 
 ```json
 {
-  "elapsed_ms": 12.3,
-  "summary": {"elapsed_ms": 12.3},
-  "checks": [{"name": "...", "elapsed_ms": 0.5, ...}]
+  "elapsed_ms": 50.3,
+  "summary": {"elapsed_ms": 50.3},
+  "cases": [
+    {"name": "basic",   "elapsed_ms": 12.3, ...},
+    {"name": "advanced","elapsed_ms": 15.1, ...}
+  ]
 }
 ```
+
+トップレベルの `elapsed_ms` は後方互換のため残しますが、**非推奨**です。
+新しいコードは `summary.elapsed_ms` または `cases[].elapsed_ms` を使用してください。
+
+---
+
+## §13 追加決定（2026-10-19 15:35 確定）
+
+### §13.1 elapsed_ms の意味（§12.5 を更新）
+
+上記「§12.5 elapsed_ms の定義」を参照してください。
+
+### §13.2 YAML マルチケース書式
+
+トップレベルに `cases:` リストを置き、各要素にケースの設定を記述します。
+
+#### 新書式（`cases:` あり）
+
+```yaml
+version: 1
+top: counter
+
+# ファイル共通の設定（ケース側で上書き可）
+clock:
+  signal: clk
+  period_ns: 10
+reset:
+  signal: rst_n
+  active_low: true
+  duration_cycles: 10
+sim:
+  cycles: 30
+  seed: 42
+
+cases:
+  - name: basic              # 必須・一意（重複は E001 エラー）
+    expected:
+      - at: 11
+        check: {count: 1}
+
+  - name: overflow
+    cycles: 260              # sim.cycles の上書き
+    seed: 100                # sim.seed の上書き
+    expected:
+      - at: 258
+        check: {count: 255}
+
+  - name: skip_example
+    skip: true               # §12.1: このケースをスキップ
+    skip_reason: "CI対象外"
+
+  - name: custom_clock
+    clock:                   # clock の上書き
+      period_ns: 20
+    reset:                   # reset の上書き
+      duration_cycles: 5
+    inputs:
+      - at: 5
+        set: {d: 1}
+    expected:
+      - at: 6
+        check: {q: 1}
+```
+
+各ケースの要素:
+
+| フィールド | 必須 | 説明 |
+|-----------|------|------|
+| `name` | ✅ | ケース名（一意、重複は ScenarioError） |
+| `skip` | — | `true` でスキップ |
+| `skip_reason` | — | スキップ理由（任意） |
+| `seed` | — | `sim.seed` の上書き |
+| `cycles` | — | `sim.cycles` の上書き |
+| `clock` | — | clock 設定の上書き |
+| `reset` | — | reset 設定の上書き |
+| `inputs` / `stimulus` | — | 刺激（空の場合はトップレベルを使用） |
+| `expected` / `expect` | — | 期待値（空の場合はトップレベルを使用） |
+| `model` | — | 参照モデルの上書き |
+
+#### 旧書式（`cases:` なし、後方互換）
+
+`cases:` キーが無い場合、ファイル名の語幹を `name` とする 1 ケースとして扱います。
+
+```yaml
+# counter_spec.yaml → name = "counter_spec"
+version: 1
+top: counter
+inputs: [...]
+expected: [...]
+```
+
+### §13.2 マルチケース対応の `test()` 戻り値
+
+```json
+{
+  "schema_version": "2",
+  "status": "FAIL",
+  "elapsed_ms": 50.3,
+  "summary": {"elapsed_ms": 50.3},
+  "cases": [
+    {
+      "name": "basic",
+      "status": "PASS",
+      "seed": 42,
+      "elapsed_ms": 12.3,
+      "checks": [...],
+      "log": []
+    },
+    {
+      "name": "overflow",
+      "status": "FAIL",
+      "seed": 100,
+      "elapsed_ms": 15.1,
+      "checks": [{"status": "FAIL", ...}],
+      "log": []
+    },
+    {
+      "name": "skip_example",
+      "status": "SKIP",
+      "elapsed_ms": 0.1,
+      "checks": [],
+      "log": ["CI対象外"]
+    }
+  ],
+  "checks": [...]   // 全ケースの集計（後方互換）
+}
+```
+
+### §13.2 `--case` フィルタ
+
+```bash
+deltasim test counter.sv --spec spec.yaml --case basic
+deltasim test counter.sv --spec spec.yaml --case "test_*"    # ワイルドカード
+deltasim test counter.sv --spec spec.yaml --case a --case b  # 複数指定
+```
+
+- 一致しないケースは **結果に含まれない**（SKIP でも空でもなく、単純に除外）
+- `filter_cases` パターンは `fnmatch` ワイルドカードに対応（`*`, `?` 等）
+- すべてのケースが除外された場合も `TestResult` を返す（`cases=[]`, `status="PASS"`）
+- 戻り値は常に `TestResult`（`None` にはならない）
 
 ---
 
