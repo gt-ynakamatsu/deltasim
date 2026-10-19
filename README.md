@@ -277,14 +277,19 @@ pytest --cov=deltasim       # カバレッジ付き
 
 | 機能 | 予定マイルストーン |
 |------|----------------|
-| 階層インスタンス | M3 |
-| `struct` / `union` / `enum` / `typedef` | M3 |
-| 4 値論理の厳密な X/Z 伝搬 | M3 |
-| `generate` / `genvar` | M3 |
-| 対話デバッグ（force / examine / bp） | M4 |
-| LLM 連携 | M5 |
-| SVA / coverage | 未定 |
-| `interface` / `modport` / クラス | 未定 |
+| 階層インスタンス | **M3 完了** |
+| `typedef enum` | **M3 完了** |
+| `generate for/if` | **M3 完了** |
+| `always` 内 `for`/`while` | **M3 完了** |
+| X/Z 4 値論理（基本） | **M3 完了**（`'x`/`'z` リテラル伝搬 + VCD 出力） |
+| `struct packed` | M4 |
+| `interface` / `modport` / クラス / SVA | 未定 |
+| 4 値論理の完全なビット単位 X 伝搬 | M4 |
+| `package` / `import` | **M3 完了**（基本的なインポート） |
+| 配列（1D アンパック）| M4 |
+| 符号付き整数（`integer` 型の負値） | M4 |
+| 対話デバッグ（force / examine / bp） | M5 |
+| LLM 連携 | M6 |
 
 ---
 

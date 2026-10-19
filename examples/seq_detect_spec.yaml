@@ -1,0 +1,51 @@
+version: 1
+top: seq_detect
+
+clock:
+  signal: clk
+  period_ns: 10
+
+reset:
+  signal: rst_n
+  active_low: true
+  duration_cycles: 2
+
+sim:
+  cycles: 9
+  seed: 0
+
+# 入力シーケンス: 1, 0, 1, 1 → cycle 5 で detected=1
+inputs:
+  - at: [1, 2]
+    set: {din: 0}   # リセット中
+  - at: 3
+    set: {din: 1}   # 1
+  - at: 4
+    set: {din: 0}   # 0
+  - at: 5
+    set: {din: 1}   # 1
+  - at: 6
+    set: {din: 1}   # 1  → 1011 パターン完成
+  - at: 7
+    set: {din: 0}   # パターンリセット
+  - at: [8, 9]
+    set: {din: 0}
+
+expected:
+  # リセット中 / リセット直後は未検出
+  - at: 1
+    check: {detected: 0}
+  - at: 2
+    check: {detected: 0}
+  # din=1 後: state=S_1、まだ未検出
+  - at: 3
+    check: {detected: 0}
+  # 1, 0 後: state=S_10
+  - at: 4
+    check: {detected: 0}
+  # 1, 0, 1 後: state=S_101 → detected=1 (din=1 の間)
+  - at: 5
+    check: {detected: 1}
+  # 1011 完成後に din=0 → detected=0
+  - at: 7
+    check: {detected: 0}

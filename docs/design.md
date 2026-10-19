@@ -98,7 +98,50 @@ model:
 
 ---
 
-## マイルストーン 3: 階層インスタンス + 4 値論理
+## マイルストーン 3（完了）: 階層インスタンス + X/Z 4 値論理 + typedef enum + generate
+
+仕様書 §2 の拡張。
+
+### 実装済み
+
+| 機能 | 詳細 |
+|------|------|
+| **階層インスタンス** | `ModName [#(params)] instName (ports);` — サブモジュールをフラット展開 |
+| シグナル名前変換 | ポートはそのまま、内部信号は `inst.signal` に prefixed |
+| パラメータ上書き | `#(.P(v))` 名前付き / `#(v)` 位置指定 |
+| **generate for/if** | コンパイル時ループ・条件選択でモジュール項目を展開 |
+| **typedef enum** | `typedef enum logic [N:0] { VAL=... } type_t;` — 幅推論 + enum 定数を params に追加 |
+| typedef struct packed | 総幅を計算（フィールドアクセスは M4） |
+| package / import | `import pkg::*;` — catalog にある package から params/typedefs をコピー |
+| **always 内 for/while** | `_Executor` でループを動的実行（最大 100K 反復） |
+| **X/Z 4 値論理** | `'x`/`'z` リテラルが `None` として伝搬、VCD に `x` 出力 |
+| **initial ブロック `notify_edge` バグ修正** | `self._waiting` 上書きバグを修正 |
+| **pre-posedge comb 再評価** | 入力変化後に always_comb を再評価してから posedge を処理 |
+
+### 階層インスタンス設計
+
+```
+parent module                    child module (adder)
+────────────                     ────────────────────
+signals: a, b, op, result        signals: a(in), b(in), sum(out), carry_out(out)
+         add_sum, add_carry
+
+InstDecl: adder #(.WIDTH=8) u_add (.a(a), .b(b), .sum(add_sum), .carry_out(add_carry))
+
+Flattened:
+  mapping = {a→a, b→b, sum→add_sum, carry_out→add_carry}
+  renamed assign: assign {add_carry, add_sum} = a + b   ← adder のプロセスを親に flatten
+```
+
+### 完了条件
+
+- pytest 87 passed (0 failed)
+- `deltasim gen adder.sv alu.sv --top alu` → TB SV + YAML 生成
+- `deltasim test adder.sv alu.sv --spec alu_spec.yaml` → 6/6 PASS
+- `deltasim test seq_detect.sv --spec seq_detect_spec.yaml` → 6/6 PASS（typedef enum FSM）
+- `deltasim run counter_tb.sv counter.sv --top counter_tb --reset-cycles 0` → "PASS: count = 10"
+
+---
 
 仕様書 §2 の拡張。
 

@@ -1,0 +1,29 @@
+version: 1
+top: alu
+
+clock: {}    # 組み合わせ回路のためクロックなし
+reset: {}
+
+sim:
+  cycles: 4
+  seed: 0
+
+inputs:
+  - at: 1
+    set: {a: 5, b: 3, op: 0}   # ADD: 5+3=8
+  - at: 2
+    set: {op: 1}               # SUB: 5-3=2
+  - at: 3
+    set: {a: 200, b: 100, op: 0}  # ADD with carry: 200+100=300→sum=44,carry=1
+  - at: 4
+    set: {a: 0b10101010, b: 0b11001100, op: 2}  # AND
+
+expected:
+  - at: 1
+    check: {result: 8, carry_out: 0}
+  - at: 2
+    check: {result: 2}
+  - at: 3
+    check: {result: 44, carry_out: 1}
+  - at: 4
+    check: {result: 0b10001000}

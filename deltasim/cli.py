@@ -22,7 +22,6 @@ from deltasim.elab.elaborator import elaborate, ElabError
 from deltasim.sim.engine import SimEngine, SimError
 from deltasim.vcd.writer import VCDWriter
 
-
 # ---------------------------------------------------------------------------
 # CLI group
 # ---------------------------------------------------------------------------
@@ -38,7 +37,9 @@ def main():
 # ---------------------------------------------------------------------------
 
 def _parse_elaborate(sv_files, top, params):
+    # Parse all SV files and build a module catalog
     modules = []
+    catalog = {}
     for sv_path in sv_files:
         if not os.path.isfile(sv_path):
             click.echo(f"ERROR: ファイルが見つかりません: {sv_path!r}", err=True)
@@ -46,6 +47,7 @@ def _parse_elaborate(sv_files, top, params):
         try:
             mod = parse_file(sv_path)
             modules.append(mod)
+            catalog[mod.name] = mod
         except ParseError as e:
             click.echo(f"ERROR (parse): {e}", err=True)
             sys.exit(1)
@@ -62,7 +64,7 @@ def _parse_elaborate(sv_files, top, params):
         )
         sys.exit(1)
     try:
-        design = elaborate(module, param_overrides=params)
+        design = elaborate(module, param_overrides=params, catalog=catalog)
     except ElabError as e:
         click.echo(f"ERROR (elab): {e}", err=True)
         sys.exit(1)

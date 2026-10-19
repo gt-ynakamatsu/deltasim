@@ -215,6 +215,103 @@ Stmt = (Block | IfStmt | CaseStmt | BlockingAssign | NonBlockingAssign
 
 
 # ---------------------------------------------------------------------------
+# Module-body items: hierarchy + generate + typedef  (M3)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class PortConn:
+    """One port connection in a module instantiation.
+
+    Named:      .port_name(expr)  →  port='port_name', signal=expr
+    Positional: expr              →  port=None, signal=expr
+    Unconnected: .port_name()    →  port='port_name', signal=None
+    """
+    port: Optional[str]
+    signal: Optional[Expr]
+
+
+@dataclass
+class InstDecl:
+    """Module instantiation: ModName [#(params)] instName (ports);"""
+    module_name: str
+    inst_name: str
+    param_overrides: List[Tuple[Optional[str], Expr]]  # [(port_name, value), ...]
+    port_conns: List[PortConn]
+
+
+@dataclass
+class GenVarDecl:
+    """genvar i, j;"""
+    names: List[str]
+
+
+@dataclass
+class GenerateFor:
+    """generate for (genvar i = lo; i < hi; i++) begin ... end"""
+    var: str
+    init: Expr
+    cond: Expr
+    update: Expr            # full expression: i = i + 1 or i++
+    body: List[object]      # list of ModuleItem (or sub-generate items)
+
+
+@dataclass
+class GenerateIf:
+    """generate if (cond) begin ... end [else begin ... end]"""
+    cond: Expr
+    then_items: List[object]
+    else_items: Optional[List[object]] = None
+
+
+@dataclass
+class GenerateBlock:
+    """generate ... endgenerate wrapper."""
+    items: List[object]
+
+
+# ---------- Typedef / enum / struct  (M3) ----------
+
+@dataclass
+class EnumMember:
+    name: str
+    value: Optional[Expr]   # explicit value; None → auto-increment
+
+
+@dataclass
+class EnumTypeDef:
+    base_kw: Optional[str]  # 'logic', 'bit', 'int', None (implicit)
+    dims: Optional[Dims]    # e.g., [1:0] for 2-bit enum
+    members: List[EnumMember]
+
+
+@dataclass
+class StructField:
+    net_type: Optional[str]
+    dims: Optional[Dims]
+    name: str
+
+
+@dataclass
+class StructTypeDef:
+    packed: bool
+    fields: List[StructField]
+
+
+@dataclass
+class TypedefDecl:
+    """typedef <type_def> <name>;"""
+    type_def: "EnumTypeDef | StructTypeDef | str"  # str = alias to existing type
+    name: str
+
+
+@dataclass
+class ImportDecl:
+    """import pkg::*;  or  import pkg::name;"""
+    pkg: str
+    item: Optional[str]   # None → wildcard (*)
+
+
+# ---------------------------------------------------------------------------
 # Expressions  (Expr = union)
 # ---------------------------------------------------------------------------
 
