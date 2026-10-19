@@ -112,24 +112,55 @@ deltasim gui --no-browser
 4. 右ペインにテスト結果（PASS/FAIL/ERROR）が表示される
 5. 下ペインの波形ビューアに VCD 波形が表示される（クリックでカーソル、Shift+クリックでカーソル B）
 
+### GUI の使い方（拡張版）
+
+```bash
+# 引数なし（ブラウザ内でサンプルを選択）
+deltasim gui
+
+# SV ファイルと YAML スペックを引数で開く
+deltasim gui examples/counter.sv examples/counter_spec.yaml
+
+# フォルダを渡す（.sv と *_spec.yaml を自動検出）
+deltasim gui examples/
+
+# .f ファイルリストを渡す
+deltasim gui files.f
+
+# プロジェクトファイルを渡す
+deltasim gui deltasim.project.yaml
+```
+
 ### GUI 機能一覧
 
 | 機能 | 状態 |
 |------|------|
 | サンプルプロジェクト読み込み | ✅ 実装済み |
 | RTL / YAML スペックのロード（`/api/load`）| ✅ 実装済み |
-| テスト実行・PASS/FAIL 表示（`/api/test`）| ✅ 実装済み |
-| Canvas 波形ビューア（クロック・カウンタ等）| ✅ 実装済み |
+| CodeMirror エディタ（SV/YAML 構文ハイライト・エラー行表示・保存）| ✅ 実装済み |
+| テスト実行・PASS/FAIL 表示（SSE 進捗配信）| ✅ 実装済み |
+| Canvas 波形ビューア（クロック・多ビット・X/Z 色分け）| ✅ 実装済み |
 | 波形ズーム / パン / 全体表示 | ✅ 実装済み |
 | 基数切替（HEX / BIN / DEC） | ✅ 実装済み |
 | デュアルカーソル・時間差表示 | ✅ 実装済み |
-| VCD 読み込み（`/api/waveform`）| ✅ 実装済み |
-| ファイルを開く（ドラッグ＆ドロップ）| ⚠️ ブラウザのセキュリティ制限のため不可（CLI 起動時のみ）|
-| RTL エディタ（表示・編集） | 🔜 M5 待ち |
-| 進捗コールバック（start/case_done/progress/finish）| 🔜 M5 公開 API 待ち |
-| キャンセルトークン（実行中の停止） | 🔜 M5 公開 API 待ち |
+| VCD 遅延読み込み（index → range）最大 200 信号対応 | ✅ 実装済み |
+| サーバー側ファイルブラウザ（127.0.0.1 限定・パストラバーサル防止）| ✅ 実装済み |
+| プロジェクトファイル（deltasim.project.yaml）保存 | ✅ 実装済み |
+| CLI 引数でファイル/フォルダ/.f/プロジェクトを開く | ✅ 実装済み |
+| SSE 進捗配信（start/progress/case_done/finish）| ✅ 実装済み |
+| キャンセル（REST POST）| ✅ 実装済み（シミュ開始前チェック、M5 で mid-cycle 対応予定）|
 | 対話デバッグ（step/force/bp） | 🔜 M5 Simulator API が必要 |
 | LLM 連携 | 🔜 M5 以降 |
+
+### 大規模 VCD 性能実測値（Python 3.12, Ubuntu, 16.15 MB VCD）
+
+| 操作 | 計測値 |
+|------|--------|
+| index 取得（10k 信号・ヘッダのみ）| 0.453 s |
+| range 取得（20 信号・全範囲 100 万変化）| 0.703 s |
+| range 取得（100 信号・全範囲）| 0.720 s |
+
+信号 1 万本・値変化 100 万件の 16 MB VCD を 1 秒以内に処理できます。
 
 ### GUI の依存分離
 

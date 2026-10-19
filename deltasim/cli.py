@@ -252,6 +252,7 @@ def test_cmd(sv_files, top, spec, params, junit, vcd, verbose, no_color):
 # ---------------------------------------------------------------------------
 
 @main.command("gui")
+@click.argument("paths", nargs=-1, metavar="[PATH ...]")
 @click.option("--host", default="127.0.0.1", show_default=True,
               help="バインドホスト（デフォルト: 127.0.0.1 のみ）")
 @click.option("--port", "-p", default=8765, show_default=True, type=int,
@@ -260,17 +261,22 @@ def test_cmd(sv_files, top, spec, params, junit, vcd, verbose, no_color):
               help="ブラウザを自動起動しない")
 @click.option("--reload", is_flag=True, default=False, hidden=True,
               help="開発用オートリロード")
-def gui_cmd(host, port, no_browser, reload):
+def gui_cmd(paths, host, port, no_browser, reload):
     """ブラウザ GUI を起動する（127.0.0.1 のみで待受）。
 
     \b
     必要な依存パッケージ:
         pip install "deltasim[gui]"
 
+    PATHS には SV ファイル、フォルダ、.f ファイルリスト、または
+    deltasim.project.yaml を指定できます。
+
     Examples:\n
         deltasim gui\n
-        deltasim gui --port 8080\n
-        deltasim gui --no-browser
+        deltasim gui examples/counter.sv examples/counter_spec.yaml\n
+        deltasim gui /path/to/project/\n
+        deltasim gui files.f\n
+        deltasim gui deltasim.project.yaml
     """
     try:
         import uvicorn  # noqa: F401
@@ -284,9 +290,29 @@ def gui_cmd(host, port, no_browser, reload):
         )
         sys.exit(1)
 
+    # パスを解析してプロジェクトを構築
+    initial_project = _resolve_gui_paths(paths) if paths else None
+
+    # 許可ルートにパスを追加（パスセキュリティのため）
+    try:
+        from deltasim.gui.filesec import add_extra_root
+        for p in (paths or []):
+            import os as _os
+            add_extra_root(_os.path.abspath(p))
+    except ImportError:
+        pass
+
     url = f"http://{host}:{port}"
     click.echo(f"[deltasim gui] 起動中: {url}", err=True)
+    if initial_project:
+        click.echo(f"[deltasim gui] プロジェクト: {initial_project}", err=True)
     click.echo("[deltasim gui] 終了するには Ctrl+C を押してください", err=True)
+
+    # 起動引数をサーバー側に渡す（環境変数経由）
+    if initial_project:
+        import json as _json
+        import os as _os
+        _os.environ["DELTASIM_INITIAL_PROJECT"] = _json.dumps(initial_project)
 
     if not no_browser:
         import threading
@@ -312,6 +338,68 @@ def gui_cmd(host, port, no_browser, reload):
         reload=reload,
         log_level="warning",
     )
+
+
+def _resolve_gui_paths(paths) -> dict:
+    """GUI 起動時のパス引数を解析してプロジェクト辞書に変換する。"""
+    import os as _os
+    from pathlib import Path as _Path
+
+    sv_files = []
+    spec = None
+    project_file = None
+
+    for raw in paths:
+        p = _Path(raw).resolve()
+
+        if not p.exists():
+            click.echo(f"[deltasim gui] 警告: パスが見つかりません: {raw}", err=True)
+            continue
+
+        if p.is_dir():
+            # フォルダ: .sv ファイルと _spec.yaml を自動検出
+            svs = sorted(p.glob("*.sv")) + sorted(p.glob("*.v"))
+            sv_files.extend(str(f) for f in svs)
+            specs = sorted(p.glob("*_spec.yaml"))
+            if specs and spec is None:
+                spec = str(specs[0])
+            # プロジェクトファイルを探す
+            proj_f = p / "deltasim.project.yaml"
+            if proj_f.exists() and project_file is None:
+                project_file = str(proj_f)
+
+        elif p.suffix == ".yaml" and p.stem == "deltasim.project":
+            project_file = str(p)
+
+        elif p.suffix in (".yaml", ".yml") and "_spec" in p.stem:
+            spec = str(p)
+
+        elif p.suffix == ".f":
+            # .f ファイルリスト
+            try:
+                from deltasim.gui.project import resolve_paths_from_f_file
+                sv_files.extend(resolve_paths_from_f_file(p))
+            except Exception as e:
+                click.echo(f"[deltasim gui] .f ファイル読み込みエラー: {e}", err=True)
+
+        elif p.suffix in (".sv", ".v"):
+            sv_files.append(str(p))
+
+    # プロジェクトファイルがあればそちらを優先
+    if project_file:
+        try:
+            from deltasim.gui.project import load_project, project_to_dict
+            proj = load_project(project_file)
+            return project_to_dict(proj)
+        except Exception as e:
+            click.echo(f"[deltasim gui] プロジェクトファイル読み込みエラー: {e}", err=True)
+
+    return {
+        "sv_files": sv_files,
+        "spec": spec,
+        "top": None,
+        "params": {},
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -154,6 +154,7 @@ def test(
     vcd_path: Optional[str] = None,
     param_overrides: Optional[Dict[str, int]] = None,
     on_progress: Optional[Callable[[dict], None]] = None,
+    cancel_event=None,  # threading.Event | None
 ) -> dict:
     """テストを実行して結果 JSON を返す。
 
@@ -163,6 +164,9 @@ def test(
       - summary: {total, pass, fail, error, skip}
 
     on_progress: 進捗コールバック。start / case_done / progress / finish イベントを受け取る。
+    cancel_event: threading.Event。セットされたらキャンセルを試みる。
+      ※ 現状の TestRunner は単一同期ループのため、真の mid-cycle キャンセルはできない。
+         シミュレーション開始前のチェックのみ有効。M5 の公開 cancel_token が入ったら差し替える。
     現状はシングルケースとして扱い、M5 で複数ケース対応に差し替え予定。
     """
     import time as _time
@@ -237,6 +241,12 @@ def test(
     except ElabError as e:
         _emit(on_progress, {"event": "finish", "status": "error"})
         return _error_result(f"elab エラー: {e}", spec_path)
+
+    # --- キャンセルチェック（シミュ開始前）---
+    # M5 待ち: 真の mid-cycle キャンセルは TestRunner が cancel_token を受け取れるようになってから
+    if cancel_event is not None and cancel_event.is_set():
+        _emit(on_progress, {"event": "finish", "status": "SKIP", "message": "キャンセルされました"})
+        return _error_result("キャンセルされました", spec_path)
 
     # 進捗コールバック付き TestRunner
     runner = TestRunner(design, scenario, verbose=False)
@@ -343,6 +353,7 @@ def run(
     param_overrides: Optional[Dict[str, int]] = None,
     half_period: int = 5,
     reset_cycles: int = 10,
+    on_progress: Optional[Callable[[dict], None]] = None,
 ) -> dict:
     """シミュレーションを実行して VCD を書き出す（テスト判定なし）。
 

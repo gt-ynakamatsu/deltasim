@@ -1,27 +1,55 @@
-"""deltasim GUI サーバ — FastAPI による REST API + 静的ファイル配信
+"""deltasim GUI サーバ — FastAPI による REST API + SSE + 静的ファイル配信
 
 エンドポイント一覧:
-  GET  /                  → index.html
-  GET  /health            → {"ok": true}
-  GET  /api/examples      → examples/ フォルダのプロジェクト一覧
-  POST /api/load          → RTL ファイルを解析してモジュール情報を返す
-  POST /api/test          → テストを実行して結果 JSON を返す
-  GET  /api/waveform      → VCD ファイルを読んで波形データを返す
+  GET  /                          → index.html
+  GET  /health                    → {"ok": true}
+
+  # ファイルブラウザ（127.0.0.1 限定・許可ルート外拒否）
+  GET  /api/browse                → ディレクトリ一覧
+  GET  /api/browse/roots          → 許可ルート一覧
+  GET  /api/file/read             → ファイル内容取得
+  POST /api/file/write            → ファイル書き込み（同じ制限）
+
+  # プロジェクト管理
+  GET  /api/project               → プロジェクトファイル読み込み
+  POST /api/project               → プロジェクトファイル保存
+
+  # RTL ロード
+  POST /api/load                  → RTL ファイルをパース・エラボレーション
+  GET  /api/examples              → examples/ フォルダのサンプル一覧
+
+  # テスト実行（SSE + REST）
+  POST /api/test/start            → テストジョブ開始 → job_id
+  GET  /api/test/{job_id}/events  → SSE 進捗ストリーム
+  POST /api/test/{job_id}/cancel  → テストキャンセル
+  GET  /api/test/{job_id}/result  → ジョブ結果取得
+
+  # シミュレーション実行（非同期）
+  POST /api/run/start             → シミュジョブ開始 → job_id
+  GET  /api/run/{job_id}/events   → SSE 進捗ストリーム
+  POST /api/run/{job_id}/cancel   → キャンセル
+
+  # 波形
+  GET  /api/waveform/index        → 信号定義のみ取得（高速）
+  GET  /api/waveform/range        → 指定信号・時間範囲の値変化取得
+  GET  /api/waveform              → 後方互換（全データ）
 
 セキュリティ:
   - 127.0.0.1 専用バインド（uvicorn レベルで制御）
-  - ファイルパスは絶対パスを許可（ローカルツールのため）
+  - ファイル操作は filesec.safe_path() で許可ルート外を拒否
+  - パストラバーサル・シンボリックリンク脱出防止
 """
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, field_validator
 
@@ -37,9 +65,31 @@ app = FastAPI(
     version="0.1.0",
 )
 
-# 静的ファイルを /static にマウント
 if _STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+
+
+# ---------------------------------------------------------------------------
+# ミドルウェア: localhost 限定チェック
+# ---------------------------------------------------------------------------
+
+_LOCALHOST_CHECK_DISABLED = os.environ.get("DELTASIM_GUI_NO_LOCALHOST_CHECK", "0") == "1"
+
+
+@app.middleware("http")
+async def localhost_only(request: Request, call_next):
+    if _LOCALHOST_CHECK_DISABLED:
+        return await call_next(request)
+    client = request.client
+    if client:
+        host = client.host
+        # IPv4 / IPv6 ループバック。"testclient" は Starlette TestClient のダミー値。
+        if host not in ("127.0.0.1", "::1", "localhost", "testclient"):
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "このサーバはローカルホストからのみアクセスできます"},
+            )
+    return await call_next(request)
 
 
 # ---------------------------------------------------------------------------
@@ -59,17 +109,152 @@ async def health():
     return {"ok": True}
 
 
+@app.get("/api/initial-project")
+async def initial_project():
+    """CLI 引数から渡された初期プロジェクト情報を返す（環境変数経由）。"""
+    import json
+    raw = os.environ.get("DELTASIM_INITIAL_PROJECT")
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except Exception:
+        return {}
+
+
+# ---------------------------------------------------------------------------
+# /api/browse — サーバ側ファイルブラウザ
+# ---------------------------------------------------------------------------
+
+@app.get("/api/browse/roots")
+async def browse_roots():
+    """許可されているルートディレクトリ一覧を返す。"""
+    from deltasim.gui.filesec import get_allowed_roots
+    return {"roots": [str(r) for r in get_allowed_roots()]}
+
+
+@app.get("/api/browse")
+async def browse(path: str = Query(..., description="ディレクトリパス")):
+    """ディレクトリ内容を返す（許可ルート外は 403）。"""
+    from deltasim.gui.filesec import list_dir, PathSecurityError
+
+    try:
+        entries = list_dir(path)
+    except PathSecurityError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except (FileNotFoundError, NotADirectoryError) as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    return {"path": path, "entries": entries}
+
+
+# ---------------------------------------------------------------------------
+# /api/file — ファイル読み書き
+# ---------------------------------------------------------------------------
+
+@app.get("/api/file/read")
+async def file_read(path: str = Query(..., description="ファイルパス")):
+    """ファイル内容を返す（許可ルート外は 403）。"""
+    from deltasim.gui.filesec import read_text, PathSecurityError
+
+    try:
+        content = read_text(path)
+    except PathSecurityError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except IsADirectoryError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    ext = Path(path).suffix.lower()
+    lang = "verilog" if ext in (".sv", ".v") else "yaml" if ext in (".yaml", ".yml") else "text"
+    return {"path": path, "content": content, "lang": lang}
+
+
+class FileWriteRequest(BaseModel):
+    path: str
+    content: str
+
+
+@app.post("/api/file/write")
+async def file_write(req: FileWriteRequest):
+    """ファイルを書き込む（許可ルート外は 403）。"""
+    from deltasim.gui.filesec import write_text, PathSecurityError
+
+    try:
+        write_text(req.path, req.content)
+    except PathSecurityError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except IsADirectoryError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    return {"ok": True, "path": req.path}
+
+
+# ---------------------------------------------------------------------------
+# /api/project — プロジェクトファイル管理
+# ---------------------------------------------------------------------------
+
+@app.get("/api/project")
+async def get_project(path: str = Query(..., description="プロジェクトファイルパス")):
+    from deltasim.gui.project import load_project, project_to_dict
+    from deltasim.gui.filesec import PathSecurityError, safe_path
+
+    try:
+        safe_path(path, must_exist=True)
+        proj = load_project(path)
+    except PathSecurityError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    return project_to_dict(proj)
+
+
+class ProjectSaveRequest(BaseModel):
+    path: str
+    sv_files: List[str] = []
+    top: Optional[str] = None
+    spec: Optional[str] = None
+    vcd: Optional[str] = None
+    params: Dict[str, int] = {}
+
+
+@app.post("/api/project")
+async def save_project(req: ProjectSaveRequest):
+    from deltasim.gui.project import DeltaSimProject, save_project as _save
+    from deltasim.gui.filesec import PathSecurityError, safe_path
+
+    try:
+        safe_path(Path(req.path).parent)
+    except PathSecurityError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+
+    proj = DeltaSimProject(
+        sv_files=req.sv_files, top=req.top, spec=req.spec,
+        vcd=req.vcd, params=req.params,
+    )
+    try:
+        _save(proj, req.path)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return {"ok": True, "path": req.path}
+
+
 # ---------------------------------------------------------------------------
 # /api/examples — サンプルプロジェクト一覧
 # ---------------------------------------------------------------------------
 
 @app.get("/api/examples")
 async def get_examples():
-    """examples/ フォルダのサンプルプロジェクトを返す。"""
     examples_dir = Path(__file__).parent.parent.parent / "examples"
     if not examples_dir.exists():
         return {"examples": []}
 
+    import yaml as _yaml
     projects: list[dict] = []
     seen_tops: set[str] = set()
 
@@ -79,8 +264,6 @@ async def get_examples():
         if not sv_file.exists():
             continue
 
-        # YAML から top 名を取得
-        import yaml as _yaml
         try:
             with open(yaml_file, encoding="utf-8") as f:
                 spec = _yaml.safe_load(f) or {}
@@ -103,7 +286,7 @@ async def get_examples():
 
 
 # ---------------------------------------------------------------------------
-# /api/load — RTL ファイル解析
+# /api/load — RTL ロード
 # ---------------------------------------------------------------------------
 
 class LoadRequest(BaseModel):
@@ -122,7 +305,6 @@ class LoadRequest(BaseModel):
 
 @app.post("/api/load")
 async def api_load(req: LoadRequest):
-    """RTL ファイルをパース・エラボレーションしてモジュール情報を返す。"""
     from deltasim.gui.adapter import load, AdapterError
 
     try:
@@ -134,7 +316,97 @@ async def api_load(req: LoadRequest):
 
 
 # ---------------------------------------------------------------------------
-# /api/test — テスト実行
+# /api/test — テスト実行 (SSE)
+# ---------------------------------------------------------------------------
+
+class TestStartRequest(BaseModel):
+    sv_files: List[str]
+    spec: str
+    top: Optional[str] = None
+    seed: Optional[int] = None
+    vcd_out: Optional[str] = None
+    params: Dict[str, int] = {}
+
+    @field_validator("sv_files")
+    @classmethod
+    def sv_files_must_exist(cls, v: List[str]) -> List[str]:
+        for f in v:
+            if not os.path.isfile(f):
+                raise ValueError(f"SV ファイルが見つかりません: {f!r}")
+        return v
+
+    @field_validator("spec")
+    @classmethod
+    def spec_must_exist(cls, v: str) -> str:
+        if not os.path.isfile(v):
+            raise ValueError(f"スペックファイルが見つかりません: {v!r}")
+        return v
+
+
+@app.post("/api/test/start")
+async def test_start(req: TestStartRequest):
+    """テストジョブを開始して job_id を返す。"""
+    from deltasim.gui.jobs import create_job, run_test_job
+
+    job = create_job()
+    job.task = asyncio.create_task(
+        run_test_job(
+            job,
+            req.sv_files,
+            req.spec,
+            top=req.top,
+            seed=req.seed,
+            vcd_path=req.vcd_out,
+            params=req.params,
+        )
+    )
+    return {"job_id": job.job_id}
+
+
+@app.get("/api/test/{job_id}/events")
+async def test_events(job_id: str):
+    """SSE でテスト進捗イベントを流す。"""
+    from deltasim.gui.jobs import get_job, event_stream
+
+    job = get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"ジョブが見つかりません: {job_id}")
+
+    return StreamingResponse(
+        event_stream(job),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.post("/api/test/{job_id}/cancel")
+async def test_cancel(job_id: str):
+    """テストジョブをキャンセルする。"""
+    from deltasim.gui.jobs import cancel_job
+
+    if not cancel_job(job_id):
+        raise HTTPException(status_code=404, detail=f"ジョブが見つかりません: {job_id}")
+    return {"ok": True, "job_id": job_id}
+
+
+@app.get("/api/test/{job_id}/result")
+async def test_result(job_id: str):
+    """ジョブの結果を返す（SSE 終了後に取得）。"""
+    from deltasim.gui.jobs import get_job
+
+    job = get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"ジョブが見つかりません: {job_id}")
+    if not job.done:
+        return {"done": False}
+    return {"done": True, "result": job.result}
+
+
+# ---------------------------------------------------------------------------
+# /api/test (後方互換: 同期版)
 # ---------------------------------------------------------------------------
 
 class TestRequest(BaseModel):
@@ -163,11 +435,12 @@ class TestRequest(BaseModel):
 
 @app.post("/api/test")
 async def api_test(req: TestRequest):
-    """YAML スペックに従ってテストを実行して結果 JSON を返す。"""
+    """テストを同期実行して結果 JSON を返す（後方互換）。"""
     from deltasim.gui.adapter import test, AdapterError
 
     try:
-        result = test(
+        result = await asyncio.to_thread(
+            test,
             req.sv_files,
             req.spec,
             top=req.top,
@@ -182,34 +455,65 @@ async def api_test(req: TestRequest):
 
 
 # ---------------------------------------------------------------------------
-# /api/waveform — VCD 読み込み・波形データ返却
+# /api/run — シミュレーション実行（非同期）
 # ---------------------------------------------------------------------------
 
-@app.get("/api/waveform")
-async def api_waveform(
-    path: str = Query(..., description="VCD ファイルパス"),
-    t_start: int = Query(0, description="フィルタ開始時刻 (ns)"),
-    t_end: Optional[int] = Query(None, description="フィルタ終了時刻 (ns)"),
-    signals: Optional[str] = Query(None, description="カンマ区切りの信号名リスト"),
-):
-    """VCD ファイルを読み込んで波形データを JSON で返す。"""
-    from deltasim.gui.vcd_reader import read_vcd, VCDReadError
+class RunStartRequest(BaseModel):
+    sv_files: List[str]
+    top: Optional[str] = None
+    cycles: int = 100
+    vcd_out: Optional[str] = None
+    params: Dict[str, int] = {}
+    half_period: int = 5
+    reset_cycles: int = 10
 
-    if not os.path.isfile(path):
-        raise HTTPException(status_code=404, detail=f"VCD ファイルが見つかりません: {path!r}")
 
-    sig_list = [s.strip() for s in signals.split(",")] if signals else None
+@app.post("/api/run/start")
+async def run_start(req: RunStartRequest):
+    from deltasim.gui.jobs import create_job, run_sim_job
 
-    try:
-        data = read_vcd(path, t_start=t_start, t_end=t_end, signals=sig_list)
-    except VCDReadError as e:
-        raise HTTPException(status_code=422, detail=str(e))
+    job = create_job()
+    job.task = asyncio.create_task(
+        run_sim_job(
+            job,
+            req.sv_files,
+            top=req.top,
+            cycles=req.cycles,
+            vcd_path=req.vcd_out,
+            params=req.params,
+            half_period=req.half_period,
+            reset_cycles=req.reset_cycles,
+        )
+    )
+    return {"job_id": job.job_id}
 
-    return data
+
+@app.get("/api/run/{job_id}/events")
+async def run_events(job_id: str):
+    from deltasim.gui.jobs import get_job, event_stream
+
+    job = get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"ジョブが見つかりません: {job_id}")
+
+    return StreamingResponse(
+        event_stream(job),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.post("/api/run/{job_id}/cancel")
+async def run_cancel(job_id: str):
+    from deltasim.gui.jobs import cancel_job
+
+    if not cancel_job(job_id):
+        raise HTTPException(status_code=404, detail=f"ジョブが見つかりません: {job_id}")
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------
-# /api/run — シミュレーション実行（テスト判定なし、波形取得用）
+# /api/run 後方互換（同期版）
 # ---------------------------------------------------------------------------
 
 class RunRequest(BaseModel):
@@ -224,11 +528,11 @@ class RunRequest(BaseModel):
 
 @app.post("/api/run")
 async def api_run(req: RunRequest):
-    """シミュレーションを実行して VCD を書き出す（テスト判定なし）。"""
     from deltasim.gui.adapter import run, AdapterError
 
     try:
-        result = run(
+        result = await asyncio.to_thread(
+            run,
             req.sv_files,
             top=req.top,
             cycles=req.cycles,
@@ -241,3 +545,74 @@ async def api_run(req: RunRequest):
         raise HTTPException(status_code=500, detail=e.to_dict())
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# /api/waveform — VCD 波形データ
+# ---------------------------------------------------------------------------
+
+@app.get("/api/waveform/index")
+async def waveform_index(path: str = Query(..., description="VCD ファイルパス")):
+    """VCD の信号定義のみを高速取得する（値変化は読まない）。"""
+    from deltasim.gui.vcd_reader import read_vcd_index, VCDReadError
+
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail=f"VCD ファイルが見つかりません: {path!r}")
+
+    try:
+        data = await asyncio.to_thread(read_vcd_index, path)
+    except VCDReadError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    return data
+
+
+@app.get("/api/waveform/range")
+async def waveform_range(
+    path: str = Query(..., description="VCD ファイルパス"),
+    signals: Optional[str] = Query(None, description="カンマ区切りの信号名"),
+    t_start: int = Query(0, description="フィルタ開始時刻 (ns)"),
+    t_end: Optional[int] = Query(None, description="フィルタ終了時刻 (ns)"),
+):
+    """指定信号・時間範囲の値変化を返す（遅延読み込み用）。"""
+    from deltasim.gui.vcd_reader import read_vcd_range, VCDReadError
+
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail=f"VCD ファイルが見つかりません: {path!r}")
+
+    sig_list = [s.strip() for s in signals.split(",")] if signals else None
+
+    try:
+        data = await asyncio.to_thread(
+            read_vcd_range, path,
+            signal_names=sig_list, t_start=t_start, t_end=t_end
+        )
+    except VCDReadError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    return data
+
+
+@app.get("/api/waveform")
+async def api_waveform(
+    path: str = Query(..., description="VCD ファイルパス"),
+    t_start: int = Query(0, description="フィルタ開始時刻 (ns)"),
+    t_end: Optional[int] = Query(None, description="フィルタ終了時刻 (ns)"),
+    signals: Optional[str] = Query(None, description="カンマ区切りの信号名リスト"),
+):
+    """後方互換 API（全データ取得）。"""
+    from deltasim.gui.vcd_reader import read_vcd, VCDReadError
+
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail=f"VCD ファイルが見つかりません: {path!r}")
+
+    sig_list = [s.strip() for s in signals.split(",")] if signals else None
+
+    try:
+        data = await asyncio.to_thread(
+            read_vcd, path, t_start=t_start, t_end=t_end, signals=sig_list
+        )
+    except VCDReadError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    return data

@@ -4,6 +4,9 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>deltasim GUI</title>
+  <!-- CodeMirror 5 (同梱) -->
+  <link rel="stylesheet" href="/static/codemirror.min.css">
+  <link rel="stylesheet" href="/static/cm-dracula.min.css">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -13,17 +16,20 @@
   <header id="toolbar">
     <h1>⚡ deltasim</h1>
 
-    <button id="btn-load-examples" class="btn btn-secondary" title="サンプルプロジェクトを読み込む">
-      サンプル読み込み
+    <button id="btn-browse" class="btn btn-secondary" title="ファイルブラウザを開く">
+      📂 開く
     </button>
-    <button id="btn-open-files" class="btn btn-secondary" title="ファイルを開く">
-      📂 ファイルを開く
+    <button id="btn-load-examples" class="btn btn-secondary" title="サンプルを読み込む">
+      サンプル
     </button>
-    <button id="btn-run-test" class="btn btn-primary" title="テスト実行">
+    <button id="btn-run-test" class="btn btn-primary" title="テスト実行 (SSE)">
       ▶ テスト実行
     </button>
     <button id="btn-stop" class="btn btn-danger" title="停止">
       ■ 停止
+    </button>
+    <button id="btn-save-project" class="btn btn-secondary" title="プロジェクトを保存">
+      💾 保存
     </button>
 
     <label style="font-size:11px; color:#8888aa; margin-left:8px;">シード:</label>
@@ -34,13 +40,19 @@
     <button class="radix-btn" data-radix="bin">BIN</button>
     <button class="radix-btn" data-radix="dec">DEC</button>
 
+    <!-- 進捗バー -->
+    <div id="progress-container">
+      <div id="progress-bar"></div>
+      <div id="progress-text"></div>
+    </div>
+
     <span id="status-bar-top"></span>
   </header>
 
   <!-- ===== サイドバー ===== -->
   <aside id="sidebar">
     <!-- サンプル -->
-    <div class="sidebar-section">
+    <div class="sidebar-section" id="section-examples">
       <h2>サンプル</h2>
       <div id="example-list">（読み込み中…）</div>
     </div>
@@ -64,11 +76,16 @@
     </div>
   </aside>
 
-  <!-- ===== 中央エリア（エディタ） ===== -->
+  <!-- ===== エディタ ===== -->
   <main id="center">
+    <div id="editor-toolbar">
+      <span id="editor-filename" style="font-size:12px; color:#a3a3b4;">（ファイル未選択）</span>
+      <button id="btn-save-file" class="btn btn-secondary" style="padding:2px 10px; font-size:11px;" title="ファイルを保存してリロード">💾 保存</button>
+      <div id="editor-errors-badge" style="display:none; margin-left:8px; font-size:11px; color:#f87171;"></div>
+    </div>
     <div id="editor-area">
-      <pre id="editor-content">// ここにロードされた RTL の概要が表示されます
-// サイドバーのサンプルを選択して開始してください</pre>
+      <!-- CodeMirror がここに展開される -->
+      <textarea id="editor-textarea" placeholder="サンプルを選択するか、ファイルを開いてください"></textarea>
     </div>
   </main>
 
@@ -95,7 +112,8 @@
       <button id="btn-zoom-in"  class="btn btn-secondary" style="padding:2px 8px;" title="拡大">＋</button>
       <button id="btn-zoom-out" class="btn btn-secondary" style="padding:2px 8px;" title="縮小">－</button>
       <button id="btn-zoom-fit" class="btn btn-secondary" style="padding:2px 8px;" title="全体表示">⊡ 全体</button>
-      <span style="font-size:11px; color:#8888aa; margin-left:4px;">クリック: カーソルA　Shift+クリック: カーソルB</span>
+      <span id="wave-sig-count" style="font-size:11px; color:#8888aa;"></span>
+      <span style="font-size:11px; color:#8888aa;">　クリック: カーソルA　Shift+クリック: カーソルB</span>
     </div>
     <div id="waveform-container">
       <div id="signal-names"></div>
@@ -109,6 +127,7 @@
   <section id="log-panel">
     <div id="log-toolbar">
       <span>ログ / コンソール</span>
+      <button id="btn-clear-log" class="btn btn-secondary" style="padding:1px 8px; font-size:10px; margin-left:auto;">クリア</button>
     </div>
     <div id="log-output"></div>
   </section>
@@ -118,11 +137,32 @@
     <span id="status-text">ready</span>
   </footer>
 
+  <!-- ===== ファイルブラウザダイアログ ===== -->
+  <div id="file-browser-overlay" class="dialog-overlay" style="display:none;">
+    <div class="dialog-box">
+      <div class="dialog-header">
+        <span>📂 ファイルを開く</span>
+        <button class="dialog-close" id="btn-browser-close">✕</button>
+      </div>
+      <div class="dialog-breadcrumb" id="browser-breadcrumb"></div>
+      <div class="dialog-body" id="browser-body"></div>
+      <div class="dialog-footer">
+        <span id="browser-selected-path" style="font-size:11px; color:#8888aa; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"></span>
+        <button class="btn btn-secondary" id="btn-browser-cancel">キャンセル</button>
+        <button class="btn btn-primary" id="btn-browser-open">開く</button>
+      </div>
+    </div>
+  </div>
+
   <!-- ===== DnD オーバーレイ ===== -->
   <div id="drop-overlay">ここにドロップしてファイルを開く</div>
 
 </div><!-- #app -->
 
+<!-- CodeMirror 5 本体 + モード -->
+<script src="/static/codemirror.min.js"></script>
+<script src="/static/cm-verilog.min.js"></script>
+<script src="/static/cm-yaml.min.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>
