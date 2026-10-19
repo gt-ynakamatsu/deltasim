@@ -1,32 +1,30 @@
 """deltasim result types — M5 API contract.
 
 All public types in this module correspond exactly to the interface contract
-in docs/api.md (§2 of deltasim GUI spec v0.1).  Do not add fields here
-without updating docs/api.md and getting sign-off.
+in docs/api.md.  Do not add fields here without updating docs/api.md.
 
 Value encoding (§2.7)
 ---------------------
-Signal values are represented as 4-state bit strings:
-  1-bit :  "0" | "1" | "x" | "z"
-  N-bit :  "0101xz10" (MSB first, length = N)
+  1-bit : "0" | "1" | "x" | "z"
+  N-bit : "0101xz10"  (MSB first, length = N)
 
-status codes: "PASS" | "FAIL" | "ERROR" | "SKIP"
-severity    : "error" | "warning"
-phase       : "parse" | "elab" | "sim" | "check"
+status codes  : "PASS" | "FAIL" | "ERROR" | "SKIP"
+severity      : "error" | "warning"
+phase         : "parse" | "elab" | "sim" | "check"
 """
 
 from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass, field, asdict
-from typing import Any, Dict, List, Optional
+from dataclasses import asdict, dataclass, field
+from typing import Any, Dict, List, Optional, Tuple
 
 SCHEMA_VERSION = "1"
 
 
 # ---------------------------------------------------------------------------
-# Value encoding helpers
+# Value encoding helpers (§2.7)
 # ---------------------------------------------------------------------------
 
 def val_to_4state(val: Optional[int], width: int) -> str:
@@ -49,66 +47,132 @@ def val_from_4state(s: str) -> Optional[int]:
 
 
 # ---------------------------------------------------------------------------
-# Structured error
+# Structured error (§2.3)
 # ---------------------------------------------------------------------------
 
 @dataclass
 class ErrorInfo:
-    """Structured parse / elaboration error (§2.3)."""
     file: str = ""
     line: int = 0
     column: int = 0
     severity: str = "error"   # "error" | "warning"
     message: str = ""
-    code: str = ""            # e.g. "E001", "W002"
+    code: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
 
 # ---------------------------------------------------------------------------
-# Check result (one expected-value check)
+# Check result (one expected-value check, §2.2)
 # ---------------------------------------------------------------------------
 
 @dataclass
 class CheckInfo:
-    """Result of one expected-value check (§2.2)."""
     name: str = ""
-    status: str = "PASS"       # PASS | FAIL | ERROR | SKIP
+    status: str = "PASS"        # PASS | FAIL | ERROR | SKIP
     signal: str = ""
     cycle: int = 0
     time_ns: int = 0
-    expected: str = ""         # 4-state bit string
-    actual: str = ""           # 4-state bit string
-    source: str = "spec"       # "spec" | "model"
+    expected: str = ""          # 4-state bit string
+    actual: str = ""            # 4-state bit string
+    source: str = "spec"        # "spec" | "model"
     seed: int = 0
     message: Optional[str] = None
+    elapsed_ms: float = 0.0
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
 
 # ---------------------------------------------------------------------------
-# Signal change entry
+# Signal change entry (§2.6)
 # ---------------------------------------------------------------------------
 
 @dataclass
 class SignalChange:
-    """One value-change event on a signal (§2.6)."""
     time_ns: int = 0
-    value: str = "x"   # 4-state bit string
+    value: str = "x"            # 4-state bit string
 
 
 # ---------------------------------------------------------------------------
-# Main result types
+# Design info (return type of load(), §2.1)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class PortInfo:
+    name: str
+    direction: str              # "input" | "output" | "inout"
+    width: int
+    signed: bool = False
+
+
+@dataclass
+class SignalSpec:
+    name: str
+    width: int
+    direction: Optional[str] = None
+    signed: bool = False
+
+
+@dataclass
+class HierarchyNode:
+    """One node in the module hierarchy tree."""
+    name: str
+    module: str
+    signals: List[str] = field(default_factory=list)
+    children: List["HierarchyNode"] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "name": self.name,
+            "module": self.module,
+            "signals": self.signals,
+            "children": [c.to_dict() for c in self.children],
+        }
+
+
+@dataclass
+class DesignInfo:
+    """Return value of load() — represents an elaborated design (§2.1)."""
+    schema_version: str = SCHEMA_VERSION
+    status: str = "PASS"
+    module: str = ""
+    ports: List[PortInfo] = field(default_factory=list)
+    params: Dict[str, int] = field(default_factory=dict)
+    signals: List[SignalSpec] = field(default_factory=list)
+    hierarchy: Optional[HierarchyNode] = None
+    errors: List[ErrorInfo] = field(default_factory=list)
+    # Private: internal ElabDesign (not serialised)
+    _design: Any = field(default=None, repr=False, compare=False)
+    _catalog: Any = field(default=None, repr=False, compare=False)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "status": self.status,
+            "module": self.module,
+            "ports": [asdict(p) for p in self.ports],
+            "params": self.params,
+            "signals": [asdict(s) for s in self.signals],
+            "hierarchy": self.hierarchy.to_dict() if self.hierarchy else None,
+            "errors": [e.to_dict() for e in self.errors],
+        }
+
+    def to_json(self, indent: int = 2) -> str:
+        return json.dumps(self.to_dict(), ensure_ascii=False, indent=indent)
+
+
+# ---------------------------------------------------------------------------
+# Main test result (§2.2)
 # ---------------------------------------------------------------------------
 
 @dataclass
 class TestResult:
-    """Return value of test() / output of `deltasim test --json` (§2.2)."""
+    """Return value of test() / `deltasim test --json` (§2.2)."""
     schema_version: str = SCHEMA_VERSION
     module: str = ""
-    status: str = "PASS"         # PASS | FAIL | ERROR | SKIP
+    status: str = "PASS"        # PASS | FAIL | ERROR | SKIP
     seed: int = 0
     elapsed_ms: float = 0.0
     log: List[str] = field(default_factory=list)
@@ -129,7 +193,7 @@ class TestResult:
         return sum(1 for c in self.checks if c.status == "FAIL")
 
     def to_dict(self) -> Dict[str, Any]:
-        d = {
+        return {
             "schema_version": self.schema_version,
             "module": self.module,
             "status": self.status,
@@ -140,48 +204,14 @@ class TestResult:
             "checks": [c.to_dict() for c in self.checks],
             "errors": [e.to_dict() for e in self.errors],
         }
-        return d
 
     def to_json(self, indent: int = 2) -> str:
         return json.dumps(self.to_dict(), ensure_ascii=False, indent=indent)
 
-    @classmethod
-    def from_run_result(cls, run_result, module_name: str, seed: int = 0) -> "TestResult":
-        """Convert a legacy RunResult / TestRunResult to TestResult."""
-        from deltasim.tb.runner import TestRunResult, CheckResult
-        if not isinstance(run_result, TestRunResult):
-            return cls(module=module_name, seed=seed)
-
-        checks = []
-        status = "PASS"
-        for cr in run_result.checks:
-            cs = "PASS" if cr.passed else "FAIL"
-            if cs == "FAIL":
-                status = "FAIL"
-            checks.append(CheckInfo(
-                name=f"{cr.signal}@cycle{cr.cycle}[{cr.source}]",
-                status=cs,
-                signal=cr.signal,
-                cycle=cr.cycle,
-                time_ns=cr.cycle * 10,  # approximate
-                expected=str(cr.expected),
-                actual=str(cr.actual),
-                source=cr.source,
-                seed=seed,
-                message=None if cr.passed else f"expected {cr.expected!r}, got {cr.actual!r}",
-            ))
-        return cls(
-            module=module_name,
-            status=status,
-            seed=seed,
-            log=run_result.log,
-            checks=checks,
-        )
-
 
 @dataclass
 class LoadResult:
-    """Return value of load() (§2.1)."""
+    """Return value of load() when called with just files (legacy compat)."""
     schema_version: str = SCHEMA_VERSION
     status: str = "PASS"
     module: str = ""
@@ -217,6 +247,7 @@ class RunResult:
     vcd_path: Optional[str] = None
     errors: List[ErrorInfo] = field(default_factory=list)
     cancelled: bool = False
+    elapsed_ms: float = 0.0
     # Signal-change DB (available only when keep_changes=True)
     _change_db: Any = field(default=None, repr=False, compare=False)
 
@@ -236,6 +267,7 @@ class RunResult:
             "cycles": self.cycles,
             "time_ns": self.time_ns,
             "cancelled": self.cancelled,
+            "elapsed_ms": self.elapsed_ms,
             "vcd_path": self.vcd_path,
             "log": self.log,
             "errors": [e.to_dict() for e in self.errors],
@@ -246,7 +278,38 @@ class RunResult:
 
 
 # ---------------------------------------------------------------------------
-# Signal change DB
+# Simulator snapshot (§2.5)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SimSnapshot:
+    """State snapshot returned by Simulator.step() / run_until()."""
+    schema_version: str = SCHEMA_VERSION
+    time_ns: int = 0
+    signals: Dict[str, Optional[int]] = field(default_factory=dict)
+    # Signals that changed since the last snapshot
+    changes: List[Tuple[str, Optional[int]]] = field(default_factory=list)
+    # Breakpoint ID that fired, or None
+    breakpoint_hit: Optional[int] = None
+
+    def get(self, signal: str) -> Optional[int]:
+        return self.signals.get(signal)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "time_ns": self.time_ns,
+            "signals": {k: v for k, v in self.signals.items()},
+            "changes": [[k, v] for k, v in self.changes],
+            "breakpoint_hit": self.breakpoint_hit,
+        }
+
+    def to_json(self, indent: int = 2) -> str:
+        return json.dumps(self.to_dict(), ensure_ascii=False, indent=indent)
+
+
+# ---------------------------------------------------------------------------
+# Signal change DB (§2.6)
 # ---------------------------------------------------------------------------
 
 class SignalChangeDB:
@@ -256,11 +319,12 @@ class SignalChangeDB:
         self._db: Dict[str, List[SignalChange]] = {}
 
     def record(self, time_ns: int, signal: str, val: Optional[int], width: int) -> None:
-        entry = SignalChange(
-            time_ns=time_ns,
-            value=val_to_4state(val, width),
-        )
-        self._db.setdefault(signal, []).append(entry)
+        entry = SignalChange(time_ns=time_ns, value=val_to_4state(val, width))
+        lst = self._db.setdefault(signal, [])
+        # Only record actual changes
+        if lst and lst[-1].value == entry.value:
+            return
+        lst.append(entry)
 
     def get(
         self, signal: str, start_ns: int = 0, end_ns: Optional[int] = None
@@ -282,26 +346,23 @@ class SignalChangeDB:
 @dataclass
 class ProgressEvent:
     """One progress event emitted during simulation (§2.4)."""
-    type: str                        # start | progress | case_done | finish
+    type: str                           # start | progress | case_done | finish
     timestamp_ms: float = field(default_factory=lambda: time.time() * 1000)
-    # start / finish
     module: Optional[str] = None
     status: Optional[str] = None
     elapsed_ms: Optional[float] = None
     cancelled: Optional[bool] = None
-    # progress
-    phase: Optional[str] = None     # parse | elab | sim | check
+    phase: Optional[str] = None         # parse | elab | sim | check
     cycle: Optional[int] = None
     total_cycles: Optional[int] = None
     time_ns: Optional[int] = None
-    # case_done
     name: Optional[str] = None
     signal: Optional[str] = None
     expected: Optional[str] = None
     actual: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        d = {"type": self.type, "timestamp_ms": self.timestamp_ms}
+        d: Dict[str, Any] = {"type": self.type, "timestamp_ms": self.timestamp_ms}
         for k in ("module", "status", "elapsed_ms", "cancelled",
                    "phase", "cycle", "total_cycles", "time_ns",
                    "name", "signal", "expected", "actual"):
@@ -314,8 +375,12 @@ class ProgressEvent:
         return json.dumps(self.to_dict(), ensure_ascii=False)
 
 
+# ---------------------------------------------------------------------------
+# Cancel token
+# ---------------------------------------------------------------------------
+
 class CancelToken:
-    """Lightweight cancel token.  Pass to API functions to interrupt them."""
+    """Lightweight cancel token (§2.4)."""
 
     def __init__(self):
         self._cancelled = False
@@ -328,7 +393,6 @@ class CancelToken:
         return self._cancelled
 
     def check(self) -> None:
-        """Raise SimulationCancelled if this token has been cancelled."""
         if self._cancelled:
             raise SimulationCancelled()
 

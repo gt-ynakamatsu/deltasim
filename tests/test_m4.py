@@ -348,12 +348,12 @@ endmodule
 
 class TestPublicAPI:
     def test_load(self):
-        """api.load() が LoadResult を返すこと"""
+        """api.load() が DesignInfo を返すこと"""
         import deltasim.api as ds
         result = ds.load([os.path.join(EXAMPLES, "counter.sv")], top="counter")
         assert result.status == "PASS"
         assert result.module == "counter"
-        assert any(p["name"] == "clk" for p in result.ports)
+        assert any(p.name == "clk" for p in result.ports)
         assert result.params.get("WIDTH") == 8
 
     def test_test_api(self):
