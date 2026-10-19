@@ -107,7 +107,13 @@ class LexError(Exception):
 # ---------------------------------------------------------------------------
 
 def tokenize(source: str, filename: str = "<string>") -> List[Token]:
-    """Tokenize *source* and return a list of Tokens (no WHITESPACE/COMMENT)."""
+    """Tokenize *source* and return a list of Tokens (no WHITESPACE/COMMENT).
+    
+    CRLF (\\r\\n) and bare CR (\\r) are normalised to LF before tokenising,
+    which ensures Windows-edited files are handled correctly.
+    """
+    # Normalise line endings (Windows CRLF / old Mac CR)
+    source = source.replace("\r\n", "\n").replace("\r", "\n")
     tokens: List[Token] = []
     line = 1
     line_start = 0

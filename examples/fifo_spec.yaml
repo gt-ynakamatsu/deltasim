@@ -1,0 +1,58 @@
+version: 1
+top: fifo
+
+clock:
+  signal: clk
+  period_ns: 10
+
+reset:
+  signal: rst_n
+  active_low: true
+  duration_cycles: 2
+
+sim:
+  cycles: 20
+  seed: 0
+
+# 4 データを書き込んで読み出す
+inputs:
+  # リセット直後は何もしない
+  - at: [1, 2]
+    set: {wr_en: 0, rd_en: 0, wr_data: 0}
+  # 書き込み: 10, 20, 30, 40
+  - at: 3
+    set: {wr_en: 1, wr_data: 10}
+  - at: 4
+    set: {wr_en: 1, wr_data: 20}
+  - at: 5
+    set: {wr_en: 1, wr_data: 30}
+  - at: 6
+    set: {wr_en: 1, wr_data: 40}
+  # 書き込み停止（FIFO満杯）
+  - at: 7
+    set: {wr_en: 0}
+  # 読み出し開始
+  - at: 8
+    set: {rd_en: 1}
+  - at: 12
+    set: {rd_en: 0}
+
+expected:
+  # リセット後は空でフルではない
+  - at: 2
+    check: {empty: 1, full: 0}
+  # 4 個書き込み後は満杯
+  - at: 7
+    check: {full: 1, empty: 0}
+  # 読み出し: 書き込んだ順に出る（FIFO）
+  - at: 8
+    check: {rd_data: 10}
+  - at: 9
+    check: {rd_data: 20}
+  - at: 10
+    check: {rd_data: 30}
+  - at: 11
+    check: {rd_data: 40}
+  # 全部読み出したら空
+  - at: 12
+    check: {empty: 1}

@@ -48,6 +48,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
 
 from deltasim.elab.elaborator import ElabDesign, SignalInfo, SeqProc, CombProc, AssignProc
+from deltasim.sim.context import EvalContext, StructFieldEntry, _EMPTY_CTX
 from deltasim.parser.ast_nodes import (
     SensitivityList, SensitivityItem,
     Block, IfStmt, CaseStmt, CaseItem,
@@ -55,7 +56,7 @@ from deltasim.parser.ast_nodes import (
     TimeDelay, ForeverStmt, RepeatStmt, WaitEventStmt, ForStmt, WhileStmt,
     NumberLiteral, FillLiteral, StringLiteral, Identifier,
     BinOp, UnaryOp, Conditional, BitSelect, PartSelect, Concat, Replicate,
-    SysFunc,
+    SysFunc, MemberAccess,
 )
 
 
@@ -80,18 +81,20 @@ def eval_expr(
     signals: Dict[str, int],
     widths: Dict[str, int],
     params: Dict[str, int],
+    ctx: Optional[EvalContext] = None,
 ) -> Tuple[Optional[int], Optional[int]]:
     """Evaluate *expr* and return (value, width).
 
     *value* is ``None`` when the result is unknown (X/Z).
-    *width* is ``None`` for unsized literals (treated as 32-bit when needed).
+    *width* is ``None`` for unsized literals.
+    Signed signals are sign-extended when read (M4 signed arithmetic).
     """
     if isinstance(expr, NumberLiteral):
         return (expr.value, expr.width)
 
     if isinstance(expr, FillLiteral):
         if expr.fill in ("x", "X", "z", "Z"):
-            return (None, None)  # X / Z → unknown
+            return (None, None)
         val = 0 if expr.fill in ("0",) else -1
         return (val, None)
 
@@ -102,36 +105,49 @@ def eval_expr(
         name = expr.name
         if name in params:
             return (params[name], 32)
-        val = signals.get(name, 0)   # None = X, int = normal
+        val = signals.get(name, 0)
         w = widths.get(name, 1)
+        if val is None:
+            return (None, w)
+        # M4: sign-extend signed signals
+        if ctx and ctx.signs.get(name, False) and w > 0 and val >= (1 << (w - 1)):
+            val = val - (1 << w)
         return (val, w)
 
+    # M4: struct packed field access  (expr.field)
+    if isinstance(expr, MemberAccess):
+        return _eval_member(expr, signals, widths, params, ctx)
+
     if isinstance(expr, BinOp):
-        return _eval_binop(expr, signals, widths, params)
+        return _eval_binop(expr, signals, widths, params, ctx)
 
     if isinstance(expr, UnaryOp):
-        return _eval_unaryop(expr, signals, widths, params)
+        return _eval_unaryop(expr, signals, widths, params, ctx)
 
     if isinstance(expr, Conditional):
-        cond_v, _ = eval_expr(expr.cond, signals, widths, params)
+        cond_v, _ = eval_expr(expr.cond, signals, widths, params, ctx)
         if cond_v is None:
-            return (None, None)  # X condition → X result
+            return (None, None)
         if cond_v:
-            return eval_expr(expr.then_expr, signals, widths, params)
+            return eval_expr(expr.then_expr, signals, widths, params, ctx)
         else:
-            return eval_expr(expr.else_expr, signals, widths, params)
+            return eval_expr(expr.else_expr, signals, widths, params, ctx)
 
     if isinstance(expr, BitSelect):
-        base_v, _ = eval_expr(expr.base, signals, widths, params)
-        idx_v, _ = eval_expr(expr.index, signals, widths, params)
+        # M4: check if base is an unpacked array
+        if (ctx and isinstance(expr.base, Identifier)
+                and expr.base.name in ctx.arrays):
+            return _eval_array_element(expr, signals, widths, params, ctx)
+        base_v, _ = eval_expr(expr.base, signals, widths, params, ctx)
+        idx_v, _ = eval_expr(expr.index, signals, widths, params, ctx)
         if base_v is None or idx_v is None:
             return (None, 1)
         return ((base_v >> idx_v) & 1, 1)
 
     if isinstance(expr, PartSelect):
-        base_v, _ = eval_expr(expr.base, signals, widths, params)
-        hi_v, _ = eval_expr(expr.hi, signals, widths, params)
-        lo_v, _ = eval_expr(expr.lo, signals, widths, params)
+        base_v, _ = eval_expr(expr.base, signals, widths, params, ctx)
+        hi_v, _ = eval_expr(expr.hi, signals, widths, params, ctx)
+        lo_v, _ = eval_expr(expr.lo, signals, widths, params, ctx)
         if base_v is None or hi_v is None or lo_v is None:
             return (None, 1)
         w = hi_v - lo_v + 1
@@ -139,11 +155,11 @@ def eval_expr(
         return ((base_v >> lo_v) & mask, w)
 
     if isinstance(expr, Concat):
-        return _eval_concat(expr, signals, widths, params)
+        return _eval_concat(expr, signals, widths, params, ctx)
 
     if isinstance(expr, Replicate):
-        cnt_v, _ = eval_expr(expr.count, signals, widths, params)
-        val_v, val_w = eval_expr(expr.value, signals, widths, params)
+        cnt_v, _ = eval_expr(expr.count, signals, widths, params, ctx)
+        val_v, val_w = eval_expr(expr.value, signals, widths, params, ctx)
         if cnt_v is None or val_v is None:
             return (None, None)
         if val_w is None:
@@ -154,7 +170,7 @@ def eval_expr(
         return (result, cnt_v * val_w)
 
     if isinstance(expr, SysFunc):
-        return _eval_sysfunc(expr, signals, widths, params)
+        return _eval_sysfunc(expr, signals, widths, params, ctx)
 
     raise SimError(f"Unknown expression type: {type(expr).__name__}")
 
@@ -163,9 +179,9 @@ def _eff_width(w: Optional[int]) -> int:
     return w if w is not None else 32
 
 
-def _eval_binop(expr, signals, widths, params) -> Tuple[Optional[int], Optional[int]]:
-    lv, lw = eval_expr(expr.left, signals, widths, params)
-    rv, rw = eval_expr(expr.right, signals, widths, params)
+def _eval_binop(expr, signals, widths, params, ctx=None) -> Tuple[Optional[int], Optional[int]]:
+    lv, lw = eval_expr(expr.left, signals, widths, params, ctx)
+    rv, rw = eval_expr(expr.right, signals, widths, params, ctx)
     op = expr.op
     w = max(_eff_width(lw), _eff_width(rw))
     mask = (1 << w) - 1
@@ -219,8 +235,8 @@ def _eval_binop(expr, signals, widths, params) -> Tuple[Optional[int], Optional[
     raise SimError(f"Unknown binary operator: {op!r}")
 
 
-def _eval_unaryop(expr, signals, widths, params) -> Tuple[Optional[int], Optional[int]]:
-    v, w = eval_expr(expr.operand, signals, widths, params)
+def _eval_unaryop(expr, signals, widths, params, ctx=None) -> Tuple[Optional[int], Optional[int]]:
+    v, w = eval_expr(expr.operand, signals, widths, params, ctx)
     op = expr.op
     if v is None:
         return (None, w)
@@ -252,11 +268,11 @@ def _eval_unaryop(expr, signals, widths, params) -> Tuple[Optional[int], Optiona
     raise SimError(f"Unknown unary operator: {op!r}")
 
 
-def _eval_concat(expr, signals, widths, params) -> Tuple[Optional[int], int]:
+def _eval_concat(expr, signals, widths, params, ctx=None) -> Tuple[Optional[int], int]:
     result = 0
     total_w = 0
     for part in expr.parts:
-        v, w = eval_expr(part, signals, widths, params)
+        v, w = eval_expr(part, signals, widths, params, ctx)
         pw = _eff_width(w)
         if v is None:
             return (None, total_w + pw)
@@ -265,19 +281,55 @@ def _eval_concat(expr, signals, widths, params) -> Tuple[Optional[int], int]:
     return (result, total_w)
 
 
-def _eval_sysfunc(expr, signals, widths, params) -> Tuple[int, Optional[int]]:
+def _eval_sysfunc(expr, signals, widths, params, ctx=None) -> Tuple[int, Optional[int]]:
     name = expr.name
     if name == "clog2":
-        v, _ = eval_expr(expr.args[0], signals, widths, params)
+        v, _ = eval_expr(expr.args[0], signals, widths, params, ctx)
         return (max(1, math.ceil(math.log2(max(v, 2)))), 32)
     if name in ("signed", "unsigned"):
-        return eval_expr(expr.args[0], signals, widths, params)
+        return eval_expr(expr.args[0], signals, widths, params, ctx)
     return (0, 32)
 
 
-def eval_val(expr, signals, widths, params) -> int:
-    v, _ = eval_expr(expr, signals, widths, params)
+def eval_val(expr, signals, widths, params, ctx=None) -> Optional[int]:
+    v, _ = eval_expr(expr, signals, widths, params, ctx)
     return v
+
+
+# M4: struct field access helper
+def _eval_member(
+    expr, signals, widths, params, ctx
+) -> Tuple[Optional[int], Optional[int]]:
+    """Evaluate `base.field` for struct packed types."""
+    base_name = expr.base.name if isinstance(expr.base, Identifier) else None
+    if ctx and base_name and base_name in ctx.signal_types:
+        type_name = ctx.signal_types[base_name]
+        for fe in ctx.struct_fields.get(type_name, []):
+            if fe.name == expr.field:
+                base_v, _ = eval_expr(expr.base, signals, widths, params, ctx)
+                if base_v is None:
+                    return (None, fe.width)
+                mask = (1 << fe.width) - 1
+                return ((base_v >> fe.lo) & mask, fe.width)
+    # Fallback: evaluate base (field not found)
+    return eval_expr(expr.base, signals, widths, params, ctx)
+
+
+# M4: unpacked array element access helper
+def _eval_array_element(
+    expr, signals, widths, params, ctx
+) -> Tuple[Optional[int], Optional[int]]:
+    """Evaluate `array[idx]` for unpacked arrays stored in ctx.arrays."""
+    arr_name = expr.base.name
+    idx_v, _ = eval_expr(expr.index, signals, widths, params, ctx)
+    elem_w = ctx.arrays_elem_width.get(arr_name, 1)
+    if idx_v is None:
+        return (None, elem_w)
+    arr = ctx.arrays.get(arr_name, [])
+    idx_i = int(idx_v)
+    if 0 <= idx_i < len(arr):
+        return (arr[idx_i], elem_w)
+    return (0, elem_w)
 
 
 # ---------------------------------------------------------------------------
@@ -358,11 +410,14 @@ class _Executor:
         signals: Dict[str, int],
         widths: Dict[str, int],
         params: Dict[str, int],
+        ctx: Optional[EvalContext] = None,
     ):
         self.signals = dict(signals)
         self.widths = widths
         self.params = params
-        self.nba_queue: List[Tuple[str, int]] = []
+        self.ctx = ctx or _EMPTY_CTX
+        # NBA items: (name, val) for signals, (arr_name, idx, val) for arrays
+        self.nba_queue: List[tuple] = []
         self.display_log: List[str] = []
 
     def execute(self, stmt) -> None:
@@ -371,14 +426,14 @@ class _Executor:
                 self.execute(s)
 
         elif isinstance(stmt, IfStmt):
-            cond = eval_val(stmt.cond, self.signals, self.widths, self.params)
+            cond = eval_val(stmt.cond, self.signals, self.widths, self.params, self.ctx)
             if cond:
                 self.execute(stmt.then_body)
             elif stmt.else_body is not None:
                 self.execute(stmt.else_body)
 
         elif isinstance(stmt, CaseStmt):
-            expr_v = eval_val(stmt.expr, self.signals, self.widths, self.params)
+            expr_v = eval_val(stmt.expr, self.signals, self.widths, self.params, self.ctx)
             matched = False
             default_body = None
             for item in stmt.items:
@@ -386,7 +441,7 @@ class _Executor:
                     default_body = item.body
                 else:
                     for e in item.exprs:
-                        if eval_val(e, self.signals, self.widths, self.params) == expr_v:
+                        if eval_val(e, self.signals, self.widths, self.params, self.ctx) == expr_v:
                             self.execute(item.body)
                             matched = True
                             break
@@ -396,7 +451,7 @@ class _Executor:
                 self.execute(default_body)
 
         elif isinstance(stmt, BlockingAssign):
-            v, w = eval_expr(stmt.rhs, self.signals, self.widths, self.params)
+            v, w = eval_expr(stmt.rhs, self.signals, self.widths, self.params, self.ctx)
             lhs_name = _lhs_name(stmt.lhs)
             if v is None:
                 self.signals[lhs_name] = None
@@ -405,9 +460,19 @@ class _Executor:
                 self.signals[lhs_name] = v & ((1 << sig_w) - 1)
 
         elif isinstance(stmt, NonBlockingAssign):
-            v, _ = eval_expr(stmt.rhs, self.signals, self.widths, self.params)
-            lhs_name = _lhs_name(stmt.lhs)
-            self.nba_queue.append((lhs_name, v))
+            v, _ = eval_expr(stmt.rhs, self.signals, self.widths, self.params, self.ctx)
+            lhs = stmt.lhs
+            # M4: array element write  (e.g. mem[addr] <= data)
+            if (isinstance(lhs, BitSelect) and isinstance(lhs.base, Identifier)
+                    and lhs.base.name in self.ctx.arrays):
+                arr_name = lhs.base.name
+                idx, _ = eval_expr(lhs.index, self.signals, self.widths,
+                                   self.params, self.ctx)
+                if idx is not None:
+                    self.nba_queue.append((arr_name, int(idx), v))
+            else:
+                lhs_name = _lhs_name(lhs)
+                self.nba_queue.append((lhs_name, v))
 
         elif isinstance(stmt, NullStmt):
             pass
@@ -419,7 +484,7 @@ class _Executor:
             self.execute(stmt.init)
             iterations = 0
             while True:
-                cond = eval_val(stmt.cond, self.signals, self.widths, self.params)
+                cond = eval_val(stmt.cond, self.signals, self.widths, self.params, self.ctx)
                 if not cond:
                     break
                 self.execute(stmt.body)
@@ -431,7 +496,7 @@ class _Executor:
         elif isinstance(stmt, WhileStmt):
             iterations = 0
             while True:
-                cond = eval_val(stmt.cond, self.signals, self.widths, self.params)
+                cond = eval_val(stmt.cond, self.signals, self.widths, self.params, self.ctx)
                 if not cond:
                     break
                 self.execute(stmt.body)
@@ -452,11 +517,11 @@ class _Executor:
         if name in ("finish", "stop"):
             raise _FinishSignal()
         if name in ("display", "write", "monitor", "strobe"):
-            args_vals = [eval_val(a, self.signals, self.widths, self.params)
+            args_vals = [eval_val(a, self.signals, self.widths, self.params, self.ctx)
                          for a in stmt.args]
             if stmt.args and isinstance(stmt.args[0], StringLiteral):
                 fmt = stmt.args[0].text
-                arg_vals2 = [eval_val(a, self.signals, self.widths, self.params)
+                arg_vals2 = [eval_val(a, self.signals, self.widths, self.params, self.ctx)
                               for a in stmt.args[1:]]
                 line = _format_display(fmt, arg_vals2)
             else:
@@ -824,8 +889,31 @@ class SimEngine:
         self._time: int = 0
         self._result: SimResult = SimResult()
 
+        # M4: build EvalContext (signed signals, struct fields, arrays)
+        self._ctx: EvalContext = self._build_ctx(design)
+
         # Initial block scheduler (M2)
         self._initial_scheduler: Optional[_InitialScheduler] = None
+
+    # ------------------------------------------------------------------
+    # EvalContext builder  (M4)
+    # ------------------------------------------------------------------
+
+    def _build_ctx(self, design: ElabDesign) -> EvalContext:
+        """Build an EvalContext from the elaborated design."""
+        ctx = EvalContext()
+        # Signs
+        for name, info in design.signals.items():
+            if info.signed:
+                ctx.signs[name] = True
+        # Struct fields
+        ctx.struct_fields = {k: list(v) for k, v in design.struct_fields.items()}
+        ctx.signal_types = dict(design.signal_types)
+        # Unpacked arrays
+        for arr_name, (depth, elem_w) in design.array_decls.items():
+            ctx.arrays[arr_name] = [0] * depth
+            ctx.arrays_elem_width[arr_name] = elem_w
+        return ctx
 
     # ------------------------------------------------------------------
     # Public API
@@ -1005,7 +1093,7 @@ class SimEngine:
         nba: List[Tuple[str, int]] = []
         for proc in self.design.seq_procs:
             if self._is_triggered(proc.sensitivity, sig_name, old_val, new_val):
-                ex = _Executor(self.signals, self._widths, self._params)
+                ex = _Executor(self.signals, self._widths, self._params, self._ctx)
                 try:
                     ex.execute(proc.body)
                 except _FinishSignal:
@@ -1039,9 +1127,22 @@ class SimEngine:
     # Internal: apply NBA queue
     # ------------------------------------------------------------------
 
-    def _apply_nba(self, nba: List[Tuple[str, int]]) -> None:
-        for lhs_name, raw_val in nba:
-            self._write(lhs_name, raw_val)
+    def _apply_nba(self, nba: List[tuple]) -> None:
+        """Apply NBA queue items (signal or array writes)."""
+        for item in nba:
+            if len(item) == 2:
+                lhs_name, raw_val = item
+                self._write(lhs_name, raw_val)
+            elif len(item) == 3:
+                # Array element write: (arr_name, idx, val)
+                arr_name, idx, raw_val = item
+                arr = self._ctx.arrays.get(arr_name)
+                if arr is not None and 0 <= idx < len(arr):
+                    elem_w = self._ctx.arrays_elem_width.get(arr_name, 1)
+                    if raw_val is None:
+                        arr[idx] = None
+                    else:
+                        arr[idx] = raw_val & ((1 << elem_w) - 1)
     # ------------------------------------------------------------------
     # Internal: combinational convergence loop (delta cycles)
     # ------------------------------------------------------------------
@@ -1051,11 +1152,11 @@ class SimEngine:
             changed = False
 
             for proc in self.design.assign_procs:
-                v, w = eval_expr(proc.rhs, self.signals, self._widths, self._params)
-                changed |= _assign_to_lhs(proc.lhs, v, w, self.signals, self._widths)
+                v, w = eval_expr(proc.rhs, self.signals, self._widths, self._params, self._ctx)
+                changed |= _assign_to_lhs(proc.lhs, v, w, self.signals, self._widths, self._ctx)
 
             for proc in self.design.comb_procs:
-                ex = _Executor(self.signals, self._widths, self._params)
+                ex = _Executor(self.signals, self._widths, self._params, self._ctx)
                 try:
                     ex.execute(proc.body)
                 except _FinishSignal:
@@ -1128,11 +1229,9 @@ def _assign_to_lhs(
     width: Optional[int],
     signals: Dict[str, Optional[int]],
     widths: Dict[str, int],
+    ctx: Optional[EvalContext] = None,
 ) -> bool:
-    """Assign *value* to *lhs_expr* in *signals*. Returns True if any signal changed.
-
-    Handles: Identifier, BitSelect (partially), PartSelect (partially), Concat.
-    """
+    """Assign *value* to *lhs_expr* in *signals*. Returns True if any signal changed."""
     from deltasim.parser.ast_nodes import Identifier, Concat, BitSelect, PartSelect
 
     if isinstance(lhs_expr, Identifier):

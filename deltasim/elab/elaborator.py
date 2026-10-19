@@ -91,6 +91,11 @@ class ElabDesign:
     seq_procs: List[SeqProc]
     comb_procs: List[CombProc]
     initial_blocks: List[object] = field(default_factory=list)
+    # M4 additions
+    struct_fields: Dict[str, list] = field(default_factory=dict)   # type_name → [StructFieldEntry]
+    signal_types: Dict[str, str] = field(default_factory=dict)     # sig_name → type_name
+    array_decls: Dict[str, tuple] = field(default_factory=dict)    # array_name → (depth, elem_width)
+    typedefs: Dict[str, int] = field(default_factory=dict)         # type_name → bit-width
 
 
 # ---------------------------------------------------------------------------
@@ -290,13 +295,19 @@ def elaborate(
     signals: Dict[str, SignalInfo] = {}
     for port in module.ports:
         w = _resolve_width(port.net_type, port.dims, params, typedefs)
-        signals[port.name] = SignalInfo(width=w, direction=port.direction, signed=port.signed)
+        signed = port.signed or _is_signed_type(port.net_type)
+        signals[port.name] = SignalInfo(width=w, direction=port.direction, signed=signed)
 
     # ------------------------------------------------------------------
     # 3. Process module body items
     # ------------------------------------------------------------------
     procs = dict(assign=[], seq=[], comb=[], initial=[])
-    _process_items(module.items, params, typedefs, signals, procs, cat)
+    struct_fields: Dict[str, list] = {}
+    signal_types: Dict[str, str] = {}
+    array_decls: Dict[str, tuple] = {}
+
+    _process_items(module.items, params, typedefs, signals, procs, cat,
+                   struct_fields, signal_types, array_decls)
 
     return ElabDesign(
         module_name=module.name,
@@ -306,6 +317,10 @@ def elaborate(
         seq_procs=procs["seq"],
         comb_procs=procs["comb"],
         initial_blocks=procs["initial"],
+        struct_fields=struct_fields,
+        signal_types=signal_types,
+        array_decls=array_decls,
+        typedefs=typedefs,
     )
 
 
@@ -313,19 +328,41 @@ def elaborate(
 # Internal: process a list of module items
 # ---------------------------------------------------------------------------
 
-def _process_items(items, params, typedefs, signals, procs, cat):
+def _process_items(items, params, typedefs, signals, procs, cat,
+                   struct_fields=None, signal_types=None, array_decls=None):
     for item in items:
-        _process_item(item, params, typedefs, signals, procs, cat)
+        _process_item(item, params, typedefs, signals, procs, cat,
+                      struct_fields, signal_types, array_decls)
 
 
-def _process_item(item, params, typedefs, signals, procs, cat):
+def _process_item(item, params, typedefs, signals, procs, cat,
+                  struct_fields=None, signal_types=None, array_decls=None):
     from deltasim.parser.ast_nodes import ParamDecl as AstParamDecl
 
     if isinstance(item, NetDecl):
         w = _resolve_width(item.net_type, item.dims, params, typedefs)
+        signed = item.signed or _is_signed_type(item.net_type)
+        # Check for unpacked array dimension: unpacked_dims stored in item.unpacked_dims (M4)
+        unpacked_dims = getattr(item, 'unpacked_dims', None)
         for name in item.names:
             if name not in signals:
-                signals[name] = SignalInfo(width=w, direction=None, signed=item.signed)
+                if unpacked_dims is not None:
+                    # Array declaration
+                    try:
+                        hi = eval_const(unpacked_dims.hi, params)
+                        lo = eval_const(unpacked_dims.lo, params)
+                    except ElabError:
+                        hi, lo = 15, 0
+                    depth = abs(hi - lo) + 1
+                    if array_decls is not None:
+                        array_decls[name] = (depth, w)
+                    # Register as a signal with width=w (element width)
+                    signals[name] = SignalInfo(width=w, direction=None, signed=signed)
+                else:
+                    signals[name] = SignalInfo(width=w, direction=None, signed=signed)
+                    # Track signal type for struct field access
+                    if item.net_type and item.net_type in typedefs and signal_types is not None:
+                        signal_types[name] = item.net_type
 
     elif isinstance(item, AssignItem):
         procs["assign"].append(AssignProc(lhs=item.lhs, rhs=item.rhs))
@@ -350,19 +387,23 @@ def _process_item(item, params, typedefs, signals, procs, cat):
         procs["initial"].append(item.body)
 
     elif isinstance(item, InstDecl):
-        _flatten_instance(item, params, typedefs, signals, procs, cat)
+        _flatten_instance(item, params, typedefs, signals, procs, cat,
+                          struct_fields, signal_types, array_decls)
 
     elif isinstance(item, GenerateBlock):
-        _process_items(item.items, params, typedefs, signals, procs, cat)
+        _process_items(item.items, params, typedefs, signals, procs, cat,
+                       struct_fields, signal_types, array_decls)
 
     elif isinstance(item, GenerateFor):
-        _elaborate_gen_for(item, params, typedefs, signals, procs, cat)
+        _elaborate_gen_for(item, params, typedefs, signals, procs, cat,
+                           struct_fields, signal_types, array_decls)
 
     elif isinstance(item, GenerateIf):
-        _elaborate_gen_if(item, params, typedefs, signals, procs, cat)
+        _elaborate_gen_if(item, params, typedefs, signals, procs, cat,
+                          struct_fields, signal_types, array_decls)
 
     elif isinstance(item, TypedefDecl):
-        _resolve_typedef(item, params, typedefs)
+        _resolve_typedef(item, params, typedefs, struct_fields)
 
     elif isinstance(item, (AstParamDecl, GenVarDecl, ImportDecl)):
         pass  # already handled or skip
@@ -385,7 +426,7 @@ def _resolve_width(
         return typedefs[net_type]
     # Built-in integer types
     if net_type in ("int", "integer"):
-        return 32
+        return 32   # 32-bit signed
     if net_type == "byte":
         return 8
     if net_type == "shortint":
@@ -395,11 +436,19 @@ def _resolve_width(
     return 1  # 1-bit default for logic/wire/reg/bit/etc.
 
 
+def _is_signed_type(net_type: Optional[str]) -> bool:
+    """Return True if the given type keyword implies signed semantics."""
+    return net_type in ("int", "integer", "shortint", "longint", "byte", "signed")
+
+
 # ---------------------------------------------------------------------------
 # typedef resolution
 # ---------------------------------------------------------------------------
 
-def _resolve_typedef(typedef_decl: TypedefDecl, params: Dict[str, int], typedefs: Dict[str, int]):
+def _resolve_typedef(typedef_decl: TypedefDecl, params: Dict[str, int],
+                     typedefs: Dict[str, int],
+                     struct_fields: Optional[Dict[str, list]] = None):
+    from deltasim.sim.context import StructFieldEntry
     if isinstance(typedef_decl.type_def, EnumTypeDef):
         enum_def = typedef_decl.type_def
         # Compute width
@@ -426,13 +475,26 @@ def _resolve_typedef(typedef_decl: TypedefDecl, params: Dict[str, int], typedefs
     elif isinstance(typedef_decl.type_def, StructTypeDef):
         struct_def = typedef_decl.type_def
         if struct_def.packed:
-            total = sum(
+            # Compute total width and field offsets (MSB first)
+            field_widths = [
                 _resolve_width(f.net_type, f.dims, params, typedefs)
                 for f in struct_def.fields
-            )
+            ]
+            total = sum(field_widths)
             typedefs[typedef_decl.name] = total
+            # Build field entries: fields are packed MSB-first
+            if struct_fields is not None:
+                entries = []
+                bit_offset = total  # start from MSB
+                for f, fw in zip(struct_def.fields, field_widths):
+                    hi = bit_offset - 1
+                    lo = bit_offset - fw
+                    entries.append(StructFieldEntry(
+                        name=f.name, hi=hi, lo=lo, width=fw
+                    ))
+                    bit_offset -= fw
+                struct_fields[typedef_decl.name] = entries
         else:
-            # Unpacked struct — simplify to sum of widths
             total = sum(
                 _resolve_width(f.net_type, f.dims, params, typedefs)
                 for f in struct_def.fields
@@ -483,7 +545,8 @@ def _process_import(imp: ImportDecl, cat, params, typedefs):
 # generate unrolling
 # ---------------------------------------------------------------------------
 
-def _elaborate_gen_for(gen_for: GenerateFor, params, typedefs, signals, procs, cat):
+def _elaborate_gen_for(gen_for: GenerateFor, params, typedefs, signals, procs, cat,
+                       struct_fields=None, signal_types=None, array_decls=None):
     var = gen_for.var
     i = eval_const(gen_for.init, params)
     limit = 10_000
@@ -493,7 +556,8 @@ def _elaborate_gen_for(gen_for: GenerateFor, params, typedefs, signals, procs, c
         cond = eval_const(gen_for.cond, new_params)
         if not cond:
             break
-        _process_items(gen_for.body, new_params, typedefs, signals, procs, cat)
+        _process_items(gen_for.body, new_params, typedefs, signals, procs, cat,
+                       struct_fields, signal_types, array_decls)
         # Evaluate update
         upd = gen_for.update
         if isinstance(upd, BinOp) and upd.op == "=":
@@ -507,15 +571,18 @@ def _elaborate_gen_for(gen_for: GenerateFor, params, typedefs, signals, procs, c
         limit -= 1
 
 
-def _elaborate_gen_if(gen_if: GenerateIf, params, typedefs, signals, procs, cat):
+def _elaborate_gen_if(gen_if: GenerateIf, params, typedefs, signals, procs, cat,
+                      struct_fields=None, signal_types=None, array_decls=None):
     try:
         cond = eval_const(gen_if.cond, params)
     except ElabError:
         cond = 0
     if cond:
-        _process_items(gen_if.then_items, params, typedefs, signals, procs, cat)
+        _process_items(gen_if.then_items, params, typedefs, signals, procs, cat,
+                       struct_fields, signal_types, array_decls)
     elif gen_if.else_items:
-        _process_items(gen_if.else_items, params, typedefs, signals, procs, cat)
+        _process_items(gen_if.else_items, params, typedefs, signals, procs, cat,
+                       struct_fields, signal_types, array_decls)
 
 
 # ---------------------------------------------------------------------------
@@ -529,6 +596,9 @@ def _flatten_instance(
     parent_signals: Dict[str, SignalInfo],
     parent_procs: Dict,
     cat: Dict[str, "Module"],
+    parent_struct_fields=None,
+    parent_signal_types=None,
+    parent_array_decls=None,
 ):
     if inst.module_name not in cat:
         # Unknown module — skip gracefully (external black-box)

@@ -41,8 +41,9 @@ class VCDWriter:
         self._open()
 
     def _open(self) -> None:
-        os.makedirs(os.path.dirname(os.path.abspath(self._path)), exist_ok=True)
-        self._fh = open(self._path, "w", encoding="ascii")
+        from pathlib import Path
+        Path(self._path).parent.mkdir(parents=True, exist_ok=True)
+        self._fh = open(self._path, "w", encoding="ascii", newline="\n")
         self._write_header()
 
     def _write_header(self) -> None:

@@ -59,10 +59,11 @@ class PortDecl:
 @dataclass
 class NetDecl:
     """Internal wire/logic/reg declaration inside a module body."""
-    net_type: str             # 'logic' | 'wire' | 'reg'
-    dims: Optional[Dims]
+    net_type: str             # 'logic' | 'wire' | 'reg' | typedef name
+    dims: Optional[Dims]      # packed dimension [hi:lo]
     names: List[str]
     signed: bool = False
+    unpacked_dims: Optional[Dims] = None  # M4: unpacked array [hi:lo] after name
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +310,15 @@ class ImportDecl:
     """import pkg::*;  or  import pkg::name;"""
     pkg: str
     item: Optional[str]   # None → wildcard (*)
+
+
+# ---------- M4 additions ----------
+
+@dataclass
+class MemberAccess:
+    """expr.field  — struct / packed union field access."""
+    base: Expr
+    field: str
 
 
 # ---------------------------------------------------------------------------

@@ -186,28 +186,35 @@ def gen_cmd(sv_files, top, params, out_dir, spec, tb, no_tb, no_spec):
 @main.command("test")
 @click.argument("sv_files", nargs=-1, required=True, metavar="FILE [FILE …]")
 @click.option("--top", "-t", default=None)
-@click.option("--spec", "-s", required=True, metavar="YAML",
-              help="YAML スペックファイルパス")
+@click.option("--spec", "-s", required=True, metavar="YAML")
 @click.option("--param", "-p", "params", multiple=True, metavar="NAME=VALUE")
-@click.option("--junit", default=None, metavar="PATH",
-              help="JUnit XML 出力パス")
-@click.option("--vcd", default=None, metavar="PATH",
-              help="VCD 出力パス（spec の vcd より優先）")
+@click.option("--junit", default=None, metavar="PATH")
+@click.option("--json", "json_out", default=None, metavar="PATH",
+              help="結果を JSON ファイルに出力")
+@click.option("--vcd", default=None, metavar="PATH")
 @click.option("--verbose", "-v", is_flag=True, default=False)
 @click.option("--no-color", is_flag=True, default=False)
-def test_cmd(sv_files, top, spec, params, junit, vcd, verbose, no_color):
+@click.option("--json-events", is_flag=True, default=False,
+              help="進捗イベントを JSON Lines として stdout に出力")
+def test_cmd(sv_files, top, spec, params, junit, json_out, vcd, verbose, no_color, json_events):
     """YAML スペックに従ってテストを実行し PASS/FAIL を判定する。
 
     Examples:\n
       deltasim test counter.sv --spec counter_spec.yaml\n
-      deltasim test counter.sv --spec counter_spec.yaml --junit report.xml
+      deltasim test counter.sv --spec counter_spec.yaml --junit report.xml\n
+      deltasim test counter.sv --spec counter_spec.yaml --json-events
     """
     from deltasim.tb.scenario import load_scenario, ScenarioError
     from deltasim.tb.runner import TestRunner
     from deltasim.report.terminal import print_results
     from deltasim.report.junit import write_junit
 
-    # Load spec
+    # JSON Lines event emitter
+    def _on_progress(event: dict):
+        if json_events:
+            import json as _json
+            click.echo(_json.dumps(event, ensure_ascii=False))
+
     if not os.path.isfile(spec):
         click.echo(f"ERROR: スペックファイルが見つかりません: {spec!r}", err=True)
         sys.exit(1)
@@ -217,14 +224,10 @@ def test_cmd(sv_files, top, spec, params, junit, vcd, verbose, no_color):
         click.echo(f"ERROR (spec): {e}", err=True)
         sys.exit(1)
 
-    # CLI params override spec values
     param_overrides = _parse_params(params)
-
-    # Determine top from spec or CLI
     top_name = top or scenario.top
     design = _parse_elaborate(sv_files, top_name, param_overrides)
 
-    # CLI --vcd overrides spec
     if vcd:
         scenario.sim.vcd = vcd
 
@@ -233,20 +236,29 @@ def test_cmd(sv_files, top, spec, params, junit, vcd, verbose, no_color):
         f"spec: {spec}  cycles: {scenario.sim.cycles}", err=True
     )
 
-    runner = TestRunner(design, scenario, verbose=verbose)
+    runner = TestRunner(design, scenario, verbose=verbose,
+                        on_progress=_on_progress)
     try:
-        result = runner.run()
-    except SimError as e:
+        run_result = runner.run()
+    except Exception as e:
         click.echo(f"ERROR (sim): {e}", err=True)
         sys.exit(1)
 
-    print_results(result, verbose=verbose, color=not no_color)
+    print_results(run_result, verbose=verbose, color=not no_color)
 
     if junit:
-        write_junit(result, junit)
+        write_junit(run_result, junit)
         click.echo(f"[deltasim test] JUnit XML: {junit}", err=True)
 
-    sys.exit(0 if result.passed else 1)
+    if json_out:
+        from deltasim.result import TestResult
+        tr = TestResult.from_run_result(run_result, design.module_name, scenario.sim.seed)
+        import json as _json
+        from pathlib import Path
+        Path(json_out).write_text(tr.to_json(), encoding="utf-8")
+        click.echo(f"[deltasim test] JSON: {json_out}", err=True)
+
+    sys.exit(0 if run_result.passed else 1)
 
 
 # ---------------------------------------------------------------------------
