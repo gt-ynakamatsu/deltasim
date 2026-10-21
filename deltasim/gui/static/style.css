@@ -270,6 +270,30 @@ select.module-select { width: 100%; padding: 4px 6px; background: var(--surface2
   font-size: 20px; font-weight: 700; color: var(--accent); pointer-events: none; }
 #drop-overlay.visible { display: flex; }
 
+/* ===== §15.12/13 warnings 表示 ===== */
+.top-warnings-block {
+  background: rgba(251, 191, 36, 0.12);
+  border-bottom: 1px solid rgba(251, 191, 36, 0.4);
+  padding: 4px 8px;
+  flex-shrink: 0;
+}
+.top-warn-item {
+  display: flex; align-items: flex-start; gap: 4px;
+  font-size: 10px; padding: 1px 0; color: #fbbf24;
+}
+.top-warn-item .warn-icon { flex-shrink: 0; }
+.top-warn-item .warn-code { font-weight: 700; flex-shrink: 0; color: #f59e0b; }
+.top-warn-item .warn-msg  { color: #d1a846; flex: 1; word-break: break-all; }
+
+.detail-warn-item {
+  display: flex; align-items: flex-start; gap: 4px;
+  font-size: 10px; padding: 2px 4px; border-bottom: 1px solid #2a2a40;
+  color: #fbbf24;
+}
+.detail-warn-item .warn-icon { flex-shrink: 0; }
+.detail-warn-item .warn-code { font-weight: 700; flex-shrink: 0; color: #f59e0b; }
+.detail-warn-item .warn-msg  { color: #d1a846; flex: 1; word-break: break-all; }
+
 /* ===== §12.3 truncated_at 警告バナー ===== */
 .truncated-banner {
   background: rgba(251, 146, 60, 0.18);

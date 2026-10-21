@@ -1,15 +1,8 @@
-"""GUI アダプタ層 — M5/PR#7/PR#8 公開 API (deltasim.api) の薄いラッパー。
+"""GUI アダプタ層 — M5〜v0.2.2 公開 API (deltasim.api) の薄いラッパー。
 
-PR#8（§13 マルチケース）で追加:
-  - TestResult.cases[] (CaseResult) を使用（seed/elapsed_ms/log が per-case）
-  - トップレベル elapsed_ms は非推奨 → summary.elapsed_ms を使用
-  - API は常に TestResult を返す（None なし）
-  - YAML マルチケース書式（cases: リスト）対応
-
-非推奨フィールドを使用しない:
-  - result.elapsed_ms (非推奨) → result.summary.elapsed_ms を参照
-  - case_done バッファ → API が §12.2 準拠（PR#7 で解消済み）
-  - truncated_at warning fallback → case.truncated_at を直接参照
+変更履歴:
+  PR#9〜#14 merge: E_NO_CASE が API 正式実装されたため adapter のラップを削除。
+  §15.12/13: warnings[] を TestResult・CaseResult の両方からレスポンスに含める。
 
 残課題（docs/api.md §未決事項より管理）:
   - §未決事項 #5: Simulator.force() の NBA 抑制精度
@@ -26,7 +19,7 @@ from typing import Callable, Dict, List, Optional
 # 定数
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = "2"  # PR#7 で更新、PR#8 で維持
+SCHEMA_VERSION = "2"
 
 
 # ---------------------------------------------------------------------------
@@ -94,10 +87,9 @@ def list_spec_cases(spec_path: str) -> list:
         sc = load_scenario(spec_path)
         if sc.cases:
             return [c.name for c in sc.cases]
-        # 旧式: ファイル stem が単一ケース名
         return [sc._stem]
-    except Exception as e:
-        return []  # エラーは呼び出し元でハンドリング
+    except Exception:
+        return []
 
 
 def test(
@@ -110,13 +102,13 @@ def test(
     param_overrides: Optional[Dict[str, int]] = None,
     on_progress: Optional[Callable[[dict], None]] = None,
     cancel_event=None,          # threading.Event | None
-    filter_cases: Optional[List[str]] = None,  # ケース名フィルタ（ワイルドカード可）
+    filter_cases: Optional[List[str]] = None,
 ) -> dict:
     """テストを実行して結果 JSON を返す（cases[] ベース）。
 
     filter_cases: ケース名のリスト（fnmatch ワイルドカード可）。
       - None / [] → 全ケース実行
-      - 一致なし → E_NO_CASE エラーを返す（API が PASS/empty を返す場合に adapter でラップ）
+      - 一致なし → API が直接 E_NO_CASE ERROR を返す（PR#9 で正式実装済み）
     """
     import deltasim.api as ds
     from deltasim.result import CancelToken
@@ -145,36 +137,8 @@ def test(
     )
 
     # §13.2: cases[] を使用（per-case details）
+    # CaseResult.to_dict() が warnings[] を含む（§15.13: 空でも常に出力）
     cases = [c.to_dict() for c in result.cases]
-
-    # E_NO_CASE: filter_cases が指定されたが一致するケースが0件
-    # 現状の API は PASS/empty を返すので adapter で ERROR に変換
-    e_no_case = (
-        bool(filter_cases)              # フィルタが指定されている
-        and len(result.cases) == 0      # 一致するケースなし
-        and result.status not in ("ERROR",)  # 既に ERROR でない
-    )
-    if e_no_case:
-        patterns = ", ".join(f"'{p}'" for p in (filter_cases or []))
-        no_case_msg = f"E_NO_CASE: フィルタ {patterns} に一致するケースがありません"
-        if on_progress:
-            _progress_to_sse({"type": "finish", "status": "ERROR"}, on_progress)
-        return {
-            "schema_version": SCHEMA_VERSION,
-            "module": result.module or "",
-            "status": "ERROR",
-            "cancelled": False,
-            "summary": {"total": 0, "pass": 0, "fail": 0, "error": 1, "skip": 0,
-                        "elapsed_ms": 0},
-            "cases": [],
-            "checks": [],
-            "log": [],
-            "errors": [{"file": "", "line": 0, "column": 0, "severity": "error",
-                        "message": no_case_msg, "code": "E_NO_CASE"}],
-            "vcd_path": vcd_path,
-            "truncated_at": None,
-            "e_no_case": True,         # GUI で判別用フラグ
-        }
 
     # summary: §13.1 summary.elapsed_ms が推奨
     total_elapsed = result.summary.get("elapsed_ms", result.elapsed_ms) \
@@ -188,7 +152,6 @@ def test(
     n_skip  = sum(1 for c in result.cases if c.status == "SKIP")
     total   = len(result.cases)
 
-    # エラー（パース失敗等）でケースが空の場合
     if result.status == "ERROR" and total == 0:
         n_error = 1
         total   = 1
@@ -198,22 +161,22 @@ def test(
         "module": result.module,
         "status": result.status,
         "cancelled": result.cancelled,
-        # §13.1: summary.elapsed_ms が推奨、トップレベルは非推奨なので含めない
         "summary": {
             "total": total,
             "pass": n_pass,
             "fail": n_fail,
             "error": n_error,
             "skip": n_skip,
-            "elapsed_ms": total_elapsed,  # §13.1 推奨フィールド
+            "elapsed_ms": total_elapsed,
             "cancelled": result.cancelled,
         },
-        # §13.2: per-case details（name/status/seed/elapsed_ms/checks/log）
         "cases": cases,
-        # backward compat: 集約 checks（非推奨、GUI は cases を使用）
         "checks": [c.to_dict() for c in result.checks],
         "log": result.log,
         "errors": [e.to_dict() for e in result.errors],
+        # §15.12/13: warnings[] は TestResult レベルと cases レベルの両方が API から来る
+        # TestResult.warnings は仕様書のトップレベル warnings（W_UNKNOWN_KEY 等）
+        "warnings": [w.to_dict() for w in result.warnings],
         "vcd_path": vcd_path,
         # §12.3: truncated_at はケースごとに cases[].truncated_at で確認
         "truncated_at": next(
@@ -238,7 +201,7 @@ def run(
     on_progress: Optional[Callable[[dict], None]] = None,
     keep_changes: bool = False,
 ) -> dict:
-    """シミュレーションを実行して結果を返す（PR#8 公開 API 使用版）。"""
+    """シミュレーションを実行して結果を返す（公開 API 使用版）。"""
     import deltasim.api as ds
 
     def _progress(ev: dict) -> None:

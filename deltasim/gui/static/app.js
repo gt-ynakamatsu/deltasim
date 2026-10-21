@@ -558,6 +558,23 @@ function clearResults() {
   dom.summaryBar.innerHTML = "";
   dom.caseDetailPanel.innerHTML = '<div style="color:#8888aa;">ケースを選択すると詳細が表示されます</div>';
   state.selectedCase = null;
+  // トップレベル warnings バナーをクリア
+  const existing = dom.resultList.parentElement?.querySelector("#top-warnings-banner");
+  if (existing) existing.remove();
+}
+
+// §15.12/13: トップレベル warnings[] をバナーとして表示
+function _renderWarningsTop(warnings) {
+  if (!warnings?.length) return "";
+  const items = warnings.map(w => {
+    const icon = w.code === "W_UNKNOWN_KEY" ? "🔑" : "⚠";
+    return `<div class="top-warn-item">
+      <span class="warn-icon">${icon}</span>
+      <span class="warn-code">[${escHtml(w.code)}]</span>
+      <span class="warn-msg">${escHtml(w.message)}</span>
+    </div>`;
+  }).join("");
+  return `<div class="top-warnings-block">${items}</div>`;
 }
 
 function renderResults(result) {
@@ -578,8 +595,20 @@ function renderResults(result) {
   // §13.2: cases[] ベースで表示
   const cases = result.cases ?? [];
 
-  // E_NO_CASE: フィルタに一致するケースがない
-  if (result.e_no_case || (cases.length === 0 && result.status === "ERROR"
+  // §15.12/13: トップレベル warnings[] を表示（E_NO_CASE より先に表示）
+  if ((result.warnings ?? []).length > 0) {
+    const warnHtml = _renderWarningsTop(result.warnings);
+    const warnDiv = document.createElement("div");
+    warnDiv.id = "top-warnings-banner";
+    warnDiv.innerHTML = warnHtml;
+    // 結果ヘッダの後ろに追加（既存の追加があれば削除）
+    const existing = dom.resultList.parentElement?.querySelector("#top-warnings-banner");
+    if (existing) existing.remove();
+    dom.resultList.before(warnDiv);
+  }
+
+  // E_NO_CASE: フィルタに一致するケースがない（API が直接返す）
+  if ((cases.length === 0 && result.status === "ERROR"
       && (result.errors ?? []).some(e => e.code === "E_NO_CASE"))) {
     const errMsg = (result.errors ?? []).find(e => e.code === "E_NO_CASE")?.message
       ?? "フィルタに一致するケースがありません";
@@ -646,8 +675,38 @@ function selectCase(card, c) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// §15.8: checks の時刻を「サイクル4 +3ns（38ns）」形式でフォーマット
+// ---------------------------------------------------------------------------
+
+function _fmtCheckTime(chk) {
+  const cycle = chk.cycle ?? 0;
+  const offset = chk.offset_ns ?? 0;
+  const timeNs = chk.time_ns ?? 0;
+  if (offset > 0) {
+    return `サイクル${cycle} +${offset}ns（${timeNs}ns）`;
+  }
+  return `サイクル${cycle}（${timeNs}ns）`;
+}
+
+// §15.12/13: warnings[] をレンダリング（code で判定・message はそのまま表示）
+function _renderWarnings(warnings) {
+  if (!warnings?.length) return "";
+  return `<div class="detail-section-hdr" style="color:#fbbf24;">⚠ 警告 ${warnings.length} 件</div>`
+    + warnings.map(w => {
+        // §15.13: code で判定（message は解析せずそのまま表示）
+        const icon = w.code === "W_UNKNOWN_KEY" ? "🔑" : "⚠";
+        const loc = w.file ? ` (${w.file}${w.line > 0 ? `:${w.line}` : ""})` : "";
+        return `<div class="detail-warn-item">
+          <span class="warn-icon">${icon}</span>
+          <span class="warn-code">${escHtml(w.code)}</span>
+          <span class="warn-msg">${escHtml(w.message)}${escHtml(loc)}</span>
+        </div>`;
+      }).join("");
+}
+
 function _renderCaseDetail(c) {
-  // 下段: 選択ケースの詳細（checks・message・log）
+  // 下段: 選択ケースの詳細（checks・message・warnings・log）
   const checks = c.checks ?? [];
   const failures = checks.filter(chk => chk.status !== "PASS" && chk.status !== "SKIP");
   const passed  = checks.filter(chk => chk.status === "PASS");
@@ -658,7 +717,7 @@ function _renderCaseDetail(c) {
   if (c.elapsed_ms != null) html += ` <span style="font-weight:400;">${(c.elapsed_ms/1000).toFixed(3)}s</span>`;
   html += `</div>`;
 
-  // message フィールド（仕様書：あれば表示、なければ省略）
+  // message フィールド（あれば表示、なければ省略）
   if (c.message) {
     html += `<div style="padding:2px 4px;color:#a3a3b4;font-size:10px;">${escHtml(c.message)}</div>`;
   }
@@ -673,7 +732,10 @@ function _renderCaseDetail(c) {
     html += `<div style="padding:2px 4px;color:#fb923c;font-size:10px;">${escHtml(errMsg)}</div>`;
   }
 
-  // 失敗 checks
+  // §15.12/13: cases[].warnings[] 表示（code で判定・message はそのまま）
+  html += _renderWarnings(c.warnings ?? []);
+
+  // 失敗 checks（§15.8: 時刻を「サイクル4 +3ns（38ns）」形式で表示）
   if (failures.length > 0) {
     html += `<div class="detail-section-hdr">失敗 ${failures.length} 件</div>`;
     html += failures.slice(0, 50).map(f => `
@@ -681,7 +743,7 @@ function _renderCaseDetail(c) {
         <div class="detail-check-dot" style="background:#f87171;"></div>
         <div class="detail-check-name">${escHtml(f.signal || f.name)}</div>
         <div class="detail-check-val">
-          cycle=${f.cycle}
+          ${escHtml(_fmtCheckTime(f))}
           期待:<b>${escHtml(String(f.expected))}</b>
           実測:<b>${escHtml(String(f.actual))}</b>
         </div>
