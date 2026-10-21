@@ -17,15 +17,16 @@ dependencies = [
 deltasim = "deltasim.cli:main"
 
 [project.optional-dependencies]
-dev = [
-    "pytest>=7.0",
-    "pytest-cov>=4.0",
-]
-# GUI extras (GUI本体は別担当。コア側は FastAPI に依存しない)
+# GUI extras — コア (deltasim 単体) は FastAPI に依存しない
 gui = [
     "fastapi>=0.100",
     "uvicorn[standard]>=0.22",
-    "websockets>=11.0",
+    "httpx>=0.24.0",
+]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "httpx>=0.24.0",
 ]
 
 [tool.setuptools.dynamic]
@@ -34,6 +35,9 @@ version = {attr = "deltasim._version.__version__"}
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["deltasim*"]
+
+[tool.setuptools.package-data]
+deltasim = ["gui/static/*", "gui/static/**/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
