@@ -1103,3 +1103,250 @@ class TestCasesDetailStructure:
         # 全体 >= 各ケースの合計（並行実行でもなければほぼ同値）
         case_total = sum(c.get("elapsed_ms", 0) for c in data["cases"])
         assert data["summary"]["elapsed_ms"] >= 0
+
+
+# ---------------------------------------------------------------------------
+# §15.8 offset_ns 対応: FAIL詳細表示形式・波形ジャンプ
+# ---------------------------------------------------------------------------
+
+DFF_SYNC  = str(EXAMPLES_DIR / "dff_sync.sv")
+DFF_COMB  = str(EXAMPLES_DIR / "dff_comb.sv")
+DFF_ASYNC = str(EXAMPLES_DIR / "dff_async.sv")
+DFF_EX1   = str(EXAMPLES_DIR / "dff_ex1.yaml")
+DFF_EX2   = str(EXAMPLES_DIR / "dff_ex2.yaml")
+
+
+class TestOffsetNs:
+    def test_offset_ns_in_checks(self, client):
+        """checks[] に offset_ns フィールドが常に存在すること"""
+        res = client.post("/api/test", json={
+            "sv_files": [COUNTER_SV],
+            "spec": COUNTER_SPEC,
+        })
+        assert res.status_code == 200
+        data = res.json()
+        for case in data["cases"]:
+            for chk in case["checks"]:
+                assert "offset_ns" in chk
+                assert isinstance(chk["offset_ns"], int)
+
+    def test_offset_ns_zero_for_standard_spec(self, client):
+        """offset_ns を使わない通常のスペックでは常に 0"""
+        res = client.post("/api/test", json={
+            "sv_files": [COUNTER_SV],
+            "spec": COUNTER_SPEC,
+        })
+        assert res.status_code == 200
+        for case in res.json()["cases"]:
+            for chk in case["checks"]:
+                assert chk["offset_ns"] == 0, f"offset_ns should be 0, got {chk['offset_ns']}"
+
+    def test_dff_ex1_sync_passes(self, client):
+        """dff_ex1: 同期リセット版は PASS"""
+        res = client.post("/api/test", json={
+            "sv_files": [DFF_SYNC],
+            "spec": DFF_EX1,
+        })
+        assert res.status_code == 200
+        data = res.json()
+        assert data["status"] == "PASS", f"sync should PASS, got {data['status']}"
+
+    def test_dff_ex1_comb_fails(self, client):
+        """dff_ex1: 組み合わせ版は FAIL（offset_ns チェックで区別）"""
+        res = client.post("/api/test", json={
+            "sv_files": [DFF_COMB],
+            "spec": DFF_EX1,
+        })
+        assert res.status_code == 200
+        data = res.json()
+        assert data["status"] == "FAIL", f"comb should FAIL, got {data['status']}"
+
+    def test_dff_ex1_fail_checks_have_offset_ns(self, client):
+        """dff_ex1 FAIL時に offset_ns > 0 の check が存在すること"""
+        res = client.post("/api/test", json={
+            "sv_files": [DFF_COMB],
+            "spec": DFF_EX1,
+        })
+        assert res.status_code == 200
+        fail_checks = [
+            chk for case in res.json()["cases"]
+            for chk in case["checks"]
+            if chk["status"] != "PASS"
+        ]
+        assert len(fail_checks) > 0
+        # 失敗した checks のうち少なくとも 1 件は offset_ns > 0
+        assert any(chk["offset_ns"] > 0 for chk in fail_checks), \
+            f"Expected offset_ns>0 in failures: {fail_checks}"
+
+    def test_dff_ex1_check_name_format_with_offset(self, client):
+        """offset_ns > 0 の check の name は 'q@cycleN+Mns[spec]' 形式"""
+        res = client.post("/api/test", json={
+            "sv_files": [DFF_COMB],
+            "spec": DFF_EX1,
+        })
+        assert res.status_code == 200
+        all_checks = [
+            chk for case in res.json()["cases"]
+            for chk in case["checks"]
+        ]
+        offset_checks = [chk for chk in all_checks if chk["offset_ns"] > 0]
+        for chk in offset_checks:
+            assert "+" in chk["name"] and "ns" in chk["name"], \
+                f"Offset check name format wrong: {chk['name']}"
+
+    def test_dff_ex1_time_ns_matches_cycle_plus_offset(self, client):
+        """time_ns = サイクル開始時刻 + offset_ns であること"""
+        res = client.post("/api/test", json={
+            "sv_files": [DFF_SYNC],
+            "spec": DFF_EX1,
+        })
+        assert res.status_code == 200
+        period_ns = 10  # dff_ex1 は period_ns=10
+        for case in res.json()["cases"]:
+            for chk in case["checks"]:
+                cycle = chk["cycle"]
+                offset = chk["offset_ns"]
+                time_ns = chk["time_ns"]
+                # 立ち上り時刻 = (cycle-1)*period + period/2 = cycle*period - period/2
+                cycle_posedge = cycle * period_ns - period_ns // 2
+                expected_time = cycle_posedge + offset
+                assert time_ns == expected_time, \
+                    f"time_ns mismatch: cycle={cycle} offset={offset} time_ns={time_ns} expected={expected_time}"
+
+    def test_dff_ex2_sync_passes(self, client):
+        """dff_ex2: 同期リセット版は PASS"""
+        res = client.post("/api/test", json={
+            "sv_files": [DFF_SYNC],
+            "spec": DFF_EX2,
+        })
+        assert res.status_code == 200
+        assert res.json()["status"] == "PASS"
+
+    def test_dff_ex2_async_fails(self, client):
+        """dff_ex2: 非同期リセット版は FAIL"""
+        res = client.post("/api/test", json={
+            "sv_files": [DFF_ASYNC],
+            "spec": DFF_EX2,
+        })
+        assert res.status_code == 200
+        assert res.json()["status"] == "FAIL"
+
+
+# ---------------------------------------------------------------------------
+# §15.12/13 warnings[] の表示
+# ---------------------------------------------------------------------------
+
+class TestWarnings:
+    def test_warnings_always_present_in_result(self, client):
+        """TestResult に warnings[] が常に存在すること（空でも）"""
+        res = client.post("/api/test", json={
+            "sv_files": [COUNTER_SV],
+            "spec": COUNTER_SPEC,
+        })
+        assert res.status_code == 200
+        data = res.json()
+        assert "warnings" in data, "warnings field missing from TestResult"
+        assert isinstance(data["warnings"], list)
+
+    def test_warnings_always_present_in_cases(self, client):
+        """cases[].warnings が常に存在すること（空でも）"""
+        res = client.post("/api/test", json={
+            "sv_files": [COUNTER_SV],
+            "spec": COUNTER_SPEC,
+        })
+        assert res.status_code == 200
+        for case in res.json()["cases"]:
+            assert "warnings" in case, f"warnings missing from case {case['name']}"
+            assert isinstance(case["warnings"], list)
+
+    def test_w_unknown_key_warning(self, client, tmp_path):
+        """知らないキーがある YAML では W_UNKNOWN_KEY 警告が出ること"""
+        from deltasim.gui.filesec import add_extra_root
+        add_extra_root(tmp_path)
+
+        yaml_content = """version: 1
+top: counter
+clock: {signal: clk, period_ns: 10}
+reset: {signal: rst_n, active_low: true, duration_cycles: 10}
+sim: {cycles: 5, seed: 42}
+unknownkey_for_test: should_warn
+expected:
+  - at: 1
+    check: {count: 0}
+"""
+        spec_path = str(tmp_path / "warn_spec.yaml")
+        Path(spec_path).write_text(yaml_content)
+
+        res = client.post("/api/test", json={
+            "sv_files": [COUNTER_SV],
+            "spec": spec_path,
+        })
+        assert res.status_code == 200
+        data = res.json()
+        top_warnings = data.get("warnings", [])
+        case_warnings = [w for case in data.get("cases", [])
+                         for w in case.get("warnings", [])]
+        all_warnings = top_warnings + case_warnings
+        assert len(all_warnings) > 0, "W_UNKNOWN_KEY warning expected but got none"
+        w_codes = [w["code"] for w in all_warnings]
+        assert "W_UNKNOWN_KEY" in w_codes, f"W_UNKNOWN_KEY not found in: {w_codes}"
+
+    def test_warning_message_not_parsed_by_gui(self, client, tmp_path):
+        """GUI は警告の message を解析せず code で判定すること（テスト: code フィールドが存在）"""
+        from deltasim.gui.filesec import add_extra_root
+        add_extra_root(tmp_path)
+        yaml_content = """version: 1
+top: counter
+clock: {signal: clk, period_ns: 10}
+reset: {signal: rst_n, active_low: true, duration_cycles: 10}
+sim: {cycles: 3, seed: 0}
+badkey: x
+expected:
+  - at: 1
+    check: {count: 0}
+"""
+        spec_path = str(tmp_path / "warn2_spec.yaml")
+        Path(spec_path).write_text(yaml_content)
+        res = client.post("/api/test", json={
+            "sv_files": [COUNTER_SV],
+            "spec": spec_path,
+        })
+        assert res.status_code == 200
+        for w in res.json().get("warnings", []):
+            assert "code" in w, "warnings must have code field"
+            assert "message" in w, "warnings must have message field"
+            # GUI は code で判定するため code は文字列であること
+            assert isinstance(w["code"], str)
+
+
+# ---------------------------------------------------------------------------
+# adapter.py: E_NO_CASE dead code削除の確認
+# ---------------------------------------------------------------------------
+
+class TestAdapterCleanup:
+    def test_e_no_case_from_api_not_adapter(self, client):
+        """E_NO_CASE は API から直接返る（adapter のラップなし）"""
+        res = client.post("/api/test", json={
+            "sv_files": [COUNTER_SV],
+            "spec": COUNTER_SPEC,
+            "filter_cases": ["absolutely_nonexistent_xyz"],
+        })
+        assert res.status_code == 200
+        data = res.json()
+        assert data["status"] == "ERROR"
+        err_codes = [e["code"] for e in data.get("errors", [])]
+        assert "E_NO_CASE" in err_codes
+        # adapter の e_no_case フラグは存在しないこと
+        assert "e_no_case" not in data, "Dead code flag e_no_case should be removed"
+
+    def test_warnings_field_in_result(self, client):
+        """adapter が warnings[] を正しく含めること"""
+        res = client.post("/api/test", json={
+            "sv_files": [COUNTER_SV],
+            "spec": COUNTER_SPEC,
+        })
+        assert res.status_code == 200
+        data = res.json()
+        # adapter が warnings を返すこと
+        assert "warnings" in data
+        assert isinstance(data["warnings"], list)
