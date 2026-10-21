@@ -71,6 +71,7 @@ class InputEntry:
     at: Union[int, Tuple[int, int], str]
     set_values: Optional[Dict[str, int]] = None
     random_spec: Optional[Dict[str, object]] = None
+    offset_ns: int = 0          # §15.2: サイクル途中のオフセット (ns)
 
 
 @dataclass
@@ -78,6 +79,7 @@ class ExpectedEntry:
     at: Union[int, Tuple[int, int]]
     check: Optional[Dict[str, int]] = None
     expr: Optional[str] = None
+    offset_ns: int = 0          # §15.2: サイクル途中のオフセット (ns)
 
 
 @dataclass
@@ -119,6 +121,7 @@ class Scenario:
     cases: List[CaseSpec] = field(default_factory=list)
     _base_dir: str = field(default="", compare=False)
     _stem: str = field(default="scenario", compare=False)   # filename stem
+    _warnings: list = field(default_factory=list, compare=False)  # §15.12 WarningInfo
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +137,7 @@ def load_scenario(path: str) -> Scenario:
 
     §13.2 backward compat: if no ``cases:`` key, the whole file is treated as
     a single case whose name = the file's stem (e.g. ``counter_spec``).
+    §15.13: W_UNKNOWN_KEY is emitted for unknown keys at all YAML layers.
     """
     from pathlib import Path as _Path
     with open(path, encoding="utf-8") as f:
@@ -169,8 +173,17 @@ def load_scenario(path: str) -> Scenario:
         vcd=sim.get("vcd"),
     )
 
-    s.inputs = _parse_inputs(data.get("inputs") or [])
-    s.expected = _parse_expected(data.get("expected") or [])
+    # §15.13: 実際に使われたキー名を parent_path に反映
+    _top_inp_key  = "inputs"  if "inputs"  in data else "stimulus"
+    _top_exp_key  = "expected" if "expected" in data else "expect"
+    s.inputs = _parse_inputs(
+        data.get("inputs") or data.get("stimulus") or [],
+        s._warnings, parent_path=_top_inp_key,
+    )
+    s.expected = _parse_expected(
+        data.get("expected") or data.get("expect") or [],
+        s._warnings, parent_path=_top_exp_key,
+    )
 
     if data.get("model"):
         m = data["model"]
@@ -184,7 +197,7 @@ def load_scenario(path: str) -> Scenario:
     raw_cases = data.get("cases")
     if raw_cases is not None:
         seen_names: set = set()
-        for rc in raw_cases:
+        for i_rc, rc in enumerate(raw_cases):
             cname = rc.get("name")
             if not cname:
                 raise ScenarioError(f"cases entry missing required 'name': {rc}")
@@ -217,10 +230,19 @@ def load_scenario(path: str) -> Scenario:
                     duration_cycles=int(rst2.get("duration_cycles", 10)),
                 )
             # Stimulus/expect — support both "inputs"/"expected" and "stimulus"/"expect"
+            # §15.13: 実際に使われたキー名を parent_path に反映
+            _inp_key = "inputs" if "inputs" in rc else "stimulus"
+            _exp_key = "expected" if "expected" in rc else "expect"
             inp_raw = rc.get("inputs") or rc.get("stimulus") or []
             exp_raw = rc.get("expected") or rc.get("expect") or []
-            case.inputs = _parse_inputs(inp_raw)
-            case.expected = _parse_expected(exp_raw)
+            case.inputs = _parse_inputs(
+                inp_raw, s._warnings,
+                parent_path=f"cases[{i_rc}].{_inp_key}",
+            )
+            case.expected = _parse_expected(
+                exp_raw, s._warnings,
+                parent_path=f"cases[{i_rc}].{_exp_key}",
+            )
 
             if "model" in rc:
                 m = rc["model"]
@@ -232,41 +254,153 @@ def load_scenario(path: str) -> Scenario:
             s.cases.append(case)
     # else: no cases: key → legacy single-case (s.cases stays empty)
 
+    # ----------------------------------------------------------------
+    # §15.13: W_UNKNOWN_KEY — check all YAML layers AFTER parsing
+    # ----------------------------------------------------------------
+    # (constants defined below this function, forward-ref OK in Python)
+    # トップレベルは path="" → "{key}: 不明なキーは無視されます"
+    _warn_unknown(data, _KNOWN_TOP_KEYS, "", s._warnings)
+    if isinstance(data.get("clock"), dict):
+        _warn_unknown(data["clock"], _KNOWN_CLOCK_KEYS, "clock", s._warnings)
+    if isinstance(data.get("reset"), dict):
+        _warn_unknown(data["reset"], _KNOWN_RESET_KEYS, "reset", s._warnings)
+    if isinstance(data.get("sim"), dict):
+        _warn_unknown(data["sim"], _KNOWN_SIM_KEYS, "sim", s._warnings)
+    if raw_cases is not None:
+        for i_rc, rc in enumerate(raw_cases):
+            _warn_unknown(rc, _KNOWN_CASE_KEYS, f"cases[{i_rc}]", s._warnings)
+            if isinstance(rc.get("clock"), dict):
+                _warn_unknown(rc["clock"], _KNOWN_CLOCK_KEYS,
+                              f"cases[{i_rc}].clock", s._warnings)
+            if isinstance(rc.get("reset"), dict):
+                _warn_unknown(rc["reset"], _KNOWN_RESET_KEYS,
+                              f"cases[{i_rc}].reset", s._warnings)
+
     return s
 
 
-def _parse_inputs(raw: list) -> List[InputEntry]:
+# ---------------------------------------------------------------------------
+# §15.13: 既知キー定義（全階層）
+# ---------------------------------------------------------------------------
+
+# stimulus/expect アイテムの既知キー（§15.12 から継承）
+_KNOWN_INPUT_KEYS = frozenset({"at", "set", "random", "offset_ns"})
+_KNOWN_EXPECT_KEYS = frozenset({"at", "check", "expr", "offset_ns"})
+
+# トップレベルの既知キー
+_KNOWN_TOP_KEYS = frozenset({
+    "version", "top",
+    "clock", "reset", "sim",
+    "inputs", "stimulus",   # aliases
+    "expected", "expect",   # aliases
+    "model",
+    "skip", "skip_reason",
+    "cases",
+})
+
+# clock/reset/sim の既知キー
+_KNOWN_CLOCK_KEYS = frozenset({"signal", "period_ns"})
+_KNOWN_RESET_KEYS = frozenset({"signal", "active_low", "duration_cycles"})
+_KNOWN_SIM_KEYS   = frozenset({"cycles", "seed", "vcd"})
+
+# cases[] 各ケースの直下の既知キー
+_KNOWN_CASE_KEYS = frozenset({
+    "name", "skip", "skip_reason",
+    "seed", "cycles",
+    "clock", "reset",
+    "inputs", "stimulus",   # aliases
+    "expected", "expect",   # aliases
+    "model",
+})
+
+
+def _warn_unknown(data: dict, known: frozenset, path: str, warnings_out) -> None:
+    """Emit W_UNKNOWN_KEY for any key in data not in known set.
+
+    §15.13: message は「{path}.{key}: 不明なキーは無視されます」形式。
+    path が空文字のときは「{key}: ...」（トップレベル）。
+    """
+    if warnings_out is None or not isinstance(data, dict):
+        return
+    from deltasim.result import WarningInfo
+    for k in data:
+        if k not in known:
+            key_path = f"{path}.{k}" if path else k
+            warnings_out.append(WarningInfo(
+                message=f"{key_path}: 不明なキーは無視されます",
+                code="W_UNKNOWN_KEY",
+            ))
+
+
+def _parse_inputs(raw: list, warnings_out=None, parent_path: str = "stimulus") -> List[InputEntry]:
+    """Parse inputs list. Collects W_UNKNOWN_KEY warnings into warnings_out.
+
+    §15.13: parent_path は呼び出し側が渡す（例: "stimulus", "cases[0].inputs"）。
+    メッセージ例: "cases[0].stimulus[2].ofset_ns: 不明なキーは無視されます"
+    """
+    from deltasim.result import WarningInfo
     result = []
-    for entry in raw:
+    for i, entry in enumerate(raw):
         if "at" not in entry:
             raise ScenarioError(f"inputs entry missing 'at': {entry}")
         at = _parse_at(entry["at"])
-        inp = InputEntry(at=at)
+        offset = _parse_offset_ns(entry, i, "stimulus", warnings_out)
+        inp = InputEntry(at=at, offset_ns=offset)
         if "set" in entry:
             inp.set_values = {k: int(v) for k, v in entry["set"].items()}
         elif "random" in entry:
             inp.random_spec = dict(entry["random"])
         else:
             raise ScenarioError(f"inputs entry has neither 'set' nor 'random': {entry}")
+        # W_UNKNOWN_KEY
+        if warnings_out is not None:
+            for k in entry:
+                if k not in _KNOWN_INPUT_KEYS:
+                    warnings_out.append(WarningInfo(
+                        message=f"{parent_path}[{i}].{k}: 不明なキーは無視されます",
+                        code="W_UNKNOWN_KEY",
+                    ))
         result.append(inp)
     return result
 
 
-def _parse_expected(raw: list) -> List[ExpectedEntry]:
+def _parse_expected(raw: list, warnings_out=None, parent_path: str = "expect") -> List[ExpectedEntry]:
+    """Parse expected list. Collects W_UNKNOWN_KEY warnings into warnings_out.
+
+    §15.13: parent_path は呼び出し側が渡す（例: "expect", "cases[0].expected"）。
+    """
+    from deltasim.result import WarningInfo
     result = []
-    for entry in raw:
+    for i, entry in enumerate(raw):
         if "at" not in entry:
             raise ScenarioError(f"expected entry missing 'at': {entry}")
         at = _parse_at(entry["at"])
-        exp = ExpectedEntry(at=at)
+        offset = _parse_offset_ns(entry, i, "expect", warnings_out)
+        exp = ExpectedEntry(at=at, offset_ns=offset)
         if "check" in entry:
             exp.check = {k: int(v) for k, v in entry["check"].items()}
         elif "expr" in entry:
             exp.expr = str(entry["expr"])
         else:
             raise ScenarioError(f"expected entry has neither 'check' nor 'expr': {entry}")
+        # W_UNKNOWN_KEY
+        if warnings_out is not None:
+            for k in entry:
+                if k not in _KNOWN_EXPECT_KEYS:
+                    warnings_out.append(WarningInfo(
+                        message=f"{parent_path}[{i}].{k}: 不明なキーは無視されます",
+                        code="W_UNKNOWN_KEY",
+                    ))
         result.append(exp)
     return result
+
+
+def _parse_offset_ns(entry: dict, idx: int, kind: str, warnings_out) -> int:
+    """Read offset_ns from entry dict (raw value; range not validated here)."""
+    v = entry.get("offset_ns", 0)
+    if v == 0 or v is None:
+        return 0
+    return v  # actual int/float validation done in validate_offset_ns()
 
 
 def _parse_at(val) -> Union[int, Tuple[int, int], str]:
@@ -283,8 +417,68 @@ def _parse_at(val) -> Union[int, Tuple[int, int], str]:
 # Stimulus schedule
 # ---------------------------------------------------------------------------
 
+def validate_offset_ns(scenario: "Scenario", spec_path: str = "") -> list:
+    """§15.6: 全ケースの offset_ns を検証して ErrorInfo リストを返す。
+
+    effective period_ns = case.clock.period_ns if set, else scenario.clock.period_ns
+    """
+    from deltasim.result import ErrorInfo
+    errors = []
+
+    def _check_items(items, case_name: str, kind: str, period: int):
+        for i, entry in enumerate(items):
+            off = entry.offset_ns
+            # 整数かつ 0 <= off < period
+            if not isinstance(off, int) or isinstance(off, bool):
+                errors.append(ErrorInfo(
+                    file=spec_path, severity="error", code="E_OFFSET_RANGE",
+                    message=(
+                        f"cases[{case_name}].{kind}[{i}]: "
+                        f"offset_ns={off!r} は範囲外です"
+                        f"（0 以上 {period} 未満の整数）"
+                    ),
+                ))
+            elif not (0 <= off < period):
+                errors.append(ErrorInfo(
+                    file=spec_path, severity="error", code="E_OFFSET_RANGE",
+                    message=(
+                        f"cases[{case_name}].{kind}[{i}]: "
+                        f"offset_ns={off} は範囲外です"
+                        f"（0 以上 {period} 未満の整数）"
+                    ),
+                ))
+
+    def _process_case(case_name: str, inputs, expected, period: int):
+        _check_items(inputs, case_name, "stimulus", period)
+        _check_items(expected, case_name, "expect", period)
+
+    # top-level inputs/expected (legacy single-case)
+    top_period = scenario.clock.period_ns
+    if scenario.inputs or scenario.expected:
+        _process_case(scenario._stem, scenario.inputs, scenario.expected, top_period)
+
+    # cases
+    for case in scenario.cases:
+        eff_period = case.clock.period_ns if case.clock else top_period
+        _process_case(
+            case.name,
+            case.inputs if case.inputs else scenario.inputs,
+            case.expected if case.expected else scenario.expected,
+            eff_period,
+        )
+    return errors
+
+
+# ---------------------------------------------------------------------------
+# Stimulus schedule
+# ---------------------------------------------------------------------------
+
 class StimulusSchedule:
-    """Pre-computes the input values to apply at each cycle (1-indexed)."""
+    """Pre-computes the input values to apply at each (cycle, offset_ns).
+
+    §15.2: keyed by (cycle, offset_ns) to support sub-cycle stimuli.
+    Backward-compatible: get(cycle) is equivalent to get(cycle, 0).
+    """
 
     def __init__(
         self,
@@ -293,12 +487,14 @@ class StimulusSchedule:
         seed: int = 0,
     ):
         self._rng = _random_mod.Random(seed)
-        self._schedule: Dict[int, Dict[str, int]] = {}
+        # (cycle, offset_ns) -> {signal: value}
+        self._schedule: Dict[tuple, Dict[str, int]] = {}
         self._build(inputs, total_cycles)
 
     def _build(self, inputs: List[InputEntry], total_cycles: int) -> None:
         for entry in inputs:
             cycles = sorted(_expand_at(entry.at, total_cycles))
+            offset = entry.offset_ns  # §15.2
             for cycle in cycles:
                 vals: Dict[str, int] = {}
                 if entry.set_values:
@@ -306,11 +502,15 @@ class StimulusSchedule:
                 elif entry.random_spec:
                     for sig, spec in entry.random_spec.items():
                         vals[sig] = self._sample(spec)
-                self._schedule.setdefault(cycle, {}).update(vals)
+                self._schedule.setdefault((cycle, offset), {}).update(vals)
 
-    def get(self, cycle: int) -> Dict[str, int]:
-        """Input values to apply before posedge of *cycle* (1-indexed)."""
-        return self._schedule.get(cycle, {})
+    def get(self, cycle: int, offset_ns: int = 0) -> Dict[str, int]:
+        """Input values to apply at (cycle, offset_ns). offset_ns=0 → posedge."""
+        return self._schedule.get((cycle, offset_ns), {})
+
+    def offsets_for_cycle(self, cycle: int) -> set:
+        """All unique offset_ns values for a given cycle."""
+        return {off for (c, off) in self._schedule if c == cycle}
 
     def _sample(self, spec) -> int:
         if isinstance(spec, (int, float)):

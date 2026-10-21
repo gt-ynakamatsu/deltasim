@@ -129,6 +129,7 @@ for ev in ds.test_events(["counter.sv"], "spec.yaml"):
 ```json
 {
   "schema_version": "2",
+  "deltasim_version": "0.2.0",
   "module": "counter",
   "status": "PASS",
   "seed": 42,
@@ -141,7 +142,7 @@ for ev in ds.test_events(["counter.sv"], "spec.yaml"):
       "status": "PASS",
       "signal": "count",
       "cycle": 11,
-      "time_ns": 110,
+      "time_ns": 105,  // §15修正: posedge時刻は(N-1)*period+hp=105ns
       "expected": "00000001",
       "actual": "00000001",
       "source": "spec",
@@ -192,6 +193,21 @@ deltasim test counter.sv --spec counter_spec.yaml --json-events  # JSON Lines
 | `column` | `int` | 列番号 (0 = 不明) |
 | `severity` | `"error" \| "warning"` | 深刻度 |
 | `message` | `str` | エラーメッセージ |
+| `code` | `str` | エラーコード |
+
+### §16 エラーコード E001（パース・構文エラー）
+
+`E001` はパーサまたはレキサーが入力を解析できなかったときに発生します。
+**どんな入力でも有限の時間で終わります**（v0.2.2 で修正）。
+
+| 状況 | message の例 |
+|------|------------|
+| `endmodule` がない | `endmodule がありません（module 'foo' は 1 行目で開始）` |
+| `end` がない（begin…end ブロック） | `unexpected EOF inside begin…end block` |
+| 括弧が閉じていない | `expected ')', got 'endmodule'` |
+| module 宣言がない（空ファイル等） | `No module declaration found` |
+| 閉じていない `/* ... */` コメント | `閉じていないブロックコメント /* が EOF に達しました` |
+| 閉じていない文字列リテラル | `閉じていない文字列リテラルが EOF に達しました` |
 | `code` | `str` | エラーコード (例: `"E001"`) |
 
 ---
@@ -326,7 +342,7 @@ sim.release("rst_n")
 ```json
 {
   "schema_version": "2",
-  "time_ns": 110,
+  "time_ns": 105,  // §15修正: posedge時刻は(N-1)*period+hp=105ns
   "signals": {"clk": 1, "rst_n": 1, "count": 10},
   "changes": [["count", 10]],
   "breakpoint_hit": 0
@@ -660,3 +676,333 @@ deltasim test counter.sv --spec spec.yaml --case a --case b  # 複数指定
 5. **`Simulator.force()` の精度**: 現在の実装では pre-posedge hook で適用するため、NBA の影響を完全に抑制できない場合がある (完全な force は将来対応)。
 6. **階層シグナルパスの VCD**: 現在は `$scope` なしのフラット展開。`top.u_add.sum` 形式は将来対応。
 7. **`test()` の elapsed_ms**: 各 check の `elapsed_ms` は概算 (チェック1件あたりの処理時間)。
+
+---
+
+## §14 PR #8 仮決め点の確定（2026-10-19 15:55）
+
+### §14.1 `--case` で全ケースが除外された場合
+
+```python
+# 全除外時の TestResult
+{
+  "schema_version": "2",
+  "status": "ERROR",        # PASS ではなく ERROR
+  "cases": [],
+  "errors": [
+    {
+      "code": "E_NO_CASE",
+      "severity": "error",
+      "message": "--case フィルタ 'xyz' に一致するケースがありません"
+    }
+  ]
+}
+```
+
+| 動作 | 説明 |
+|------|------|
+| `status` | `"ERROR"` |
+| `cases` | `[]` |
+| `errors[].code` | `"E_NO_CASE"` |
+| `errors[].message` | 指定パターンを含む |
+| CLI 終了コード | 非 0 |
+| `--json` | 正しい JSON を stdout に出力（stderr で非 0 終了）|
+| 戻り値型 | `TestResult`（`None` にはならない）|
+
+CIで「何も実行されずにPASS」を防ぐための仕様です。
+
+### §14.2 `--case` の fnmatch 記法
+
+`--case` および `filter_cases` は Python `fnmatch` に準拠します:
+
+| パターン | 説明 | 例 |
+|---------|------|-----|
+| `*` | 任意の文字列 | `test_*` → test_a, test_b |
+| `?` | 任意の 1 文字 | `test_?1` → test_a1 |
+| `[abc]` | 文字クラス | `test_[ab]?` → test_a1, test_b2 |
+| `[a-z]` | 文字範囲 | `case_[0-9]` → case_0, case_1 |
+
+複数パターンはいずれかに一致すれば実行されます（OR 条件）。
+
+### §14.3 `cases[].message` フィールド
+
+各 `CaseResult` の `message` は状態ごとに以下の値を持ちます。
+
+| status | message の値 |
+|--------|-------------|
+| `SKIP` | `skip_reason`（空なら `"skipped"`） |
+| `SKIP`（キャンセル） | `"cancelled"` |
+| `ERROR` | エラー要約（`errors[0].message`） |
+| `PASS` | `""` ← **§14 では未定義 → 空文字列を使用**（後述） |
+| `FAIL` | `""` ← **§14 では未定義 → 空文字列を使用**（後述） |
+
+`case_done` イベントにも `message` が含まれます:
+
+```json
+{"type": "case_done", "name": "my_case", "status": "SKIP",
+ "message": "CI対象外", "elapsed_ms": 0.1}
+```
+
+> **未定義事項 (§14.3)**: PASS / FAIL の `message` に何を入れるかは仕様書に記載がありません。
+> 現実装は空文字列（`""`）としており、最終報告に記載しています。
+
+---
+
+
+---
+
+## §15 サイクル途中の刺激と確認（offset_ns）（2026-10-19 17:10 確定）
+
+### §15.1 現行の時刻の決まり
+
+`at: N`（1始まり）はN回目の立ち上りで、時刻 = `(N-1)×period_ns + period_ns/2`。  
+**例**: period_ns=10 で at:N → `10N-5ns`（5, 15, 25, 35…）
+
+> **注意**: docs §2.2 の例に `cycle: 11, time_ns: 110` とありますが、  
+> 正しくは `time_ns: 105` です（posedge の時刻）。
+
+### §15.2 offset_ns 書式
+
+stimulus / expect の各項目に `offset_ns`（整数、省略時 = 0）を追加できます:
+
+```yaml
+cases:
+  - name: hold_between_edges
+    stimulus:
+      - {at: 3, set: {d: 1}}                 # 25ns（省略 = offset_ns:0）
+      - {at: 3, offset_ns: 3, set: {d: 0}}   # 28ns
+    expect:
+      - {at: 3, offset_ns: 4, check: {q: 1}} # 29ns
+```
+
+- 時刻 = `(at:N の時刻) + offset_ns`
+- 値: `0 ≤ offset_ns < period_ns`（ケースの実効 period_ns）
+- `at` が範囲 / `"*"` の場合は各サイクルに同じ offset_ns を適用
+- `offset_ns: 0` と省略は完全に同じ動き（name も同じ）
+
+### §15.3 同一時刻での処理順
+
+各時刻 T で以下の順に処理します:
+1. `offset_ns=0` のみ: エンジンのリセット制御（§15.5）
+2. その時刻の刺激をすべて書き込む（YAML記載順・同一信号は後勝ち）
+3. 値が変わった信号のエッジ検出 → NBA反映 → デルタサイクル収束（§15.4）
+4. T がクロックエッジならクロックを変えて NBA反映 → 収束
+5. その時刻の expect を確認
+6. `offset_ns=0` のみ: 参照モデルとの比較
+
+### §15.4 刺激でのエッジ検出
+
+刺激で値が変わった信号について、`posedge`/`negedge` を感度に持つ `always_ff` を起動します。
+
+### §15.5 リセット信号の扱い
+
+エンジンのリセット制御が書き込むのは **2回のみ**:
+1. 開始時（シミュレーション初期化）: リセットをアサート
+2. `duration_cycles` 経過時: 解除（`N = duration_cycles+1` のポーズ前）
+
+解除後はリセット信号を普通の入力として扱います（刺激で上書き可）。  
+※ リセット期間中に刺激でリセット信号を書くことは推奨しません（解除時刻に解除されます）。
+
+### §15.6 範囲外エラー (E_OFFSET_RANGE)
+
+| 条件 | 挙動 |
+|------|------|
+| 負の値 | `status="ERROR"`, `errors[].code="E_OFFSET_RANGE"` |
+| `period_ns` 以上 | 同上 |
+| 整数でない（小数・文字列・bool） | 同上 |
+
+エラーメッセージ例:  
+`cases[hold_between_edges].expect[2]: offset_ns=10 は範囲外です（0 以上 10 未満の整数）`
+
+仕様YAML読み込み時（シミュレーション開始前）に全項目を検査し、まとめて報告します。
+
+### §15.7 結果JSON の変更点
+
+```json
+{
+  "checks": [
+    {
+      "name": "q@cycle3[spec]",     // offset_ns=0: 従来どおり
+      "cycle": 3,
+      "time_ns": 25,                // 実際の確認時刻
+      "offset_ns": 0                // 追加フィールド
+    },
+    {
+      "name": "q@cycle3+4ns[spec]", // offset_ns>0: +Xns が付く
+      "cycle": 3,
+      "time_ns": 29,
+      "offset_ns": 4
+    }
+  ]
+}
+```
+
+- `time_ns`: at:N の時刻 + offset_ns（実際の確認時刻）
+- `offset_ns`: 追加フィールド（省略時は 0）
+- `schema_version`: "2" のまま（任意フィールドの追加のため）
+
+### §15.12 未知キーの扱い (W_UNKNOWN_KEY)
+
+仕様YAMLに知らないキーがあると、結果JSON の `warnings[]` に `W_UNKNOWN_KEY` を出力します:
+
+```json
+{"warnings": [{"code": "W_UNKNOWN_KEY", "message": "stimulus[0].foo: 不明なキーは無視されます"}]}
+```
+
+---
+
+## §15.13 PR #10 残り事項の確定（2026-10-19 確定）
+
+### §15.13.1 W_UNKNOWN_KEY の適用範囲
+
+§15.12 から拡張し、YAML のどの階層に未知キーがあっても `W_UNKNOWN_KEY` を出します。
+`message` にはキーの場所をパス形式で含めます。
+
+**既知キー一覧（全階層）**
+
+| 階層 | 既知キー |
+|------|---------|
+| トップレベル | `version`, `top`, `clock`, `reset`, `sim`, `inputs`, `stimulus`, `expected`, `expect`, `model`, `skip`, `skip_reason`, `cases` |
+| `clock` | `signal`, `period_ns` |
+| `reset` | `signal`, `active_low`, `duration_cycles` |
+| `sim` | `cycles`, `seed`, `vcd` |
+| `cases[]` 各ケース | `name`, `skip`, `skip_reason`, `seed`, `cycles`, `clock`, `reset`, `inputs`, `stimulus`, `expected`, `expect`, `model` |
+| `cases[].clock` | `signal`, `period_ns` |
+| `cases[].reset` | `signal`, `active_low`, `duration_cycles` |
+| `stimulus` / `inputs` 各アイテム | `at`, `set`, `random`, `offset_ns` |
+| `expect` / `expected` 各アイテム | `at`, `check`, `expr`, `offset_ns` |
+
+**メッセージの例:**
+
+`message` はキーまでを含むドット区切りパスで始まります（`{path}: 不明なキーは無視されます`）。
+トップレベルはパスなしでキー名がそのまま先頭になります。
+
+| 未知キーの場所 | message の例 |
+|--------------|------------|
+| トップレベル | `BOGUS: 不明なキーは無視されます` |
+| `clock` 配下 | `clock.jitter: 不明なキーは無視されます` |
+| `reset` 配下 | `reset.polarity: 不明なキーは無視されます` |
+| `sim` 配下 | `sim.timeout: 不明なキーは無視されます` |
+| `cases[0]` 直下 | `cases[0].skpi: 不明なキーは無視されます` |
+| `cases[1].clock` 配下 | `cases[1].clock.edge: 不明なキーは無視されます` |
+| `cases[2].reset` 配下 | `cases[2].reset.hold: 不明なキーは無視されます` |
+| `stimulus[0]` アイテム（トップレベル or `cases[i]` 内） | `stimulus[0].foo: 不明なキーは無視されます` |
+| `cases[0].stimulus[2]` アイテム | `cases[0].stimulus[2].ofset_ns: 不明なキーは無視されます` |
+| `cases[0].inputs[0]` アイテム（`inputs` と書いた場合） | `cases[0].inputs[0].foo: 不明なキーは無視されます` |
+| `expect[1]` アイテム | `expect[1].bar: 不明なキーは無視されます` |
+
+### §15.13.2 `warnings` の常時出力
+
+`TestResult` および `CaseResult` の両方について、`to_dict()` が返す JSON オブジェクトに
+`warnings` キーを常に含めます。警告がない場合は `[]` として出力します。
+これにより `schema_version` は `"2"` のままです（任意フィールドの追加のため互換）。
+
+**出力例（警告なし）:**
+
+```json
+{
+  "schema_version": "2",
+  "status": "PASS",
+  "warnings": [],
+  "cases": [
+    {
+      "name": "basic",
+      "status": "PASS",
+      "warnings": []
+    }
+  ]
+}
+```
+
+**移行ガイド:**  
+`"warnings" in result_dict` のような存在チェックは不要になります。
+旧 API は `warnings` が空のとき省略していたため、既存コードが `d.get("warnings", [])` を
+使っている場合はそのまま動作します。
+
+---
+
+
+## バージョン管理
+
+### ツール版 (`deltasim_version`)
+
+`TestResult.to_dict()` および `deltasim test --json` の出力のトップレベルに `deltasim_version` フィールドが含まれます。  
+値は `deltasim.__version__`（`pyproject.toml` の `version` から自動取得）と常に一致します。
+
+```json
+{
+  "schema_version": "2",
+  "deltasim_version": "0.2.0"
+}
+```
+
+- `schema_version` はJSON構造の互換性を表し、任意フィールドの追加では変わりません（現在 `"2"`）。
+- `deltasim_version` はツール自体のリリース版を表します。
+- `--json-events` の各イベントには `deltasim_version` を含みません（開始イベント等は対象外）。
+
+### バージョン定義の場所
+
+| 場所 | 内容 |
+|------|------|
+| `deltasim/_version.py` の `__version__` | **唯一の定義箇所**（ここを変えるだけで全箇所に反映） |
+| `deltasim.__version__` | `deltasim._version.__version__` を import（常に一致） |
+| `pyproject.toml` の `dynamic = ["version"]` | `[tool.setuptools.dynamic]` 経由で `_version.__version__` を参照 |
+| `deltasim --version` | `deltasim.__version__` を表示 |
+| `TestResult.to_dict()["deltasim_version"]` | `deltasim.__version__` と同値 |
+
+---
+
+## v0.2.1 変更点
+
+### ANSI 複数ポート名宣言
+
+IEEE 1800 の ANSI スタイルで、1つの方向・型・幅の後に複数の名前を並べる書き方を受け付けます。
+
+```systemverilog
+module dff(input logic clk, rst, d, output logic q);
+  always_ff @(posedge clk) if (!rst) q <= 0; else q <= d;
+endmodule
+```
+
+後続の名前は直前の方向・型・幅を引き継ぎます。複数行にまたがる書き方も動作します。
+
+### 無限ループ対策（`E_DELTA_LIMIT` / `E_LOOP_LIMIT`）
+
+#### `E_DELTA_LIMIT` — 組み合わせループ検出
+
+`assign y = ~y;` のように収束しない組み合わせ論理が delta サイクル上限を超えると `E_DELTA_LIMIT` エラーになります。
+
+| 項目 | 内容 |
+|------|------|
+| デフォルト上限 | 10,000 delta サイクル |
+| CLI オプション | `--max-delta N` |
+| 公開 API 引数 | `max_delta=N`（`test()` の引数） |
+| エラーコード | `E_DELTA_LIMIT` |
+| message 例 | `E_DELTA_LIMIT: 0ns でデルタサイクルが 5 回を超えました（変化し続けている信号: y）` |
+
+#### `E_LOOP_LIMIT` — 無限ループ検出
+
+`while (1)`、`for (i = 0; 1; ...)` などのループが反復上限を超えると `E_LOOP_LIMIT` エラーになります。
+
+| 項目 | 内容 |
+|------|------|
+| デフォルト上限 | 1,000,000 反復/ループ実行 |
+| CLI オプション | `--max-loop N` |
+| 公開 API 引数 | `max_loop=N`（`test()` の引数） |
+| エラーコード | `E_LOOP_LIMIT` |
+| message 例 | `E_LOOP_LIMIT: 5ns の for loop が 100 回を超えました` |
+
+#### エラー時の動作
+
+- `status = "ERROR"`, `errors[]` に `code` と `message` を含む `ErrorInfo` が入ります。
+- 该当ケース (`cases[].status`) も `"ERROR"` になり `cases[].errors[]` にも入ります。
+- トップレベル `errors[]` にも伝播します。
+- **他のケースは続行します**（最初のエラーケースで中断しません）。
+- VCD はエラー発生時点までを正しく閉じます。
+
+#### `--json` 時の常時出力
+
+`deltasim test --json path.json` を付けた場合、想定外の例外（`RecursionError` 含む）でも必ず JSON を出力します。想定外例外のコードは `E_INTERNAL`、`message` に例外の型と内容、トレースバックは `stderr` に出力されます。
+
+`schema_version` は `"2"` のまま変わりません。
+

@@ -1,0 +1,19 @@
+# 例1：立ち上りの間でDを変えてもQが変わらない（組み合わせ版を FAIL にする）
+version: 1
+top: dff
+clock: {signal: clk, period_ns: 10}      # 立ち上り 5,15,25,...ns（at:N = 10N-5ns）
+reset: {signal: rst, active_low: false, duration_cycles: 2}
+sim: {cycles: 6}
+
+cases:
+  - name: hold_between_edges
+    stimulus:
+      - {at: 3, set: {d: 1}}                 # 25ns の立ち上りで取り込まれる
+      - {at: 3, offset_ns: 3, set: {d: 0}}   # 28ns：サイクルの途中で D を変える
+      - {at: 4, offset_ns: 2, set: {d: 1}}   # 37ns：もう一度変える
+    expect:
+      - {at: 3, check: {q: 1}}                # 25ns：取り込み直後
+      - {at: 3, offset_ns: 4, check: {q: 1}}  # 29ns：D=0 でも Q は保持（組み合わせ版は 0 → FAIL）
+      - {at: 4, check: {q: 0}}                # 35ns：28ns の D=0 を取り込む
+      - {at: 4, offset_ns: 2, check: {q: 0}}  # 37ns：同時刻の入力変更を反映した後に確認（組み合わせ版は 1 → FAIL）
+      - {at: 5, check: {q: 1}}                # 45ns：37ns の D=1 を取り込む

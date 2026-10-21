@@ -31,10 +31,13 @@ def write_junit_v2(result, path: str) -> None:
         tc.set("classname", result.module)
         tc.set("time", "0")
         if ci.status != "PASS":
+            off = getattr(ci, "offset_ns", 0)
+            # §15.7.6: "cycle=4 +3ns (38ns)" for offset_ns>0
+            time_str = (f"+{off}ns ({ci.time_ns}ns)" if off else f"({ci.time_ns}ns)")
             failure = ET.SubElement(tc, "failure")
             failure.set("message", ci.message or f"expected {ci.expected!r}, got {ci.actual!r}")
             failure.text = (
-                f"{ci.signal} @ cycle {ci.cycle}  time={ci.time_ns}ns\n"
+                f"{ci.signal} @ cycle {ci.cycle} {time_str}\n"
                 f"  expected : {ci.expected}\n"
                 f"  actual   : {ci.actual}"
             )

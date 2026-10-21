@@ -119,6 +119,7 @@ class Parser:
 
     def parse_module(self) -> Module:
         tok = self._consume("module")
+        mod_line = tok.line
         name = self._consume(expected_type="ID").value
         params = self._parse_param_port_list() if self._at("#") else []
         # Port list is optional (TB modules may have no ports: module foo;)
@@ -126,7 +127,19 @@ class Parser:
         self._consume(";")
         items = []
         while not self._at("endmodule", "EOF"):
+            prev_pos = self._pos
             items.extend(self._parse_module_item())
+            # §16 safety: if no token was consumed, force-advance to prevent
+            # infinite loops on unrecognised / EOF tokens.
+            if self._pos == prev_pos:
+                if self._at("EOF"):
+                    break
+                self._consume()  # skip one unrecognised token
+        if self._at("EOF"):
+            eof_tok = self._peek()
+            self._error(
+                f"endmodule がありません（module '{name}' は {mod_line} 行目で開始）"
+            )
         self._consume("endmodule")
         return Module(name=name, params=params, ports=ports, items=items,
                       source_file=self._filename)
@@ -139,7 +152,7 @@ class Parser:
         self._consume("#")
         self._consume("(")
         params: List[ParamDecl] = []
-        while not self._at(")"):
+        while not self._at(")", "EOF"):
             params.append(self._parse_param_decl())
             if not self._try_consume(","):
                 break
@@ -176,15 +189,21 @@ class Parser:
         self._consume("(")
         ports: List[PortDecl] = []
         if not self._at(")"):
-            ports.append(self._parse_port_decl())
+            ports.extend(self._parse_port_decl_multi())
             while self._try_consume(","):
                 if self._at(")"):
                     break
-                ports.append(self._parse_port_decl())
+                ports.extend(self._parse_port_decl_multi())
         self._consume(")")
         return ports
 
-    def _parse_port_decl(self) -> PortDecl:
+    def _parse_port_decl_multi(self) -> List[PortDecl]:
+        """Parse one ANSI port declaration, returning one or more PortDecl.
+
+        IEEE 1800: multiple names may share a single direction/type/dims, e.g.:
+          input logic clk, rst, d
+          output logic [3:0] a, b
+        """
         if not self._at("input", "output", "inout"):
             self._error(f"expected port direction (input/output/inout), got {self._peek().value!r}")
         direction = self._consume().value
@@ -201,9 +220,33 @@ class Parser:
         if self._at("["):
             dims = self._parse_dims()
 
+        # First name (mandatory)
         name = self._consume(expected_type="ID").value
-        return PortDecl(direction=direction, net_type=net_type, dims=dims,
-                        name=name, signed=signed)
+        result = [PortDecl(direction=direction, net_type=net_type, dims=dims,
+                           name=name, signed=signed)]
+
+        # Additional names sharing the same direction/type/dims:
+        # peek ahead — if the next token is "," and the token after that is an
+        # identifier (not a direction keyword), consume them as extra names.
+        while self._at(","):
+            saved_pos = self._pos
+            self._pos += 1  # tentatively skip ","
+            if self._at("input", "output", "inout") or self._at(")"):
+                # Next is a new full port decl or end of list — put "," back
+                self._pos = saved_pos
+                break
+            if self._peek().type != "ID":
+                # Not an identifier — put "," back
+                self._pos = saved_pos
+                break
+            extra_name = self._consume(expected_type="ID").value
+            result.append(PortDecl(direction=direction, net_type=net_type,
+                                   dims=dims, name=extra_name, signed=signed))
+
+        return result
+
+    def _parse_port_decl(self) -> PortDecl:  # kept for compat (unused internally)
+        return self._parse_port_decl_multi()[0]
 
     # ------------------------------------------------------------------
     # Dimensions: [hi : lo]
@@ -288,7 +331,7 @@ class Parser:
         if self._at("#"):
             self._consume("#")
             self._consume("(")
-            while not self._at(")"):
+            while not self._at(")", "EOF"):
                 if self._at("."):
                     self._consume(".")
                     pname = self._consume(expected_type="ID").value
@@ -305,7 +348,7 @@ class Parser:
         inst_name = self._consume(expected_type="ID").value
         self._consume("(")
         port_conns: List[PortConn] = []
-        while not self._at(")"):
+        while not self._at(")", "EOF"):
             if self._at("."):
                 self._consume(".")
                 pname = self._consume(expected_type="ID").value
@@ -461,7 +504,7 @@ class Parser:
                 dims = self._parse_dims()
         self._consume("{")
         members: List[EnumMember] = []
-        while not self._at("}"):
+        while not self._at("}", "EOF"):
             name = self._consume(expected_type="ID").value
             val = None
             if self._at("="):
@@ -483,7 +526,7 @@ class Parser:
         packed = bool(self._try_consume("packed"))
         self._consume("{")
         fields: List[StructField] = []
-        while not self._at("}"):
+        while not self._at("}", "EOF"):
             net_type = None
             if self._at("logic", "bit", "int", "integer", "byte",
                         "reg", "wire", "signed", "unsigned",
@@ -605,7 +648,7 @@ class Parser:
             self._consume(")")
             return SensitivityList(items=[])
         items: List[SensitivityItem] = []
-        while not self._at(")"):
+        while not self._at(")", "EOF"):
             edge: Optional[str] = None
             if self._at("posedge", "negedge"):
                 edge = self._consume().value
@@ -731,7 +774,7 @@ class Parser:
                 sens = SensitivityList(items=[])
             else:
                 items: List[SensitivityItem] = []
-                while not self._at(")"):
+                while not self._at(")", "EOF"):
                     edge: Optional[str] = None
                     if self._at("posedge", "negedge"):
                         edge = self._consume().value
