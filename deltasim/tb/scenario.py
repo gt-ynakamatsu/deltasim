@@ -204,7 +204,10 @@ def load_scenario(path: str) -> Scenario:
     if data.get("constraints"):
         s.constraints = [str(c) for c in data["constraints"]]
     if data.get("max_constraint_attempts") is not None:
-        s.max_constraint_attempts = int(data["max_constraint_attempts"])
+        mca = int(data["max_constraint_attempts"])
+        if mca < 1:
+            raise ScenarioError(f"max_constraint_attempts は 1 以上の整数が必要です: {mca}")
+        s.max_constraint_attempts = mca
 
     # §13.2: Parse cases: list
     raw_cases = data.get("cases")
@@ -268,7 +271,10 @@ def load_scenario(path: str) -> Scenario:
             if rc.get("constraints"):
                 case.constraints = [str(c) for c in rc["constraints"]]
             if rc.get("max_constraint_attempts") is not None:
-                case.max_constraint_attempts = int(rc["max_constraint_attempts"])
+                mca = int(rc["max_constraint_attempts"])
+                if mca < 1:
+                    raise ScenarioError(f"max_constraint_attempts は 1 以上の整数が必要です: {mca}")
+                case.max_constraint_attempts = mca
             s.cases.append(case)
     # else: no cases: key → legacy single-case (s.cases stays empty)
 
@@ -511,8 +517,14 @@ class StimulusSchedule:
     """Pre-computes the input values to apply at each (cycle, offset_ns).
 
     §15.2: keyed by (cycle, offset_ns) to support sub-cycle stimuli.
-    §18.6: supports constraints: (rejection sampling).
+    §18.6: supports constraints: (rejection sampling, per-cycle scope).
     Backward-compatible: get(cycle) is equivalent to get(cycle, 0).
+
+    §18.6 constraint scope:
+    - Per (cycle, offset), collect ALL confirmed values (set + random).
+    - Only evaluate constraints that mention >= 1 random signal for that cycle.
+    - Re-sample all random signals for that cycle together until constraints pass.
+    - Signal widths from signal_widths dict are used to mask values (SV semantics).
     """
 
     def __init__(
@@ -522,45 +534,92 @@ class StimulusSchedule:
         seed: int = 0,
         constraints: Optional[List[str]] = None,
         max_constraint_attempts: Optional[int] = None,
+        signal_widths: Optional[Dict[str, int]] = None,
+        signal_signed: Optional[Dict[str, bool]] = None,
     ):
         self._rng = _random_mod.Random(seed)
         self._constraints = constraints or []
         self._max_attempts = (max_constraint_attempts
                               if max_constraint_attempts is not None
                               else DEFAULT_MAX_CONSTRAINT_ATTEMPTS)
+        self._signal_widths = signal_widths or {}
+        self._signal_signed = signal_signed or {}
         # (cycle, offset_ns) -> {signal: value}
         self._schedule: Dict[tuple, Dict[str, int]] = {}
         self._build(inputs, total_cycles)
 
     def _build(self, inputs: List[InputEntry], total_cycles: int) -> None:
+        """§18.6: 2-pass build — group by (cycle, offset), then sample with constraints."""
+        # Pass 1: collect fixed and random specs per (cycle, offset)
+        per_key_fixed: Dict[tuple, Dict[str, int]] = {}
+        per_key_random: Dict[tuple, Dict[str, object]] = {}
+
         for entry in inputs:
             cycles = sorted(_expand_at(entry.at, total_cycles))
-            offset = entry.offset_ns  # §15.2
+            offset = entry.offset_ns
             for cycle in cycles:
-                vals: Dict[str, int] = {}
+                key = (cycle, offset)
                 if entry.set_values:
-                    vals.update(entry.set_values)
+                    per_key_fixed.setdefault(key, {}).update(entry.set_values)
                 elif entry.random_spec:
-                    vals = self._sample_with_constraints(entry.random_spec, cycle)
-                self._schedule.setdefault((cycle, offset), {}).update(vals)
+                    per_key_random.setdefault(key, {}).update(entry.random_spec)
 
-    def _sample_with_constraints(
-        self, random_spec: dict, cycle: int
+        # Pass 2: for each key, sample with constraints
+        all_keys = set(per_key_fixed) | set(per_key_random)
+        for key in all_keys:
+            cycle, _ = key
+            fixed_vals = per_key_fixed.get(key, {})
+            random_specs = per_key_random.get(key, {})
+            if not random_specs:
+                self._schedule[key] = dict(fixed_vals)
+            else:
+                sampled = self._sample_cycle_with_constraints(
+                    random_specs, fixed_vals, cycle
+                )
+                combined = dict(fixed_vals)
+                combined.update(sampled)
+                self._schedule[key] = combined
+
+    def _sample_cycle_with_constraints(
+        self,
+        random_specs: Dict[str, object],
+        fixed_vals: Dict[str, int],
+        cycle: int,
     ) -> Dict[str, int]:
-        """§18.6: 制約を満たす乱数を生成する（リジェクションサンプリング）。"""
-        if not self._constraints:
-            return {sig: self._sample(spec) for sig, spec in random_spec.items()}
+        """§18.6: サイクル単位でリジェクションサンプリングを行う。
 
+        - 固定値 (fixed_vals) + 乱数候補 (candidate) を合わせてコンテキストを作る。
+        - 「その乱数信号名を少なくとも1つ含む制約」だけを評価する。
+        - 乱数信号を含まない制約はそのサイクルでは対象外。
+        """
         from deltasim.interp.expr import eval_bool, ExprError
+        import re
+
+        random_signal_names = set(random_specs.keys())
+
+        if not self._constraints:
+            return {sig: self._sample(spec) for sig, spec in random_specs.items()}
+
+        # Determine active constraints (mention at least one random signal)
+        def _mentions(cstr: str, sigs: set) -> bool:
+            return any(bool(re.search(r'\b' + re.escape(s) + r'\b', cstr)) for s in sigs)
+
+        active = [c for c in self._constraints if _mentions(c, random_signal_names)]
+        if not active:
+            # No constraint applies to this cycle's random signals
+            return {sig: self._sample(spec) for sig, spec in random_specs.items()}
 
         for attempt in range(1, self._max_attempts + 1):
-            # 保存点（この試行でのランダム状態は使い捨て）
-            # reproducibility: シードをベースに試行ごとに決定論的に生成する
-            candidate = {sig: self._sample(spec) for sig, spec in random_spec.items()}
+            candidate = {sig: self._sample(spec) for sig, spec in random_specs.items()}
+            # Build eval context: fixed + candidate, with width masking
+            ctx = dict(fixed_vals)
+            ctx.update(candidate)
+            ctx = self._mask_context(ctx)
+
             all_ok = True
-            for cstr in self._constraints:
+            for cstr in active:
                 try:
-                    ok = eval_bool(cstr, candidate)
+                    ok = eval_bool(cstr, ctx)
                 except ExprError as exc:
                     raise ConstraintExprError(
                         f"制約式 '{cstr}' の評価に失敗しました: {exc}"
@@ -571,11 +630,26 @@ class StimulusSchedule:
             if all_ok:
                 return candidate
 
-        # 上限超過
         raise ConstraintError(
-            f"E_CONSTRAINT: サイクル {cycle} で制約 {self._constraints} を満たす値が "
+            f"E_CONSTRAINT: サイクル {cycle} で制約 {active} を満たす値が "
             f"{self._max_attempts} 回以内に見つかりませんでした。"
         )
+
+    def _mask_context(self, ctx: Dict[str, int]) -> Dict[str, int]:
+        """§18.6: 信号幅に応じてビットマスクを適用する（SV semantics）。"""
+        if not self._signal_widths:
+            return ctx
+        result = {}
+        for sig, val in ctx.items():
+            w = self._signal_widths.get(sig)
+            if w and w > 0:
+                masked = val & ((1 << w) - 1)
+                if self._signal_signed.get(sig) and (masked >> (w - 1)):
+                    masked -= (1 << w)
+                result[sig] = masked
+            else:
+                result[sig] = val
+        return result
 
     def get(self, cycle: int, offset_ns: int = 0) -> Dict[str, int]:
         """Input values to apply at (cycle, offset_ns). offset_ns=0 → posedge."""

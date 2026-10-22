@@ -467,39 +467,62 @@ def _run_one_case(
     # §18.5 E_UNKNOWN_PORT: YAML に書かれた信号名がポートに存在するか検査
     # stimulus の set: input ポートのみ許可
     # expected の check: ポート（input/output）のみ許可（内部信号は不可）
+    from deltasim.tb.scenario import (
+        ConstraintError as _ConstraintError,
+        ConstraintExprError as _ConstraintExprError,
+    )
+    import re as _re
+
     input_ports = {n for n, info in design.signals.items() if info.direction == "input"}
     all_ports    = {n for n, info in design.signals.items() if info.direction is not None}
+
+    def _port_error(msg):
+        _err = ErrorInfo(code="E_UNKNOWN_PORT", message=msg, severity="error")
+        cr.status = "ERROR"; cr.errors.append(_err); cr.message = msg
+        cr.elapsed_ms = (time.time() - case_t0) * 1000
 
     for entry in eff_inputs:
         for sig in (entry.set_values or {}):
             if sig not in input_ports:
                 in_all = sig in all_ports
-                hint = "output/inout ポートは stimulus で設定できません（force を使ってください）" \
-                    if in_all else f"既知の input ポート: {sorted(input_ports)}"
-                err = ErrorInfo(
-                    code="E_UNKNOWN_PORT",
-                    message=f"stimulus/set の '{sig}' は input ポートではありません。{hint}",
-                    severity="error",
-                )
-                cr.status = "ERROR"
-                cr.errors.append(err)
-                cr.message = err.message
-                cr.elapsed_ms = (time.time() - case_t0) * 1000
+                hint = ("output/inout ポートは stimulus で設定できません（force を使ってください）"
+                        if in_all else f"既知の input ポート: {sorted(input_ports)}")
+                _port_error(f"stimulus/set の '{sig}' は input ポートではありません。{hint}")
+                return cr
+        # §18.6 Fix 1: random_spec のキーも input ポートに限定
+        for sig in (entry.random_spec or {}):
+            if sig not in input_ports:
+                in_all = sig in all_ports
+                hint = ("output/inout ポートは stimulus で設定できません"
+                        if in_all else f"既知の input ポート: {sorted(input_ports)}")
+                _port_error(f"stimulus/random の '{sig}' は input ポートではありません。{hint}")
                 return cr
     for entry in eff_expected:
         for sig in (entry.check or {}):
             if sig not in all_ports:
-                err = ErrorInfo(
-                    code="E_UNKNOWN_PORT",
-                    message=f"expected/check の '{sig}' はポートではありません。"
-                            f"既知のポート: {sorted(all_ports)}",
-                    severity="error",
-                )
-                cr.status = "ERROR"
-                cr.errors.append(err)
-                cr.message = err.message
-                cr.elapsed_ms = (time.time() - case_t0) * 1000
+                _port_error(f"expected/check の '{sig}' はポートではありません。"
+                            f"既知のポート: {sorted(all_ports)}")
                 return cr
+
+    # §18.6 Fix 2: 制約式中の識別子が input ポートか事前検査
+    eff_constraints = case.constraints or scenario.constraints
+    eff_max_attempts = (case.max_constraint_attempts
+                        or scenario.max_constraint_attempts)
+    if eff_constraints:
+        for cstr in eff_constraints:
+            try:
+                from deltasim.interp.expr import _tokenize as _tok
+                idents = [t[1] for t in _tok(cstr) if t[0] == "ID"
+                          and t[1] not in ("x", "X", "z", "Z")]
+            except Exception:
+                idents = _re.findall(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', cstr)
+            for ident in idents:
+                if ident not in input_ports:
+                    _port_error(
+                        f"制約式 '{cstr}' の識別子 '{ident}' は input ポートではありません。"
+                        f"既知の input ポート: {sorted(input_ports)}"
+                    )
+                    return cr
 
     period_ns = eff_clock.period_ns       # §15.2 effective period
     hp = period_ns // 2                   # half-period (posedge→negedge)
@@ -514,22 +537,24 @@ def _run_one_case(
     if eff_reset.signal:
         engine.set_rst(eff_reset.signal, active_low=eff_reset.active_low)
 
-    # §18.6: 有効な constraints はケース→シナリオ順で取得
-    eff_constraints = case.constraints or scenario.constraints
-    eff_max_attempts = (case.max_constraint_attempts
-                        or scenario.max_constraint_attempts)
+    # §18.6 Fix 4: 信号幅情報を StimulusSchedule に渡す
+    _sig_widths = {n: info.width for n, info in design.signals.items() if info.direction == "input"}
+    _sig_signed = {n: info.signed for n, info in design.signals.items() if info.direction == "input"}
+
     try:
         stim = StimulusSchedule(
             eff_inputs, eff_cycles, seed=eff_seed,
             constraints=eff_constraints,
             max_constraint_attempts=eff_max_attempts,
+            signal_widths=_sig_widths,
+            signal_signed=_sig_signed,
         )
-    except __import__('deltasim.tb.scenario', fromlist=['ConstraintError']).ConstraintError as _ce:
+    except _ConstraintError as _ce:
         err = ErrorInfo(code="E_CONSTRAINT", message=str(_ce), severity="error")
         cr.status = "ERROR"; cr.errors.append(err); cr.message = err.message
         cr.elapsed_ms = (time.time() - case_t0) * 1000
         return cr
-    except __import__('deltasim.tb.scenario', fromlist=['ConstraintExprError']).ConstraintExprError as _cee:
+    except _ConstraintExprError as _cee:
         err = ErrorInfo(code="E_CONSTRAINT_EXPR", message=str(_cee), severity="error")
         cr.status = "ERROR"; cr.errors.append(err); cr.message = err.message
         cr.elapsed_ms = (time.time() - case_t0) * 1000
