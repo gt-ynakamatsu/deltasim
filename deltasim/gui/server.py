@@ -70,25 +70,39 @@ if _STATIC_DIR.exists():
 
 
 # ---------------------------------------------------------------------------
-# ミドルウェア: localhost 限定チェック
+# ミドルウェア: localhost 限定チェック（§17.2: 常時有効・環境変数による無効化なし）
 # ---------------------------------------------------------------------------
 
-_LOCALHOST_CHECK_DISABLED = os.environ.get("DELTASIM_GUI_NO_LOCALHOST_CHECK", "0") == "1"
+_LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
+
+
+def _parse_host_header(host_header: str) -> str:
+    """Host ヘッダからホスト部分を取り出す（ポートと IPv6 ブラケットを除去）。
+
+    例: "127.0.0.1:8765" -> "127.0.0.1"
+        "[::1]:8765"     -> "::1"
+        "[::1]"          -> "::1"
+        "localhost"      -> "localhost"
+    """
+    h = host_header.strip()
+    if h.startswith("["):
+        end = h.find("]")
+        return h[1:end] if end != -1 else h[1:]
+    if ":" in h:
+        return h.rsplit(":", 1)[0]
+    return h
 
 
 @app.middleware("http")
 async def localhost_only(request: Request, call_next):
-    if _LOCALHOST_CHECK_DISABLED:
-        return await call_next(request)
-    client = request.client
-    if client:
-        host = client.host
-        # IPv4 / IPv6 ループバック。"testclient" は Starlette TestClient のダミー値。
-        if host not in ("127.0.0.1", "::1", "localhost", "testclient"):
-            return JSONResponse(
-                status_code=403,
-                content={"detail": "このサーバはローカルホストからのみアクセスできます"},
-            )
+    """§17.2: Host ヘッダが 127.0.0.1/localhost/[::1] でなければ 403 を返す。"""
+    host_header = request.headers.get("host", "")
+    host_part = _parse_host_header(host_header)
+    if host_part not in _LOOPBACK_HOSTS:
+        return JSONResponse(
+            status_code=403,
+            content={"detail": "このサーバはローカルホストからのみアクセスできます"},
+        )
     return await call_next(request)
 
 

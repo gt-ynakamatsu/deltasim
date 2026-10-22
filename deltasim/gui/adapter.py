@@ -136,53 +136,37 @@ def test(
         filter_cases=filter_cases or None,
     )
 
-    # §13.2: cases[] を使用（per-case details）
-    # CaseResult.to_dict() が warnings[] を含む（§15.13: 空でも常に出力）
-    cases = [c.to_dict() for c in result.cases]
+    # §17.1: CLI の test --json と同じ構造（TestResult.to_dict() を再利用）
+    # deltasim_version / seed / elapsed_ms をトップレベルに含む
+    d = result.to_dict()
 
-    # summary: §13.1 summary.elapsed_ms が推奨
-    total_elapsed = result.summary.get("elapsed_ms", result.elapsed_ms) \
-        if hasattr(result, "summary") and isinstance(result.summary, dict) \
-        else result.elapsed_ms
-
-    # summary counts (cases ベース)
+    # GUI フロントエンド用 summary カウント（CLI の to_dict() は counts を含まない）
     n_pass  = sum(1 for c in result.cases if c.status == "PASS")
     n_fail  = sum(1 for c in result.cases if c.status == "FAIL")
     n_error = sum(1 for c in result.cases if c.status == "ERROR")
     n_skip  = sum(1 for c in result.cases if c.status == "SKIP")
     total   = len(result.cases)
-
     if result.status == "ERROR" and total == 0:
         n_error = 1
         total   = 1
 
-    return {
-        "schema_version": result.schema_version,
-        "module": result.module,
-        "status": result.status,
+    d["summary"].update({
+        "total": total,
+        "pass": n_pass,
+        "fail": n_fail,
+        "error": n_error,
+        "skip": n_skip,
         "cancelled": result.cancelled,
-        "summary": {
-            "total": total,
-            "pass": n_pass,
-            "fail": n_fail,
-            "error": n_error,
-            "skip": n_skip,
-            "elapsed_ms": total_elapsed,
-            "cancelled": result.cancelled,
-        },
-        "cases": cases,
-        "checks": [c.to_dict() for c in result.checks],
-        "log": result.log,
-        "errors": [e.to_dict() for e in result.errors],
-        # §15.12/13: warnings[] は TestResult レベルと cases レベルの両方が API から来る
-        # TestResult.warnings は仕様書のトップレベル warnings（W_UNKNOWN_KEY 等）
-        "warnings": [w.to_dict() for w in result.warnings],
-        "vcd_path": vcd_path,
-        # §12.3: truncated_at はケースごとに cases[].truncated_at で確認
-        "truncated_at": next(
-            (c.truncated_at for c in result.cases if c.truncated_at is not None), None
-        ),
-    }
+    })
+
+    # GUI 固有フィールド
+    d["vcd_path"] = vcd_path
+    # §12.3: truncated_at はケース単位で管理（TestResult レベルは API で未設定）
+    d["truncated_at"] = next(
+        (c.truncated_at for c in result.cases if c.truncated_at is not None), None
+    )
+
+    return d
 
 
 # ---------------------------------------------------------------------------

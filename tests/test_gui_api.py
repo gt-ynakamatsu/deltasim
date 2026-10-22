@@ -24,7 +24,8 @@ SHIFT_SPEC   = str(EXAMPLES_DIR / "shift_reg_spec.yaml")
 
 @pytest.fixture(scope="module")
 def client():
-    with TestClient(app) as c:
+    # §17.2: Host ヘッダが 127.0.0.1 になるよう base_url を指定
+    with TestClient(app, base_url="http://127.0.0.1") as c:
         yield c
 
 
@@ -225,7 +226,7 @@ class TestRunTest:
 def counter_vcd_path(tmp_path_factory):
     """counter テストを実行して VCD を生成する（モジュールスコープ）"""
     vcd = tmp_path_factory.mktemp("vcd") / "counter.vcd"
-    with TestClient(app) as c:
+    with TestClient(app, base_url="http://127.0.0.1") as c:
         res = c.post("/api/test", json={
             "sv_files": [COUNTER_SV],
             "spec": COUNTER_SPEC,
@@ -420,7 +421,7 @@ class TestWaveformIndex:
     @pytest.fixture(scope="class")
     def vcd_path(self, tmp_path_factory):
         vcd = tmp_path_factory.mktemp("vcd") / "counter.vcd"
-        with TestClient(app) as c:
+        with TestClient(app, base_url="http://127.0.0.1") as c:
             res = c.post("/api/test", json={
                 "sv_files": [COUNTER_SV],
                 "spec": COUNTER_SPEC,
@@ -465,7 +466,7 @@ class TestWaveformRange:
     @pytest.fixture(scope="class")
     def vcd_path(self, tmp_path_factory):
         vcd = tmp_path_factory.mktemp("vcd2") / "counter.vcd"
-        with TestClient(app) as c:
+        with TestClient(app, base_url="http://127.0.0.1") as c:
             res = c.post("/api/test", json={
                 "sv_files": [COUNTER_SV],
                 "spec": COUNTER_SPEC,
@@ -1350,3 +1351,198 @@ class TestAdapterCleanup:
         # adapter が warnings を返すこと
         assert "warnings" in data
         assert isinstance(data["warnings"], list)
+
+
+# ---------------------------------------------------------------------------
+# §17.2 GUI 接続制限: --host バリデーション
+# ---------------------------------------------------------------------------
+
+class TestGuiHostValidation:
+    """§17.2: `deltasim gui --host` にループバック以外を渡したら終了コード 2"""
+
+    def test_host_0000_exits_code2(self):
+        """--host 0.0.0.0 は終了コード 2 でエラーメッセージを出すこと"""
+        from click.testing import CliRunner
+        from deltasim.cli import main
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["gui", "--host", "0.0.0.0"])
+        assert result.exit_code == 2, f"exit_code={result.exit_code}, output={result.output}"
+        assert "GUIは127.0.0.1でのみ起動できます" in result.output
+
+    def test_host_lan_ip_exits_code2(self):
+        """--host 192.168.1.10 は終了コード 2 でエラーメッセージを出すこと"""
+        from click.testing import CliRunner
+        from deltasim.cli import main
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["gui", "--host", "192.168.1.10"])
+        assert result.exit_code == 2, f"exit_code={result.exit_code}, output={result.output}"
+        assert "GUIは127.0.0.1でのみ起動できます" in result.output
+
+    def test_host_127001_allowed(self, monkeypatch):
+        """--host 127.0.0.1 はサーバーを起動しようとすること（exit 2 にならない）"""
+        from click.testing import CliRunner
+        from deltasim.cli import main
+
+        # uvicorn.run をモックしてサーバー起動を防ぐ
+        import unittest.mock as mock
+
+        runner = CliRunner()
+        with mock.patch("uvicorn.run") as mock_run:
+            result = runner.invoke(main, ["gui", "--host", "127.0.0.1", "--no-browser"])
+        # exit code 2 ではないこと（0 または uvicorn が返すコード）
+        assert result.exit_code != 2, \
+            f"127.0.0.1 should be allowed but got exit_code={result.exit_code}"
+
+    def test_host_localhost_allowed(self, monkeypatch):
+        """--host localhost は許可されること"""
+        from click.testing import CliRunner
+        from deltasim.cli import main
+        import unittest.mock as mock
+
+        runner = CliRunner()
+        with mock.patch("uvicorn.run"):
+            result = runner.invoke(main, ["gui", "--host", "localhost", "--no-browser"])
+        assert result.exit_code != 2, \
+            f"localhost should be allowed but got exit_code={result.exit_code}"
+
+    def test_host_ipv6_loopback_allowed(self, monkeypatch):
+        """--host ::1 は許可されること"""
+        from click.testing import CliRunner
+        from deltasim.cli import main
+        import unittest.mock as mock
+
+        runner = CliRunner()
+        with mock.patch("uvicorn.run"):
+            result = runner.invoke(main, ["gui", "--host", "::1", "--no-browser"])
+        assert result.exit_code != 2, \
+            f"::1 should be allowed but got exit_code={result.exit_code}"
+
+
+# ---------------------------------------------------------------------------
+# §17.2 GUI 接続制限: Host ヘッダ検証
+# ---------------------------------------------------------------------------
+
+class TestGuiHostHeaderCheck:
+    """§17.2: 不正な Host ヘッダは 403 で拒否されること"""
+
+    def test_invalid_host_header_rejected(self):
+        """Host ヘッダが 127.0.0.1/localhost/[::1] 以外は 403"""
+        with TestClient(app, base_url="http://127.0.0.1") as c:
+            # headers で Host ヘッダを上書きして外部ホストを偽装
+            res = c.get("/health", headers={"Host": "evil.example.com"})
+        assert res.status_code == 403
+
+    def test_valid_host_127001(self):
+        """Host: 127.0.0.1 は許可されること"""
+        with TestClient(app, base_url="http://127.0.0.1") as c:
+            res = c.get("/health", headers={"Host": "127.0.0.1"})
+        assert res.status_code == 200
+
+    def test_valid_host_with_port(self):
+        """Host: 127.0.0.1:8765 はポートつきでも許可されること"""
+        with TestClient(app, base_url="http://127.0.0.1") as c:
+            res = c.get("/health", headers={"Host": "127.0.0.1:8765"})
+        assert res.status_code == 200
+
+    def test_valid_host_localhost(self):
+        """Host: localhost は許可されること"""
+        with TestClient(app, base_url="http://127.0.0.1") as c:
+            res = c.get("/health", headers={"Host": "localhost"})
+        assert res.status_code == 200
+
+    def test_valid_host_ipv6(self):
+        """Host: [::1] は許可されること"""
+        with TestClient(app, base_url="http://127.0.0.1") as c:
+            res = c.get("/health", headers={"Host": "[::1]"})
+        assert res.status_code == 200
+
+    def test_valid_host_ipv6_with_port(self):
+        """Host: [::1]:8765 はポートつきでも許可されること"""
+        with TestClient(app, base_url="http://127.0.0.1") as c:
+            res = c.get("/health", headers={"Host": "[::1]:8765"})
+        assert res.status_code == 200
+
+    def test_host_0000_rejected(self):
+        """Host: 0.0.0.0 は 403 で拒否されること"""
+        with TestClient(app, base_url="http://127.0.0.1") as c:
+            res = c.get("/health", headers={"Host": "0.0.0.0"})
+        assert res.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# §17.1 GUI 結果 JSON フィールド: CLI の test --json と同じ構造
+# ---------------------------------------------------------------------------
+
+class TestGuiResultJsonFields:
+    """§17.1: GUI の結果 JSON に deltasim_version/seed/elapsed_ms がトップレベルに存在すること"""
+
+    def test_toplevel_has_deltasim_version(self, client):
+        """GUI 結果に deltasim_version がトップレベルにあること"""
+        from deltasim import __version__
+        res = client.post("/api/test", json={
+            "sv_files": [COUNTER_SV],
+            "spec": COUNTER_SPEC,
+        })
+        assert res.status_code == 200
+        data = res.json()
+        assert "deltasim_version" in data, "deltasim_version がトップレベルに存在しません"
+        assert isinstance(data["deltasim_version"], str)
+        assert data["deltasim_version"] == __version__
+
+    def test_toplevel_has_seed(self, client):
+        """GUI 結果に seed がトップレベルにあること"""
+        res = client.post("/api/test", json={
+            "sv_files": [COUNTER_SV],
+            "spec": COUNTER_SPEC,
+            "seed": 42,
+        })
+        assert res.status_code == 200
+        data = res.json()
+        assert "seed" in data, "seed がトップレベルに存在しません"
+        assert isinstance(data["seed"], int)
+
+    def test_toplevel_has_elapsed_ms(self, client):
+        """GUI 結果に elapsed_ms がトップレベルにあること"""
+        res = client.post("/api/test", json={
+            "sv_files": [COUNTER_SV],
+            "spec": COUNTER_SPEC,
+        })
+        assert res.status_code == 200
+        data = res.json()
+        assert "elapsed_ms" in data, "elapsed_ms がトップレベルに存在しません"
+        assert isinstance(data["elapsed_ms"], (int, float))
+        assert data["elapsed_ms"] >= 0
+
+    def test_toplevel_keys_match_cli_json(self, client, tmp_path):
+        """GUI 結果のトップレベルキー集合が CLI test --json と一致すること"""
+        import json as _json
+        from click.testing import CliRunner
+        from deltasim.cli import main as cli_main
+
+        json_out = str(tmp_path / "cli_result.json")
+        runner = CliRunner()
+        runner.invoke(
+            cli_main,
+            ["test", COUNTER_SV, "--spec", COUNTER_SPEC, "--json", json_out],
+            catch_exceptions=False,
+        )
+        assert Path(json_out).exists(), "CLI の --json 出力ファイルが生成されませんでした"
+        cli_data = _json.loads(Path(json_out).read_text())
+
+        res = client.post("/api/test", json={
+            "sv_files": [COUNTER_SV],
+            "spec": COUNTER_SPEC,
+        })
+        assert res.status_code == 200
+        gui_data = res.json()
+
+        # GUI 固有キー（vcd_path）を除いて CLI と一致すること
+        cli_keys = set(cli_data.keys())
+        gui_keys = set(gui_data.keys()) - {"vcd_path"}
+        assert cli_keys == gui_keys, (
+            f"キー集合が一致しません\n"
+            f"  CLI only: {cli_keys - gui_keys}\n"
+            f"  GUI only: {gui_keys - cli_keys}"
+        )
