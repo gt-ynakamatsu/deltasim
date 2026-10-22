@@ -7,6 +7,21 @@
 
 ## [0.3.0+] — 開発中（§18.2 -f ファイルリスト + §18 対話デバッグ）
 
+### 修正（hotfix: E_LOOP_LIMIT 退行）
+
+- **`initial` ブロック内の無限 while ループが `E_INTERNAL` を返す退行を修正**
+  - 症状: `deltasim test --json` の結果が `code=E_INTERNAL` になる（正しくは `E_LOOP_LIMIT`）
+  - 原因: `_run_one_case` 内の `engine._initial_scheduler.add()` が `LoopLimitError` を投げたとき、
+    その呼び出しが `try-except LoopLimitError` ブロックの外にあった。
+    例外が `test_cmd` の `except Exception: E_INTERNAL` ハンドラに捕まっていた。
+  - 修正: `add()` 呼び出しを個別の `try/except LoopLimitError/DeltaLimitError` で包み、
+    正しいコードで `CaseResult.errors` に追加して返す。
+  - 影響: `always` ブロック内ループは元から正常。`initial` ブロック内ループが修正対象。
+- **エラーコード総点検テスト追加** (`tests/test_error_codes.py`, 20件)
+  - E_LOOP_LIMIT (initial/always 両方)、E_DELTA_LIMIT、E_NO_CHECK、E_UNKNOWN_PORT、
+    E_NO_CASE、E_OFFSET_RANGE、E_AMBIGUOUS_TOP、E_CONSTRAINT、E_CONSTRAINT_EXPR、
+    E001、E003 のいずれも `E_INTERNAL` に化けていないことを確認するパラメータ化テスト
+
 ### 追加（§18.7 4値論理）
 
 #### コアライブラリ (`deltasim/fourstate.py`)
