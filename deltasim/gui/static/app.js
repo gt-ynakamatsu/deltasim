@@ -613,6 +613,9 @@ async function loadExample(ex) {
   renderFileList();
   await loadModule(ex.sv_files, ex.top);
   if (ex.sv_files.length > 0) await openFileInEditor(ex.sv_files[0]);
+  // §18.4.1: プロジェクトを開いたときに最近一覧に追加
+  await addCurrentToRecent();
+  await loadRecentProjects();
 }
 
 // =========================================================================
@@ -1370,6 +1373,9 @@ async function saveProject() {
       params: {},
     });
     log("プロジェクトを deltasim.project.yaml に保存しました", "log-info");
+    // §18.4.1: プロジェクトを保存したときに最近一覧に追加
+    await addCurrentToRecent();
+    await loadRecentProjects();
   } catch (e) { log(`プロジェクト保存エラー: ${e.message}`, "log-error"); }
 }
 

@@ -60,8 +60,11 @@ from pydantic import BaseModel, field_validator
 
 @asynccontextmanager
 async def _lifespan(application: FastAPI):
+    # 起動時: 前回の異常終了で残った一時 VCD を削除（§18.4.1）
+    from deltasim.gui.jobs import startup_cleanup_stale_vcds, cleanup_all_temp_vcds
+    await asyncio.to_thread(startup_cleanup_stale_vcds)
     yield
-    from deltasim.gui.jobs import cleanup_all_temp_vcds
+    # 終了時: 自プロセスの全一時 VCD を削除（§18.4.1）
     cleanup_all_temp_vcds()
 
 
@@ -71,10 +74,15 @@ async def _lifespan(application: FastAPI):
 
 _STATIC_DIR = Path(__file__).parent / "static"
 
+try:
+    from deltasim import __version__ as _deltasim_version
+except ImportError:
+    _deltasim_version = "0.0.0"
+
 app = FastAPI(
     title="deltasim GUI",
     description="SystemVerilog シミュレータ GUI",
-    version="0.1.0",
+    version=_deltasim_version,
     lifespan=_lifespan,
 )
 
@@ -481,17 +489,16 @@ class TestRequest(BaseModel):
 async def api_test(req: TestRequest):
     """テストを同期実行して結果 JSON を返す（後方互換）。
 
-    §18.4: vcd_out 未指定かつ spec に sim.vcd も無い場合、一時 VCD を自動生成する。
+    §18.4.1: vcd_out 未指定かつ spec に sim.vcd も無い場合、専用フォルダに一時 VCD を自動生成する。
     """
     from deltasim.gui.adapter import test
-    from deltasim.gui.jobs import _peek_spec_vcd, _make_temp_vcd, _cleanup_old_temp_vcds
+    from deltasim.gui.jobs import _peek_spec_vcd, _make_temp_vcd
 
     vcd_out = req.vcd_out
     if vcd_out is None:
         spec_vcd = _peek_spec_vcd(req.spec)
         if spec_vcd is None:
-            _cleanup_old_temp_vcds(keep_last=5)
-            vcd_out = _make_temp_vcd()
+            vcd_out = _make_temp_vcd(spec=req.spec, sv_files=req.sv_files)
 
     try:
         result = await asyncio.to_thread(
@@ -506,6 +513,7 @@ async def api_test(req: TestRequest):
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    result.pop("_test_result", None)  # 同期版ではエクスポート不要
 
     return result
 
@@ -997,7 +1005,11 @@ async def test_export(
     job_id: str,
     fmt: str = Query("json", description="'json' または 'junit'"),
 ):
-    """テスト結果を JSON または JUnit XML としてダウンロードする（§18.4）。"""
+    """テスト結果を JSON または JUnit XML としてダウンロードする（§18.4）。
+
+    CLI の `test --json` / `test --junit` と同じ出力を返す。
+    job.test_result（TestResult オブジェクト）を直接使い、dict からの再構築は行わない。
+    """
     from deltasim.gui.jobs import get_job
 
     job = get_job(job_id)
@@ -1006,48 +1018,23 @@ async def test_export(
     if not job.done or job.result is None:
         raise HTTPException(status_code=425, detail="ジョブはまだ完了していません")
 
-    result = job.result
+    test_result = job.test_result
 
     if fmt == "junit":
-        import json as _json
         import tempfile as _tempfile
-        from deltasim.result import TestResult, CheckInfo, CaseResult
         from deltasim.report.junit import write_junit_v2
 
-        with _tempfile.NamedTemporaryFile(
-            suffix=".xml", delete=False, mode="w", encoding="utf-8"
-        ) as tf:
-            tmp_path = tf.name
+        if test_result is None:
+            raise HTTPException(status_code=422, detail="TestResult オブジェクトが保存されていません")
 
+        fd, tmp_path_str = _tempfile.mkstemp(suffix=".xml")
+        os.close(fd)
         try:
-            # result dict を TestResult に近似して write_junit_v2 を呼ぶ
-            tr = TestResult()
-            tr.module = result.get("module", "")
-            tr.status = result.get("status", "PASS")
-            for case_d in result.get("cases", []):
-                from deltasim.result import CaseResult as CR, CheckInfo as CI
-                cr = CR(name=case_d.get("name", ""), status=case_d.get("status", "PASS"))
-                for chk_d in case_d.get("checks", []):
-                    ci = CI(
-                        name=chk_d.get("name", ""),
-                        signal=chk_d.get("signal", ""),
-                        cycle=chk_d.get("cycle", 0),
-                        time_ns=chk_d.get("time_ns", 0),
-                        offset_ns=chk_d.get("offset_ns", 0),
-                        expected=chk_d.get("expected", ""),
-                        actual=chk_d.get("actual", ""),
-                        status=chk_d.get("status", "PASS"),
-                        source=chk_d.get("source", ""),
-                        message=chk_d.get("message") or "",
-                    )
-                    cr.checks.append(ci)
-                    tr.checks.append(ci)
-                tr.cases.append(cr)
-            write_junit_v2(tr, tmp_path)
-            xml_body = Path(tmp_path).read_text(encoding="utf-8")
+            await asyncio.to_thread(write_junit_v2, test_result, tmp_path_str)
+            xml_body = Path(tmp_path_str).read_text(encoding="utf-8")
         finally:
             try:
-                Path(tmp_path).unlink(missing_ok=True)
+                Path(tmp_path_str).unlink(missing_ok=True)
             except (PermissionError, OSError):
                 pass
 
@@ -1057,8 +1044,12 @@ async def test_export(
             headers={"Content-Disposition": f'attachment; filename="result_{job_id[:8]}.xml"'},
         )
     else:
-        import json as _json
-        body = _json.dumps(result, ensure_ascii=False, indent=2)
+        # JSON: CLI の test --json と同じ構造（TestResult.to_json() ベース）
+        if test_result is not None:
+            body = test_result.to_json()
+        else:
+            import json as _json
+            body = _json.dumps(job.result, ensure_ascii=False, indent=2)
         return Response(
             content=body,
             media_type="application/json",

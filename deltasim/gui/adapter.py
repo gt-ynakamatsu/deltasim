@@ -239,6 +239,8 @@ def test(
     # §17.1: CLI の test --json と同じ構造（TestResult.to_dict() を再利用）
     # deltasim_version / seed / elapsed_ms をトップレベルに含む
     d = result.to_dict()
+    # エクスポート用: TestResult オブジェクトをそのまま保持（JSON 非直列化フィールド）
+    d["_test_result"] = result
 
     # GUI フロントエンド用 summary カウント（CLI の to_dict() は counts を含まない）
     n_pass  = sum(1 for c in result.cases if c.status == "PASS")
