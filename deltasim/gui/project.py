@@ -93,21 +93,13 @@ def project_to_dict(proj: DeltaSimProject) -> dict:
 
 
 def resolve_paths_from_f_file(f_file: str | os.PathLike) -> List[str]:
-    """.f ファイルを読んで SV ファイルのリストを返す。"""
-    f_file = Path(f_file)
-    base = f_file.parent
-    result: List[str] = []
-    with open(f_file, encoding="utf-8", errors="replace") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line or line.startswith("//") or line.startswith("#"):
-                continue
-            # -f <file> のような文法には非対応（単純なファイルリスト）
-            p = Path(line)
-            if not p.is_absolute():
-                p = base / p
-            result.append(str(p.resolve()))
-    return result
+    """.f ファイルを読んで SV ファイルのリストを返す。
+
+    §18.2: deltasim.filelist.load_filelist を使って解析する。
+    """
+    from deltasim.filelist import load_filelist
+    fl = load_filelist(f_file)
+    return fl.files
 
 
 # ---------------------------------------------------------------------------
