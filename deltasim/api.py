@@ -98,13 +98,14 @@ def load(
         result.errors.append(_exc_to_error(e, "E001"))
         return result
 
-    mod = _select_top(mods, top)
+    mod, top_err = _select_top(mods, top, catalog=cat)
+    if top_err is not None:
+        result.status = "ERROR"
+        result.errors.append(top_err)
+        return result
     if mod is None:
         result.status = "ERROR"
-        result.errors.append(ErrorInfo(
-            message=f"Top module {top!r} not found in {[m.name for m in mods]}",
-            code="E002",
-        ))
+        result.errors.append(ErrorInfo(message="No module found", code="E002"))
         return result
 
     try:
@@ -381,6 +382,19 @@ def test(
               message=case_result.message,
               cancelled=case_result.cancelled)
 
+    # §18.5 E_NO_CHECK: チェックが0件で全ケースが skip でない場合はエラー
+    non_skip_cases = [cr for cr in result.cases if cr.status != "SKIP"]
+    if non_skip_cases and all_checks == [] and overall_status == "PASS":
+        overall_status = "ERROR"
+        result.errors.append(ErrorInfo(
+            code="E_NO_CHECK",
+            message=(
+                "テストにチェックが0件です。"
+                "YAML スペックに expected/check を追加してください。"
+            ),
+            severity="error",
+        ))
+
     result.status = overall_status
     result.checks = all_checks
     # Propagate cancelled flag from any case
@@ -449,6 +463,43 @@ def _run_one_case(
     eff_model_spec = case.model or scenario.model
 
     cr.seed = eff_seed
+
+    # §18.5 E_UNKNOWN_PORT: YAML に書かれた信号名がポートに存在するか検査
+    # stimulus の set: input ポートのみ許可
+    # expected の check: ポート（input/output）のみ許可（内部信号は不可）
+    input_ports = {n for n, info in design.signals.items() if info.direction == "input"}
+    all_ports    = {n for n, info in design.signals.items() if info.direction is not None}
+
+    for entry in eff_inputs:
+        for sig in (entry.set_values or {}):
+            if sig not in input_ports:
+                in_all = sig in all_ports
+                hint = "output/inout ポートは stimulus で設定できません（force を使ってください）" \
+                    if in_all else f"既知の input ポート: {sorted(input_ports)}"
+                err = ErrorInfo(
+                    code="E_UNKNOWN_PORT",
+                    message=f"stimulus/set の '{sig}' は input ポートではありません。{hint}",
+                    severity="error",
+                )
+                cr.status = "ERROR"
+                cr.errors.append(err)
+                cr.message = err.message
+                cr.elapsed_ms = (time.time() - case_t0) * 1000
+                return cr
+    for entry in eff_expected:
+        for sig in (entry.check or {}):
+            if sig not in all_ports:
+                err = ErrorInfo(
+                    code="E_UNKNOWN_PORT",
+                    message=f"expected/check の '{sig}' はポートではありません。"
+                            f"既知のポート: {sorted(all_ports)}",
+                    severity="error",
+                )
+                cr.status = "ERROR"
+                cr.errors.append(err)
+                cr.message = err.message
+                cr.elapsed_ms = (time.time() - case_t0) * 1000
+                return cr
 
     period_ns = eff_clock.period_ns       # §15.2 effective period
     hp = period_ns // 2                   # half-period (posedge→negedge)
@@ -648,6 +699,9 @@ def _run_one_case(
                     drive_clock(1)    # posedge
                 elif off == hp and engine._clk:
                     drive_clock(0)    # negedge
+                    # §18.5: $monitor check after negedge (full time step done)
+                    from deltasim.sim.engine import _engine_check_monitor as _ecm
+                    _ecm(engine)
 
                 # §15.8: Record VCD and signal-change DB at this time
                 record_vcd_and_db(engine._time)
@@ -1349,15 +1403,66 @@ def _parse_files(files):
     return mods, cat
 
 
-def _select_top(mods, top):
-    if not mods:
-        return None
-    if top is None:
-        return mods[0]
+def find_top_candidates(mods: list, catalog: dict = None) -> list:
+    """§18.5: どこからもインスタンスされていないモジュール名のリストを返す。
+
+    GUI から使う公開 API。catalog は将来の拡張用（現在は未使用）。
+    generate ブロック内のインスタンスも含めて検索する。
+
+    Returns:
+        インスタンスされていないモジュール名のリスト（候補）
+    """
+    from deltasim.parser.ast_nodes import InstDecl, GenerateBlock
+
+    all_names = {m.name for m in mods}
+    if not all_names:
+        return []
+
+    def _collect(items, found):
+        for item in items:
+            if isinstance(item, InstDecl):
+                found.add(item.module_name)
+            elif isinstance(item, GenerateBlock):
+                _collect(item.items, found)
+            for attr in ("then_items", "else_items", "body_items"):
+                sub = getattr(item, attr, None)
+                if isinstance(sub, list):
+                    _collect(sub, found)
+
+    instanced = set()
     for m in mods:
-        if m.name == top:
-            return m
-    return None
+        _collect(m.items, instanced)
+    return sorted(all_names - instanced)
+
+
+def _select_top(mods, top, catalog=None):
+    if not mods:
+        return None, None
+    if top is not None:
+        for m in mods:
+            if m.name == top:
+                return m, None
+        return None, ErrorInfo(
+            message=f"Top module {top!r} not found in {sorted(m.name for m in mods)}",
+            code="E002",
+        )
+    # §18.5: どこからもインスタンスされていないモジュールを候補にする
+    candidates = find_top_candidates(mods, catalog)
+    if not candidates:
+        # フォールバック: 先頭
+        return mods[0], None
+    if len(candidates) == 1:
+        for m in mods:
+            if m.name == candidates[0]:
+                return m, None
+        return mods[0], None
+    # 複数候補 → E_AMBIGUOUS_TOP
+    msg = (
+        f"トップモジュールが一意に決まりません。"
+        f"候補: {candidates}。"
+        f"--top で明示してください。"
+    )
+    return None, ErrorInfo(message=msg, code="E_AMBIGUOUS_TOP")
 
 
 def _exc_to_error(exc: Exception, code: str, severity: str = "error") -> ErrorInfo:

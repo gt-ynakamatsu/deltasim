@@ -466,7 +466,8 @@ class _Executor:
         ctx: Optional[EvalContext] = None,
         max_loop: int = MAX_FOREVER_TICKS,
         time_ns: int = 0,
-        bp_check=None,   # §18: Optional[Callable[[str, int], None]] — file, line
+        bp_check=None,      # §18: Optional[Callable[[str, int], None]] — file, line
+        monitor_state=None, # §18.5: shared dict for $monitor dedup across executors
     ):
         self.signals = dict(signals)
         self.widths = widths
@@ -475,9 +476,12 @@ class _Executor:
         self.max_loop = max_loop
         self.time_ns = time_ns
         self._bp_check = bp_check  # raises BreakpointHit if a bp is set
+        # §18.5: shared monitor state (mutable dict) for cross-executor dedup
+        self._monitor_state: dict = monitor_state if monitor_state is not None else {}
         # NBA items: (name, val) for signals, (arr_name, idx, val) for arrays
         self.nba_queue: List[tuple] = []
-        self.display_log: List[str] = []
+        self.display_log: List[str] = []    # $display/$write/$strobe
+        self.monitor_log: List[str] = []    # $monitor (deduplicated via _monitor_state)
 
     def execute(self, stmt) -> None:
         # §18.1.1: Check line breakpoints — deferred (does not raise, stores hit)
@@ -582,7 +586,7 @@ class _Executor:
         name = stmt.name
         if name in ("finish", "stop"):
             raise _FinishSignal()
-        if name in ("display", "write", "monitor", "strobe"):
+        if name in ("display", "write", "strobe"):
             args_vals = [eval_val(a, self.signals, self.widths, self.params, self.ctx)
                          for a in stmt.args]
             if stmt.args and isinstance(stmt.args[0], StringLiteral):
@@ -593,6 +597,68 @@ class _Executor:
             else:
                 line = " ".join(str(v) for v in args_vals)
             self.display_log.append(line)
+        elif name == "monitor":
+            # §18.5: $monitor in always_ff context — treated as display (rare usage)
+            # Proper $monitor registration is handled in _exec_initial_gen
+            args_vals = [eval_val(a, self.signals, self.widths, self.params, self.ctx)
+                         for a in stmt.args]
+            if stmt.args and isinstance(stmt.args[0], StringLiteral):
+                fmt = stmt.args[0].text
+                arg_vals2 = [eval_val(a, self.signals, self.widths, self.params, self.ctx)
+                              for a in stmt.args[1:]]
+                line = _format_display(fmt, arg_vals2)
+            else:
+                line = " ".join(str(v) for v in args_vals)
+            self.display_log.append(line)
+
+
+def _engine_monitor_emit(engine, line: str) -> None:
+    """§18.5: $monitor 出力（旧 API 互換 — 直接呼び出し時用）。"""
+    mon_state = getattr(engine, "_monitor_state", None)
+    if mon_state is None:
+        engine._monitor_state = mon_state = {}
+    cur_key = (engine._time, line)
+    if mon_state.get("prev") != cur_key:
+        engine._result.log.append(line)
+        mon_state["prev"] = cur_key
+        if engine.verbose:
+            print(line)
+
+
+def _engine_check_monitor(engine) -> None:
+    """§18.5: タイムステップ終了後に $monitor の登録を評価し、変化があれば出力する。
+
+    Verilog 標準: $monitor を一度呼ぶと登録され、以降の各タイムステップ終了時に
+    引数のいずれかが変化していれば1行出力する。$time の変化だけでは出力しない。
+    """
+    reg = getattr(engine, "_monitor_registration", None)
+    if reg is None:
+        return
+    fmt, arg_exprs = reg
+    # 現在の引数値を評価
+    try:
+        cur_vals = tuple(
+            eval_val(a, engine.signals, engine._widths, engine._params)
+            for a in arg_exprs
+        )
+    except Exception:
+        return
+
+    last_vals = getattr(engine, "_monitor_last_values", None)
+    if cur_vals == last_vals:
+        return  # 変化なし
+
+    engine._monitor_last_values = cur_vals
+
+    # 出力行を生成
+    if fmt is not None:
+        line = _format_display(fmt, list(cur_vals))
+    else:
+        line = " ".join(str(v) if v is not None else "x" for v in cur_vals)
+
+    engine._result.log.append(line)
+    if engine.verbose:
+        print(line)
 
 
 class _FinishSignal(Exception):
@@ -738,7 +804,7 @@ def _exec_initial_gen(stmt, engine: "SimEngine"):
         name = stmt.name
         if name in ("finish", "stop"):
             raise _FinishSignal()
-        if name in ("display", "write", "monitor", "strobe", "dumpfile", "dumpvars"):
+        if name in ("display", "write", "strobe"):
             args_vals = [eval_val(a, engine.signals, engine._widths, engine._params)
                          for a in stmt.args]
             if stmt.args and isinstance(stmt.args[0], StringLiteral):
@@ -752,6 +818,48 @@ def _exec_initial_gen(stmt, engine: "SimEngine"):
             engine._result.log.append(line)
             if engine.verbose:
                 print(line)
+        elif name == "dumpfile":
+            # §18.5: $dumpfile("path") — VCD 出力先を設定
+            if stmt.args:
+                raw = stmt.args[0]
+                if isinstance(raw, StringLiteral):
+                    path = raw.text
+                else:
+                    v = eval_val(raw, engine.signals, engine._widths, engine._params)
+                    path = str(v) if v is not None else ""
+                # カレントディレクトリ基準で解決
+                import os as _os
+                if path and not _os.path.isabs(path):
+                    path = _os.path.join(_os.getcwd(), path)
+                engine._dumpfile_path = path
+        elif name == "dumpvars":
+            # §18.5: $dumpvars / $dumpvars(0, top) / $dumpvars(1, sig)
+            # 既存の VCD ライターが設定されていなければ $dumpfile のパスで作成
+            if engine.vcd_writer is None:
+                vcd_path = getattr(engine, "_dumpfile_path", None)
+                if not vcd_path:
+                    import os as _os
+                    vcd_path = _os.path.join(_os.getcwd(), "dumpvars.vcd")
+                try:
+                    from deltasim.vcd.writer import VCDWriter
+                    engine.vcd_writer = VCDWriter(vcd_path, engine.design)
+                    engine.vcd_writer.record_initial(engine._time, engine.signals)
+                except Exception as _exc:
+                    engine._result.log.append(f"// $dumpvars error: {_exc}")
+        elif name == "monitor":
+            # §18.5: $monitor — 登録のみ。実際の出力は各タイムステップ終了後に行う
+            # 新しい $monitor は古い登録を置き換える
+            if stmt.args and isinstance(stmt.args[0], StringLiteral):
+                fmt = stmt.args[0].text
+                arg_exprs = list(stmt.args[1:])
+            elif stmt.args:
+                fmt = None
+                arg_exprs = list(stmt.args)
+            else:
+                fmt = None
+                arg_exprs = []
+            engine._monitor_registration = (fmt, arg_exprs)
+            engine._monitor_last_values = None  # reset so first eval always emits
         yield 0
 
     elif isinstance(stmt, NullStmt):
@@ -974,6 +1082,14 @@ class SimEngine:
         self._deferred_bp_hit: Optional[tuple] = None  # (bp_id, file, line, time_ns)
         # active bp_check callable (set by Simulator.step_to_ns before each cycle)
         self._active_bp_check = None
+        # §18.5: shared $monitor state dict (prevents cross-executor duplicates)
+        self._monitor_state: dict = {}
+        # §18.5: $monitor registration — (stmt, fmt_str, arg_exprs) or None
+        # registered once by $monitor call; emitted at end of each time step
+        self._monitor_registration: Optional[tuple] = None  # (fmt, arg_exprs)
+        self._monitor_last_values: Optional[tuple] = None   # last emitted arg values
+        # §18.5: $dumpfile path (set by $dumpfile sys task)
+        self._dumpfile_path: Optional[str] = None
 
     # ------------------------------------------------------------------
     # EvalContext builder  (M4)
@@ -1168,6 +1284,7 @@ class SimEngine:
 
         # §18: Stop after posedge if requested (sub-cycle timing)
         if posedge_only:
+            _engine_check_monitor(self)
             return False  # negedge not yet run
 
         # --- Run initial blocks between posedge and negedge ---
@@ -1193,6 +1310,8 @@ class SimEngine:
 
         if self.vcd_writer:
             self.vcd_writer.record(self._time, self.signals)
+        # §18.5: $monitor — タイムステップ終了後に変化を確認して出力
+        _engine_check_monitor(self)
         return True  # both posedge and negedge ran
 
     # ------------------------------------------------------------------
@@ -1207,7 +1326,8 @@ class SimEngine:
             if self._is_triggered(proc.sensitivity, sig_name, old_val, new_val):
                 ex = _Executor(self.signals, self._widths, self._params, self._ctx,
                                max_loop=self.max_loop, time_ns=self._time,
-                               bp_check=getattr(self, "_active_bp_check", None))
+                               bp_check=getattr(self, "_active_bp_check", None),
+                                              monitor_state=getattr(self, "_monitor_state", {}))
                 try:
                     ex.execute(proc.body)
                 except _FinishSignal:
@@ -1224,6 +1344,7 @@ class SimEngine:
                     self._result.log.append(line)
                     if self.verbose:
                         print(line)
+
         return nba
 
     @staticmethod
@@ -1287,7 +1408,8 @@ class SimEngine:
             for proc in self.design.comb_procs:
                 ex = _Executor(self.signals, self._widths, self._params, self._ctx,
                                max_loop=self.max_loop, time_ns=self._time,
-                               bp_check=getattr(self, "_active_bp_check", None))
+                               bp_check=getattr(self, "_active_bp_check", None),
+                                              monitor_state=getattr(self, "_monitor_state", {}))
                 try:
                     ex.execute(proc.body)
                 except _FinishSignal:
@@ -1302,6 +1424,7 @@ class SimEngine:
                     self._result.log.append(line)
                     if self.verbose:
                         print(line)
+
 
             if not changed:
                 break
@@ -1326,7 +1449,8 @@ class SimEngine:
                     for proc in self.design.comb_procs:
                         ex = _Executor(self.signals, self._widths, self._params,
                                        self._ctx, max_loop=self.max_loop,
-                                       time_ns=self._time)
+                                       time_ns=self._time,
+                                                      monitor_state=getattr(self, "_monitor_state", {}))
                         try:
                             ex.execute(proc.body)
                         except Exception:

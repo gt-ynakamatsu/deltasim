@@ -663,7 +663,7 @@ deltasim test counter.sv --spec spec.yaml --case a --case b  # 複数指定
 
 - 一致しないケースは **結果に含まれない**（SKIP でも空でもなく、単純に除外）
 - `filter_cases` パターンは `fnmatch` ワイルドカードに対応（`*`, `?` 等）
-- すべてのケースが除外された場合も `TestResult` を返す（`cases=[]`, `status="PASS"`）
+- すべてのケースが除外された場合は §14.1 に従い E_NO_CASE エラーを返す（`cases=[]`）
 - 戻り値は常に `TestResult`（`None` にはならない）
 
 ---

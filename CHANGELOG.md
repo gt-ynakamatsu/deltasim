@@ -7,6 +7,17 @@
 
 ## [0.3.0+] — 開発中（§18.2 -f ファイルリスト + §18 対話デバッグ）
 
+### 修正（§18.5 不具合修正）
+
+- **TB 生成**: 内部信号（direction=None）をポート接続から除外（E_UNKNOWN_PORT エラーを追加）
+- **`gen --strings` 見出し**: ハードコードから実際のモジュール名に変更
+- **`$monitor`**: 値変化時のみ出力・同一時刻内重複なし（エンジン共有状態で管理）
+- **E_NO_CHECK**: チェック0件の spec → E_NO_CHECK エラー（全 skip は除外）
+- **top 自動検出**: インスタンスされていないモジュールを候補に。複数なら E_AMBIGUOUS_TOP
+- **`find_top_candidates()`**: 公開 API として追加（GUI から使用可能）
+- **`--log`**: run/test/gen/parse に追加（デフォルト `deltasim.log`）
+- safety.py `_WRITE_OPTS_LONG` に `--log` を追加
+
 ### 追加（§18.3 ローカル LLM 最小実装）
 
 - **`deltasim ask "<文>"`**: 自然言語コマンド提案 + 確認実行

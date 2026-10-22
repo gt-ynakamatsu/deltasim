@@ -119,7 +119,7 @@ class TestNoMatchError:
             "reset": {"signal": "rst_n", "active_low": True, "duration_cycles": 2},
             "sim": {"cycles": 12, "seed": 0},
             "cases": [
-                {"name": "run_me", "expected": []},
+                {"name": "run_me", "expected": [{"at": 5, "check": {"count": 3}}]},
                 {"name": "skip_me", "expected": []},
             ],
         }

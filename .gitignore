@@ -28,3 +28,4 @@ htmlcov/
 
 # Simulation outputs
 *.vcd
+deltasim.log

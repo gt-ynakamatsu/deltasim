@@ -72,6 +72,25 @@ _FILELIST_OPT = click.option(
     help="§18.2: ファイルリスト (.f) を指定（複数回指定可）",
 )
 
+# §18.5: --log オプション（run/test/gen/parse 共通）
+_LOG_OPT = click.option(
+    "--log", "log_path", default="deltasim.log", show_default=True,
+    metavar="PATH", help="実行ログの出力先ファイル（既定: deltasim.log）",
+)
+
+
+def _write_log(log_path: str, lines: list) -> None:
+    """ログ行を log_path に書き出す（UTF-8・LF 改行）。
+    lines が空でもファイルを作成する（実行の記録として）。
+    """
+    try:
+        from pathlib import Path
+        Path(log_path).write_text(
+            "\n".join(lines) + ("\n" if lines else ""), encoding="utf-8", newline="\n"
+        )
+    except Exception as exc:
+        click.echo(f"WARNING: ログ書き込み失敗 {log_path!r}: {exc}", err=True)
+
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -105,6 +124,7 @@ def _emit_json_event(event: dict, json_events: bool) -> None:
 @main.command("run")
 @click.argument("sv_files", nargs=-1, required=False, metavar="FILE [FILE …]")
 @_FILELIST_OPT
+@_LOG_OPT
 @click.option("--top", "-t", default=None)
 @click.option("--cycles", "-n", default=100, show_default=True, type=int)
 @click.option("--vcd", "-o", default=None, metavar="PATH")
@@ -124,7 +144,7 @@ def _emit_json_event(event: dict, json_events: bool) -> None:
               help="デルタサイクル上限（既定10000）。超えると E_DELTA_LIMIT。")
 @click.option("--max-loop", "max_loop", default=None, type=int, metavar="N",
               help="ループ反復上限（既定1000000）。超えると E_LOOP_LIMIT。")
-def run_cmd(sv_files, filelist, top, cycles, vcd, reset_cycles, half_period,
+def run_cmd(sv_files, filelist, log_path, top, cycles, vcd, reset_cycles, half_period,
             clk, rst, rst_active_high, params, verbose, json_out, json_events,
             max_delta, max_loop, interactive):
     """SystemVerilog ファイルをシミュレートして VCD を出力する。
@@ -214,6 +234,7 @@ def run_cmd(sv_files, filelist, top, cycles, vcd, reset_cycles, half_period,
     if result.log:
         for line in result.log:
             click.echo(line)
+    _write_log(log_path, result.log)
     if result.cancelled:
         click.echo("[deltasim] キャンセルされました", err=True)
 
@@ -229,6 +250,7 @@ def run_cmd(sv_files, filelist, top, cycles, vcd, reset_cycles, half_period,
 @main.command("gen")
 @click.argument("sv_files", nargs=-1, required=False, metavar="FILE [FILE …]")
 @_FILELIST_OPT
+@_LOG_OPT
 @click.option("--top", "-t", default=None)
 @click.option("--param", "-p", "params", multiple=True, metavar="NAME=VALUE")
 @click.option("--out-dir", "-d", default=".", show_default=True)
@@ -238,7 +260,7 @@ def run_cmd(sv_files, filelist, top, cycles, vcd, reset_cycles, half_period,
 @click.option("--no-spec", is_flag=True, default=False)
 @click.option("--strings", is_flag=True, default=False,
               help="ファイル書き込みの代わりに文字列として stdout に出力")
-def gen_cmd(sv_files, filelist, top, params, out_dir, spec_path, tb_path, no_tb, no_spec, strings):
+def gen_cmd(sv_files, filelist, log_path, top, params, out_dir, spec_path, tb_path, no_tb, no_spec, strings):
     """テストベンチ SV と YAML スペックスケルトンを生成する。
 
     --strings: ファイルに書き込まず TB SV / YAML 文字列を stdout に出力する。
@@ -265,11 +287,13 @@ def gen_cmd(sv_files, filelist, top, params, out_dir, spec_path, tb_path, no_tb,
         sys.exit(1)
 
     if strings:
+        # §18.5: 見出しを実際のモジュール名にする
+        mod_name = result.get("module", "module")
         if not no_tb:
-            click.echo("=== counter_tb.sv ===")
+            click.echo(f"=== {mod_name}_tb.sv ===")
             click.echo(result.get("tb_sv", ""))
         if not no_spec:
-            click.echo("=== counter_spec.yaml ===")
+            click.echo(f"=== {mod_name}_spec.yaml ===")
             click.echo(result.get("spec_yaml", ""))
     else:
         if "tb_path" in result:
@@ -285,6 +309,7 @@ def gen_cmd(sv_files, filelist, top, params, out_dir, spec_path, tb_path, no_tb,
 @main.command("test")
 @click.argument("sv_files", nargs=-1, required=False, metavar="FILE [FILE …]")
 @_FILELIST_OPT
+@_LOG_OPT
 @click.option("--top", "-t", default=None)
 @click.option("--spec", "-s", required=True, metavar="YAML")
 @click.option("--param", "-p", "params", multiple=True, metavar="NAME=VALUE")
@@ -309,7 +334,7 @@ def gen_cmd(sv_files, filelist, top, params, out_dir, spec_path, tb_path, no_tb,
               help="デルタサイクル上限（既定10000）。超えると E_DELTA_LIMIT。")
 @click.option("--max-loop", "max_loop", default=None, type=int, metavar="N",
               help="ループ反復上限（既定1000000）。超えると E_LOOP_LIMIT。")
-def test_cmd(sv_files, filelist, top, spec, params, junit, json_out, vcd, seed,
+def test_cmd(sv_files, filelist, log_path, top, spec, params, junit, json_out, vcd, seed,
              verbose, no_color, json_events, record_mode, record_all_deprecated,
              wave_mem_mb, filter_cases, max_delta, max_loop):
     """YAML スペックに従ってテストを実行し PASS/FAIL を判定する。
@@ -413,6 +438,9 @@ def test_cmd(sv_files, filelist, top, spec, params, junit, json_out, vcd, seed,
         Path(json_out).write_text(result.to_json(), encoding="utf-8")
         click.echo(f"[deltasim test] JSON: {json_out}", err=True)
 
+    # ログ出力
+    _write_log(log_path, result.log)
+
     sys.exit(0 if result.status == "PASS" else 1)
 
 
@@ -423,7 +451,8 @@ def test_cmd(sv_files, filelist, top, spec, params, junit, json_out, vcd, seed,
 @main.command("parse")
 @click.argument("sv_files", nargs=-1, required=False, metavar="FILE [FILE …]")
 @_FILELIST_OPT
-def parse_cmd(sv_files, filelist):
+@_LOG_OPT
+def parse_cmd(sv_files, filelist, log_path):
     """SV ファイルをパースして AST を表示する（デバッグ用）。
     -f FILE.f でファイルリストを指定できます。
     """
@@ -444,6 +473,7 @@ def parse_cmd(sv_files, filelist):
     for p in di.ports:
         click.echo(f"    {p.direction} {p.name} [{p.width}]")
     click.echo(f"  signals: {len(di.signals)}")
+    _write_log(log_path, [f"deltasim parse {di.module}: {di.status}"])
 
 
 # ---------------------------------------------------------------------------
