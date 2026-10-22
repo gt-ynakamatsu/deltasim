@@ -2537,9 +2537,9 @@ class TestGenSave:
         assert res.status_code == 200, f"force=True で上書き成功: {res.text}"
         data = res.json()
         assert data.get("status") == "PASS"
-        # ファイルが上書きされていること
-        assert (tmp_path / "counter_tb.sv").read_text() != "// existing"
-        assert (tmp_path / "counter_spec.yaml").read_text() != "# existing"
+        # ファイルが上書きされていること（encoding 指定）
+        assert (tmp_path / "counter_tb.sv").read_text(encoding="utf-8") != "// existing"
+        assert (tmp_path / "counter_spec.yaml").read_text(encoding="utf-8") != "# existing"
 
     def test_gen_file_mode_no_conflict_no_409(self, client, tmp_path):
         """ファイルが存在しない場合は force なしでも書き出せること"""
