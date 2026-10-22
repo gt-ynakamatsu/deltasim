@@ -76,7 +76,12 @@ def print_results_v2(
 
     # §15.12: top-level warnings (W_UNKNOWN_KEY 等)
     for w in getattr(result, "warnings", []):
-        print(f"  [WARNING] {w.code}: {w.message}")
+        try:
+            print(f"  [WARNING] {w.code}: {w.message}")
+        except UnicodeEncodeError:
+            # Windows で日本語メッセージが端末エンコーディングと合わない場合の保護
+            safe_msg = w.message.encode("ascii", errors="replace").decode("ascii")
+            print(f"  [WARNING] {w.code}: {safe_msg}")
 
     # Print per-case details if multi-case, or flat if single-case
     if result.cases:
