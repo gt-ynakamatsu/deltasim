@@ -37,3 +37,70 @@ jobs:
           path: |
             .pytest_cache/
           retention-days: 3
+
+  # -------------------------------------------------------------------
+  # Smoke test: build wheel → fresh venv → deltasim --version + gui --help
+  # editable install ではなく通常の wheel インストールで確認する
+  # -------------------------------------------------------------------
+  smoke:
+    name: smoke (${{ matrix.os }} / Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.11"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Build wheel
+        run: |
+          python -m pip install --upgrade build
+          python -m build --wheel --outdir dist/
+
+      - name: Create fresh venv and install wheel (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          python3 -m venv smoke_venv
+          smoke_venv/bin/pip install --quiet "$(ls dist/*.whl)[gui]"
+
+      - name: Create fresh venv and install wheel (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          py -m venv smoke_venv
+          $whl = (Get-ChildItem dist\*.whl | Select-Object -First 1).FullName
+          smoke_venv\Scripts\pip install --quiet "$whl[gui]"
+
+      - name: Smoke — deltasim --version (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          VER=$(smoke_venv/bin/deltasim --version)
+          echo "version output: $VER"
+          echo "$VER" | grep "0.3.0"
+
+      - name: Smoke — deltasim --version (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ver = smoke_venv\Scripts\deltasim --version
+          Write-Host "version output: $ver"
+          if ($ver -notmatch "0\.3\.0") { Write-Error "version mismatch: $ver"; exit 1 }
+
+      - name: Smoke — deltasim gui --help (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          smoke_venv/bin/deltasim gui --help
+          echo "deltasim gui --help exit code: $?"
+
+      - name: Smoke — deltasim gui --help (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          smoke_venv\Scripts\deltasim gui --help
+          if ($LASTEXITCODE -ne 0) { Write-Error "gui --help failed: $LASTEXITCODE"; exit 1 }
