@@ -389,10 +389,11 @@ endmodule
         design = elaborate(mod)
         eng = SimEngine(design, reset_cycles=0)
         eng.set_input("a", 0)
-        # a | Z = X in IEEE; currently simplified to Z propagation → None (X)
+        # 0 | z = x per IEEE 1800 Table 27-1 (z treated as x)
         b = eng.get_output("b")
-        # b should be X (None) or Z
-        assert b is None or isinstance(b, type(Z_VALUE))
+        # §18.7: FourState(1'bx), None、または Z_VALUE すべて受け付ける
+        from deltasim.sim.engine import _has_xz
+        assert _has_xz(b), f"expected x/z but got {b!r}"
 
     def test_vcd_z_output(self, tmp_path):
         """Z 値が VCD に 'z' として記録されること"""

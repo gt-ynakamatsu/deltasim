@@ -9,26 +9,64 @@
 
 ### 追加（§18.7 4値論理）
 
-- `FourState(aval, bval, width)` 型で 0/1/x/z をビット単位で保持
-- IEEE 1800 準拠の演算: `&`（0&x=0, 1&x=x）、`|`（1|x=1, 0|x=x）、`^`、`~`
-- `===`/`!==`（厳密4値比較）、`==?`/`!=?`（ワイルドカード比較）
-- VCD の x/z 出力対応
+#### コアライブラリ (`deltasim/fourstate.py`)
+- `FourState(aval, bval, width)` 型で IEEE 1800 Annex A 形式の 2マスク表現
+- IEEE 1800 準拠演算: `&`（0&x=0, 1&x=x, 0&z=0）、`|`（1|x=1, 0|x=x, 1|z=1）、`^`、`~`
+- `===`/`!==`（厳密4値比較）、`==?`（z/? ワイルドカード比較）
+- parse_literal: sized/unsized base/fill 全形式対応
+
+#### シミュレーションコア (`deltasim/sim/engine.py`)
+- `_eval_binop`/`_eval_unaryop`: x/z ビットを含む場合 FourState パスへ（per-bit 精度）
+- `==` は x/z で x を返す; `===`/`!==` は常に 0/1
+- `?:` の条件が x のとき両辺の per-bit merge（一致ビット → 確定値、不一致 → x）
+- `case`: `===` 相当; `casez`: pattern 側の z/`?` ワイルドカード; `casex`: x/z ワイルドカード
+- 内部信号（`direction=None`の logic/reg）が x で初期化; ポートは 0 のまま
+- 初期化後に `_eval_comb_loop()` を実行してコンビナショナル出力を確定
+- `$display` の `%b/%h/%d` が x/z を正しく表示（`%h` で x ビットは X、`%d` では x）
 
 #### §18.7.1 リテラル形式の確定仕様
-
 - **4値リテラルとして扱うのは基数つき形式のみ**:
   - sized: `4'b1x0z`、`8'hxx`
   - unsized base: `'bx`、`'hz`
   - fill: `'x`、`'z`、`'0`、`'1`
-- **bare `x`/`z`（基数なし）は常に識別子**: 式パーサ・制約式・RTL すべてで
+  - RTL の casez/casex パターン `4'b1???` の `?` も xz_mask に保存
+- **bare `x`/`z`（基数なし）は常に識別子**: 式パーサ・制約式・RTL すべてで（未定義なら ExprError）
 - YAML `expected/check` に 4値文字列 `"4'b1x??"` を書ける（`?` はワイルドカード）。裸の `"x"` 等は `ScenarioError`
 - YAML `stimulus/set` に基数つきリテラルを書ける（`"'bx"`、`"1'bz"` 等）。裸の `"z"` 等は `ScenarioError`
 - constraints 中の bare `x`/`z` はポート名として扱われ、ポートでなければ `E_UNKNOWN_PORT`
 
+#### VCD / API
+- `vcd/writer.py`: FourState の x/z を VCD に出力
+- `result.py` の `val_to_4state`: str/FourState 対応
+- `_compare_signal_value`: FourStatePattern 比較
+
+### 挙動変更一覧（§18.7 で変わること）
+
+| 変更点 | 旧動作 | 新動作 |
+|---|---|---|
+| 内部 logic/reg の初期値 | 0 | x (None) |
+| `assign y = ~y;` の初期状態 | y=0 → ループ → DeltaLimit | y=0 (ポート) → ループ継続 |
+| `1 & 'x` | None (x) | FourState(bit=x) |
+| `0 & 'x` | None (x) | 0 ✓ (IEEE 1800 修正済) |
+| `x ^ y` | None (x) | FourState(x) — x/z は x に (不意の z ビットなし) |
+| `0 \| 'z` | None (x) | FourState(x) — z treated as x ✓ |
+| `===` with x/z | 純2値比較 (xを0扱い) | FourState ceq (正確) |
+| `case(x)` | 0 と比較 | x は no-match → default |
+| `casez` pattern `?` | 整数0扱い | xz_mask wildcard ✓ |
+| counters without `initial` | 0 からカウント | x からカウント (x+1=x) |
+| `initial y = 0;` のある回路 | 変わらず | 変わらず ✓ |
+| リセット付き回路 | 変わらず | 変わらず ✓ |
+
+#### 性能（100万サイクル相当: リセット付きカウンタ、100k cy × 3試行平均）
+- **現バージョン**: ~130k cy/s (0.77s)
+- pure 2-state パスはハンドラの分岐追加のみ — x/z がない場合のオーバーヘッドは小
+
 ### 互換性変更
-- `logic`/`reg` の初期値は現在も `0`（将来的に `x` に変更予定）
-- YAML の整数 expected に対して、actual が x/z なら FAIL
+- YAML の整数 expected に対して、actual が x/z なら FAIL（変わらず）
 - **破壊的変更**: YAML で `check: {sig: "x"}` や `set: {inp: "z"}` は `ScenarioError`（以前は黙って整数 0 扱い）
+- **破壊的変更**: 内部 logic が 0 でなく x で始まるため、reset なしカウンタが x を出力する
+  → `initial` ブロックで明示的に初期化するか、リセット付き回路を使ってください
+- §18.6 constraints の input 初期値 0 仮定は**維持**: テストベンチが制御する input ポートは 0 スタート
 
 ### 追加（§18.6 constraints: 制約付き乱数生成）
 

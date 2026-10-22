@@ -1081,8 +1081,8 @@ def _parse_number_token(s: str) -> NumberLiteral:
         digits = rest[1:]
         base_map = {"b": 2, "o": 8, "d": 10, "h": 16}
         base = base_map.get(base_char, 10)
-        # §18.7: x/z digits → parse as FourState if present
-        has_xz = any(d.lower() in ("x", "z") for d in digits)
+        # §18.7: x/z/? digits → parse as FourState if present
+        has_xz = any(d.lower() in ("x", "z") or d == "?" for d in digits)
         if has_xz and base in (2, 8, 16):
             from deltasim.fourstate import _parse_xz_digits, _mask
             eff_width = width if width is not None else 32

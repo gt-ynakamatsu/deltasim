@@ -178,7 +178,11 @@ class _Parser:
                     then_v = self._expr(0)
                     self._expect(":")
                     else_v = self._expr(1)
-                    left = then_v if left else else_v
+                    if _is_x(left) or _is_z(left):
+                        # §18.7: x/z 条件 → per-bit merge（一致ビットは値、不一致は x）
+                        left = _ternary_x_merge(then_v, else_v)
+                    else:
+                        left = then_v if left else else_v
                     continue
                 prec = _BINOP_PREC.get(op)
                 if prec is None or prec < min_prec:
@@ -263,6 +267,37 @@ def _is_x(v: Any) -> bool:
 def _is_z(v: Any) -> bool:
     from deltasim.result import Z_VALUE
     return v is Z_VALUE
+
+
+def _ternary_x_merge(then_v: Any, else_v: Any) -> Any:
+    """§18.7: ?: の条件が x/z のとき per-bit merge。
+    両辺が同一ビットで一致かつ純2値 → その値。不一致 → x (None)。
+    """
+    if then_v is None or else_v is None:
+        return None   # どちらかが x → x
+    from deltasim.result import Z_VALUE
+    if then_v is Z_VALUE or else_v is Z_VALUE:
+        return None   # z が含まれる → x
+    try:
+        from deltasim.fourstate import FourState, coerce, _mask
+        w = 32  # 評価器は幅を持たないので 32bit で比較
+        tf = coerce(then_v, w)
+        ef = coerce(else_v, w)
+        mask = _mask(w)
+        pure_mask = ~(tf.bval | ef.bval) & mask
+        agree_mask = pure_mask & ~(tf.aval ^ ef.aval) & mask
+        new_bval = ~agree_mask & mask
+        # 不確定ビットは x (aval=1) にする
+        new_aval = (tf.aval & agree_mask) | new_bval
+        if new_bval == 0:
+            return new_aval
+        result_fs = FourState(new_aval, new_bval, w)
+        # 全ビット x なら None を返す（後方互換）
+        if new_bval == mask and new_aval == mask:
+            return None
+        return result_fs
+    except Exception:
+        return None
 
 
 def _to_bool(v: Any) -> bool:

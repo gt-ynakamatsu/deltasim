@@ -76,37 +76,51 @@ class FourState:
         return FourState(new_aval | self.bval, self.bval, self.width)
 
     def bitwise_and(self, other: "FourState") -> "FourState":
-        """& 演算: 0&x=0, 1&x=x, x&x=x"""
+        """& 演算: IEEE 1800 Table 27-1 (z は x として扱う)
+        0&x=0, 1&x=x, 0&z=0, 1&z=x, x&x=x, z&z=x
+        """
         mask = _mask(max(self.width, other.width))
         w = max(self.width, other.width)
-        a1, b1 = self.aval, self.bval
-        a2, b2 = other.aval, other.bval
+        # z → x (aval=1, bval=1) の正規化
+        a1 = (self.aval | self.bval) & mask
+        b1 = self.bval & mask
+        a2 = (other.aval | other.bval) & mask
+        b2 = other.bval & mask
         # Known-zero bits: ~a1 & ~b1 (self=0) OR ~a2 & ~b2 (other=0)
         known_zero = ((~a1 & ~b1) | (~a2 & ~b2)) & mask
         new_bval = ((b1 | b2) & ~known_zero) & mask
-        new_aval = (a1 & a2) & mask
+        new_aval = ((a1 & a2) | new_bval) & mask  # uncertain bits → x (aval=1)
         return FourState(new_aval, new_bval, w)
 
     def bitwise_or(self, other: "FourState") -> "FourState":
-        """| 演算: 1|x=1, 0|x=x, x|x=x"""
+        """| 演算: IEEE 1800 Table 27-1 (z は x として扱う)
+        1|x=1, 0|x=x, 1|z=1, 0|z=x, x|x=x, z|z=x
+        """
         mask = _mask(max(self.width, other.width))
         w = max(self.width, other.width)
-        a1, b1 = self.aval, self.bval
-        a2, b2 = other.aval, other.bval
-        # Known-one bits
+        # z → x (aval=1, bval=1) の正規化
+        a1 = (self.aval | self.bval) & mask
+        b1 = self.bval & mask
+        a2 = (other.aval | other.bval) & mask
+        b2 = other.bval & mask
+        # Known-one bits: pure 1 in either operand
         known_one = ((a1 & ~b1) | (a2 & ~b2)) & mask
         new_bval = ((b1 | b2) & ~known_one) & mask
-        new_aval = ((a1 | a2) | known_one) & mask
+        new_aval = ((a1 | a2) | new_bval) & mask  # uncertain bits → x (aval=1)
         return FourState(new_aval, new_bval, w)
 
     def bitwise_xor(self, other: "FourState") -> "FourState":
-        """^ 演算: x/z → x"""
+        """^ 演算: IEEE 1800 Table 27-2 (z は x として扱う、不確定は x に伝搬)"""
         mask = _mask(max(self.width, other.width))
         w = max(self.width, other.width)
-        a1, b1 = self.aval, self.bval
-        a2, b2 = other.aval, other.bval
+        # z → x (aval=1, bval=1) の正規化
+        a1 = (self.aval | self.bval) & mask
+        b1 = self.bval & mask
+        a2 = (other.aval | other.bval) & mask
+        b2 = other.bval & mask
         new_bval = (b1 | b2) & mask
-        new_aval = (a1 ^ a2) & mask
+        # 不確定ビットは x（aval=1）に。確定ビットは XOR を取る。
+        new_aval = (((a1 ^ a2) & ~new_bval) | new_bval) & mask
         return FourState(new_aval, new_bval, w)
 
     def eq_4state(self, other: "FourState") -> Optional[bool]:

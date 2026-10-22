@@ -311,6 +311,9 @@ module clk_tb;
         forever #5 clk = ~clk;
     end
 
+    // §18.7: 内部 logic は x で初期化されるため、明示的に 0 で初期化
+    initial cnt = 4'b0000;
+
     // counter
     always_ff @(posedge clk) begin
         cnt <= cnt + 1;
