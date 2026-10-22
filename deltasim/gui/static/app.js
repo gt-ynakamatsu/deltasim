@@ -48,6 +48,11 @@ const state = {
   // デバッグパネル
   debugSession: null,
   debugWaveData: null,
+  // §18.4 コンソール
+  consoleHistory: [],       // コマンド履歴
+  consoleHistIdx: -1,       // 履歴カーソル位置
+  consoleRunning: false,    // コマンド実行中フラグ
+  consoleCurrentJob: null,  // 実行中ジョブID
 };
 
 // =========================================================================
@@ -168,6 +173,14 @@ const dom = {
   debugBps: $("debug-bps"),
   debugWaveformCanvas: $("debug-waveform-canvas"),
   debugLog: $("debug-log"),
+  // §18.4 コンソールパネル
+  btnConsoleToggle: $("btn-console-toggle"),
+  consolePanel: $("console-panel"),
+  consoleOutput: $("console-output"),
+  consoleInput: $("console-input"),
+  btnConsoleSend: $("btn-console-send"),
+  btnConsoleStop: $("btn-console-stop"),
+  consoleSessionIndicator: $("console-session-indicator"),
 };
 
 // =========================================================================
@@ -304,6 +317,10 @@ const api = {
     sv_files: sv, top: top ?? null, cycles: cycles ?? 100,
   }),
   runResult:    (jid)               => apiFetch("GET",  `/api/run/${jid}/result`).catch(() => null),
+  // §18.4 コンソール API
+  consoleExecStart: (sid, command)  => apiFetch("POST", `/api/console/${sid}/exec/start`, { command }),
+  consoleExecCancel:(sid, jid)      => apiFetch("POST", `/api/console/${sid}/exec/${jid}/cancel`, {}),
+  consoleState:    (sid)            => apiFetch("GET",  `/api/console/${sid}/state`),
   // Simulator API (§8)
   simCreate:    (sv, top, params, hp, rc) => apiFetch("POST", "/api/simulator", {
     sv_files: sv, top: top ?? null, params: params ?? {}, half_period: hp ?? 5, reset_cycles: rc ?? 10,
@@ -1996,6 +2013,7 @@ async function openDebugPanel() {
       dbgLog(`セッション作成: ${sess.module}  signals: ${sess.signals.length}`, "dbg-log-info");
       renderDebugSignals(sess.signals);
       updateDebugTime(sess.time_ns, 0);
+      _consoleUpdateIndicator();  // §18.4 コンソールのセッション表示を更新
     } catch (e) {
       dbgLog(`セッション作成エラー: ${e.message}`, "dbg-log-line");
     }
@@ -2249,6 +2267,166 @@ document.addEventListener("click", e => {
 });
 
 // =========================================================================
+// §18.4 コンソール入力欄
+// =========================================================================
+
+function _consoleOut(text, cls = "con-line") {
+  if (!dom.consoleOutput) return;
+  const el = document.createElement("div");
+  el.className = cls;
+  el.textContent = text;
+  dom.consoleOutput.appendChild(el);
+  dom.consoleOutput.scrollTop = dom.consoleOutput.scrollHeight;
+}
+
+function _consoleUpdateIndicator() {
+  if (!dom.consoleSessionIndicator) return;
+  const sid = state.debugSession?.session_id;
+  dom.consoleSessionIndicator.textContent = sid
+    ? `セッション: ${sid.slice(0, 8)}…`
+    : "セッションなし（デバッグパネルを開いてください）";
+  if (dom.consoleInput) dom.consoleInput.disabled = !sid;
+  if (dom.btnConsoleSend) dom.btnConsoleSend.disabled = !sid;
+}
+
+function toggleConsolePanel() {
+  if (!dom.consolePanel) return;
+  const visible = dom.consolePanel.style.display !== "none";
+  dom.consolePanel.style.display = visible ? "none" : "flex";
+  if (!visible) {
+    _consoleUpdateIndicator();
+    if (dom.consoleInput) dom.consoleInput.focus();
+  }
+}
+
+async function consoleSendCommand() {
+  const sid = state.debugSession?.session_id;
+  if (!sid) {
+    _consoleOut("セッションがありません。デバッグパネル（🔬）でセッションを作成してください。", "con-error");
+    return;
+  }
+  const cmd = dom.consoleInput?.value?.trim();
+  if (!cmd || state.consoleRunning) return;
+
+  // 履歴に追加（重複排除）
+  if (state.consoleHistory[state.consoleHistory.length - 1] !== cmd) {
+    state.consoleHistory.push(cmd);
+    if (state.consoleHistory.length > 200) state.consoleHistory.shift();
+  }
+  state.consoleHistIdx = -1;
+  dom.consoleInput.value = "";
+
+  // プロンプト + コマンドをコンソールに表示
+  _consoleOut(`vsim> ${cmd}`, "con-cmd");
+
+  state.consoleRunning = true;
+  dom.btnConsoleSend.disabled = true;
+  dom.btnConsoleStop.disabled = false;
+
+  try {
+    const { job_id } = await api.consoleExecStart(sid, cmd);
+    state.consoleCurrentJob = job_id;
+    await _consoleConsumeSSE(sid, job_id);
+  } catch (e) {
+    _consoleOut(`ERROR: ${e.message}`, "con-error");
+  } finally {
+    state.consoleRunning = false;
+    state.consoleCurrentJob = null;
+    if (dom.btnConsoleSend) dom.btnConsoleSend.disabled = false;
+    if (dom.btnConsoleStop) dom.btnConsoleStop.disabled = true;
+    if (dom.consoleInput) dom.consoleInput.focus();
+  }
+}
+
+async function _consoleConsumeSSE(sid, job_id) {
+  return new Promise(resolve => {
+    const url = `/api/console/${sid}/exec/${job_id}/events`;
+    const es = new EventSource(url);
+    es.onmessage = e => {
+      try {
+        const ev = JSON.parse(e.data);
+        const evType = ev.event ?? ev.type;
+
+        if (evType === "output") {
+          (ev.lines ?? []).forEach(l => _consoleOut(l, "con-line"));
+        } else if (evType === "finish") {
+          (ev.output ?? []).forEach(l => _consoleOut(l, "con-line"));
+          if (ev.paused_bp) {
+            _consoleOut(`# ブレークポイント停止: ${ev.paused_bp.label} (t=${ev.paused_bp.time_ns}ns)`, "con-bp");
+            // 波形カーソルをその時刻に合わせる
+            state.cursorA = ev.paused_bp.time_ns;
+            if (state.waveformData) drawWaveform();
+          }
+          if (ev.quit) {
+            _consoleOut("# セッション終了（サーバーは継続中）", "con-warn");
+            // セッションを削除
+            if (state.debugSession?.session_id) {
+              api.simDelete(state.debugSession.session_id).catch(() => {});
+              state.debugSession = null;
+              _consoleUpdateIndicator();
+            }
+          }
+          // デバッグパネルの時刻表示を更新
+          if (ev.time_ns != null && dom.debugTime) {
+            dom.debugTime.textContent = `t=${ev.time_ns}ns  cycle=${ev.cycle ?? 0}`;
+          }
+          // in-memory 波形を更新（デバッグパネルが開いている場合）
+          if (state.debugSession && ev.time_ns != null) {
+            api.simWaveform(state.debugSession.session_id, null, 0, null)
+              .then(data => { state.debugWaveData = data; })
+              .catch(() => {});
+          }
+          es.close(); resolve();
+        } else if (evType === "error") {
+          _consoleOut(`ERROR: ${ev.message}`, "con-error");
+          es.close(); resolve();
+        }
+      } catch (_) {}
+    };
+    es.onerror = () => { es.close(); resolve(); };
+  });
+}
+
+async function consoleStop() {
+  const sid = state.debugSession?.session_id;
+  const jid = state.consoleCurrentJob;
+  if (!sid || !jid) return;
+  try {
+    await api.consoleExecCancel(sid, jid);
+    _consoleOut("# 中断リクエストを送信しました", "con-warn");
+  } catch (e) {
+    _consoleOut(`中断エラー: ${e.message}`, "con-error");
+  }
+}
+
+function _consoleHandleKeydown(e) {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    consoleSendCommand();
+    return;
+  }
+  if (e.key === "ArrowUp") {
+    e.preventDefault();
+    if (state.consoleHistory.length === 0) return;
+    if (state.consoleHistIdx < 0) state.consoleHistIdx = state.consoleHistory.length - 1;
+    else if (state.consoleHistIdx > 0) state.consoleHistIdx--;
+    dom.consoleInput.value = state.consoleHistory[state.consoleHistIdx] ?? "";
+    return;
+  }
+  if (e.key === "ArrowDown") {
+    e.preventDefault();
+    if (state.consoleHistIdx < 0) return;
+    state.consoleHistIdx++;
+    if (state.consoleHistIdx >= state.consoleHistory.length) {
+      state.consoleHistIdx = -1;
+      dom.consoleInput.value = "";
+    } else {
+      dom.consoleInput.value = state.consoleHistory[state.consoleHistIdx] ?? "";
+    }
+  }
+}
+
+// =========================================================================
 // ユーティリティ
 // =========================================================================
 
@@ -2341,6 +2519,12 @@ dom.btnDbgRelease.addEventListener("click", dbgRelease);
 dom.btnDbgBpAdd.addEventListener("click", dbgAddBp);
 
 window.addEventListener("resize", () => { if (state.waveformData) drawWaveform(); });
+
+// §18.4 コンソール
+if (dom.btnConsoleToggle) dom.btnConsoleToggle.addEventListener("click", toggleConsolePanel);
+if (dom.btnConsoleSend)   dom.btnConsoleSend.addEventListener("click", consoleSendCommand);
+if (dom.btnConsoleStop)   dom.btnConsoleStop.addEventListener("click", consoleStop);
+if (dom.consoleInput)     dom.consoleInput.addEventListener("keydown", _consoleHandleKeydown);
 
 // =========================================================================
 // 初期化

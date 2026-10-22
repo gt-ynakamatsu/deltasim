@@ -598,6 +598,112 @@ data: {"event": "<type>", ...}\n\n
 
 ---
 
+## 6. コンソール入力欄（§18.4 / §18.1 対話デバッグ）
+
+### 6.1 使い方
+
+ログパネルの **「コンソール」** ボタンをクリックするとコンソール入力欄が表示されます。
+
+```
+vsim> examine count
+0x05
+vsim> run 20
+# t=120ns  cycle=12
+vsim> bp -time 200
+# bp [1] @ 200ns
+vsim> run -all
+# ブレークポイント停止: @ 200ns (t=200ns)
+```
+
+- **Enterキー** または **「実行」ボタン** でコマンドを送信
+- **上下矢印キー** でコマンド履歴をたどれます（最大 200 件）
+- **「■ 中断」ボタン** で `run -all` 等の長時間コマンドをキャンセル
+- `quit` / `exit` はセッションを終了します（サーバーは継続中）
+
+コンソールはデバッグパネル（🔬）と **同一セッション** を共有します。  
+セッションがない場合は、デバッグパネルを開いてセッションを作成してください。
+
+### 6.2 使えるコマンド（§18.1 対応）
+
+詳細は `docs/interactive.md` を参照してください。
+
+| コマンド | 説明 |
+|---------|------|
+| `run N[ns\|us\|ps]` | N 時間進める |
+| `run -all` | 終了またはブレークポイントまで実行 |
+| `run -continue` | 次のブレークポイントまで実行 |
+| `examine [-radix ...] SIGNAL` | 信号値を表示 |
+| `force SIGNAL VALUE` | 信号を強制固定 |
+| `noforce SIGNAL` | 強制固定を解除 |
+| `restart` | t=0 にリセット |
+| `bp -time T` | 時刻ブレークポイント設定 |
+| `bp -list` | ブレークポイント一覧 |
+| `bp -delete ID` | ブレークポイント削除 |
+| `when {COND} {CMDS}` | 条件監視（False→True 遷移で発火） |
+| `do FILE` | Tcl スクリプトファイルを実行 |
+| `quit` / `exit` | セッション終了 |
+| `help` | コマンド一覧 |
+| Tcl: `set var value`, `if`, `for`, `foreach`, `while`, `proc`, `expr`, `puts` | Tcl サブセット |
+
+> **セキュリティ**: 実行できるのは deltasim の対話コマンドのみです。  
+> シェルコマンド（`ls`、`dir` 等）、Tcl の `exec`、Python の `eval`/`exec` は使えません。  
+> `do <file>` のパスはサーバーの許可ルートで検証されます。
+
+### 6.3 ブレークポイントと Questa との違い
+
+**bp の停止タイミング**:  
+deltasim は「その時刻の処理（NBA 反映・デルタサイクル収束・VCD 書き込み）が完了してから停止」します。  
+Questa は即時停止のため、同一時刻でも内部状態が異なる場合があります。
+
+**when コマンド**:  
+`when` は信号変化のたびに条件を評価し、False→True に変化したときに本体コマンドを実行します。  
+true のままの変化は二度目以降は発火しません（Questa と同様）。
+
+### 6.4 コンソール HTTP API
+
+**コマンド実行開始**:
+```
+POST /api/console/{session_id}/exec/start
+{"command": "run 100"}
+→ {"job_id": "...", "session_id": "..."}
+```
+
+**SSE 進捗取得**:
+```
+GET /api/console/{session_id}/exec/{job_id}/events
+```
+
+SSE イベント:
+| event | フィールド | 説明 |
+|-------|---------|------|
+| `output` | `lines: [str]` | コマンド出力（リアルタイム） |
+| `finish` | `time_ns, cycle, output, paused_bp, quit` | 完了 |
+| `error` | `message` | 実行エラー |
+
+`finish` の `paused_bp` フィールド（null または以下）:
+```json
+{
+  "id": 1,
+  "label": "@ 200ns",
+  "time_ns": 200
+}
+```
+bp で停止した場合は UI が波形カーソルを `time_ns` に移動します。
+
+**コマンドキャンセル**:
+```
+POST /api/console/{session_id}/exec/{job_id}/cancel
+→ {"ok": true, "job_id": "..."}
+```
+
+**セッション状態取得**:
+```
+GET /api/console/{session_id}/state
+→ {"session_id": "...", "time_ns": 200, "cycle": 20, "breakpoints": [...], "whens": [...]}
+```
+
+---
+
 *このドキュメントは §18.8 の GUI 係担当分です。HTTP API・CLI 仕様の詳細は docs/api.md を参照してください。*
 
 ---

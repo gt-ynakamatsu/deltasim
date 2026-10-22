@@ -1234,3 +1234,113 @@ async def delete_waveset_endpoint(req: WavesetDeleteRequest):
     if not deleted:
         raise HTTPException(status_code=404, detail=f"セットが見つかりません: {req.name!r}")
     return {"ok": True, "name": req.name}
+
+# ---------------------------------------------------------------------------
+# /api/console — GUI コンソール入力欄（§18.4）
+# ---------------------------------------------------------------------------
+
+class ConsoleExecRequest(BaseModel):
+    command: str
+
+
+@app.post("/api/console/{session_id}/exec/start")
+async def console_exec_start(session_id: str, req: ConsoleExecRequest):
+    """コンソールコマンドを非同期実行開始して job_id を返す（§18.4）。
+
+    - 実行できるのは deltasim の対話コマンドのみ
+    - do <file> のパスは filesec で検証
+    - quit/exit はサーバーを止めず job の quit=True フラグとして返す
+    """
+    from deltasim.gui.sim_session import get_session as get_sim_session
+    from deltasim.gui.console_session import get_or_create as get_console
+    from deltasim.gui.jobs import create_job, run_console_job
+
+    sess = get_sim_session(session_id)
+    if sess is None:
+        raise HTTPException(status_code=404, detail=f"セッションが見つかりません: {session_id}")
+
+    # do <file> のパス検証（filesec で安全性確認）
+    cmd = req.command.strip()
+    if cmd.lower().startswith("do "):
+        raw_path = cmd[3:].strip().strip('"').strip("'")
+        from deltasim.gui.filesec import safe_path, PathSecurityError
+        try:
+            safe_path(raw_path, must_exist=True)
+        except PathSecurityError as e:
+            raise HTTPException(status_code=403, detail=str(e))
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail=f"ファイルが見つかりません: {raw_path!r}")
+
+    interp = get_console(session_id, sess.sim)
+    job = create_job()
+    job.task = asyncio.create_task(run_console_job(job, interp, cmd))
+    return {"job_id": job.job_id, "session_id": session_id}
+
+
+@app.get("/api/console/{session_id}/exec/{job_id}/events")
+async def console_exec_events(session_id: str, job_id: str):
+    """コンソールコマンドの進捗を SSE で配信する（§18.4）。"""
+    from deltasim.gui.jobs import get_job, event_stream
+
+    job = get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"ジョブが見つかりません: {job_id}")
+    return StreamingResponse(
+        event_stream(job),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.post("/api/console/{session_id}/exec/{job_id}/cancel")
+async def console_exec_cancel(session_id: str, job_id: str):
+    """実行中のコンソールコマンドをキャンセルする（§18.4）。"""
+    from deltasim.gui.jobs import get_job
+    from deltasim.gui.console_session import get as get_console
+
+    job = get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"ジョブが見つかりません: {job_id}")
+
+    # インタプリタに中断を要求
+    interp = get_console(session_id)
+    if interp is not None and hasattr(interp, "request_cancel"):
+        interp.request_cancel()
+
+    job.cancel_event.set()
+    if job.task and not job.task.done():
+        job.task.cancel()
+    return {"ok": True, "job_id": job_id}
+
+
+@app.get("/api/console/{session_id}/state")
+async def console_state(session_id: str):
+    """コンソールセッションの現在状態を返す（§18.4）。"""
+    from deltasim.gui.sim_session import get_session as get_sim_session
+    from deltasim.gui.console_session import get as get_console
+
+    sess = get_sim_session(session_id)
+    if sess is None:
+        raise HTTPException(status_code=404, detail=f"セッションが見つかりません: {session_id}")
+
+    interp = get_console(session_id)
+    if interp is None:
+        return {"session_id": session_id, "time_ns": 0, "cycle": 0, "breakpoints": [], "whens": []}
+
+    engine = getattr(interp._sim, "_engine", None)
+    time_ns = engine._time if engine else 0
+    cycle = getattr(interp._sim, "cycle", 0)
+
+    return {
+        "session_id": session_id,
+        "time_ns": time_ns,
+        "cycle": cycle,
+        "breakpoints": [
+            {"id": b.id, "label": b.label(), "hit_count": b.hit_count}
+            for b in getattr(interp, "_breakpoints", [])
+        ],
+        "whens": [
+            {"id": b.id, "label": b.label(), "hit_count": b.hit_count}
+            for b in getattr(interp, "_whens", [])
+        ],
+    }

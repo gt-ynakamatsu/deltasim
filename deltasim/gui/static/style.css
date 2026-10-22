@@ -410,3 +410,19 @@ select.module-select { width: 100%; padding: 4px 6px; background: var(--surface2
 .sig-vcd-missing .sig-name-label { color: #55556a !important; font-style: italic; }
 .sig-vcd-missing .sig-btn { opacity: 0.4; }
 .sig-vcd-missing { opacity: 0.7; }
+
+/* ===== §18.4 コンソールパネル ===== */
+#console-output {
+  flex: 1;
+  overflow-y: auto;
+  background: #0d0d1a;
+  padding: 4px 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  min-height: 60px;
+}
+.con-line  { color: #c9c9de; padding: 1px 0; }
+.con-cmd   { color: #7c6af7; font-weight: 600; padding: 1px 0; }
+.con-error { color: #f87171; padding: 1px 0; }
+.con-warn  { color: #fbbf24; padding: 1px 0; }
+.con-bp    { color: #fb923c; font-weight: 600; padding: 1px 0; }
