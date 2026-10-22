@@ -455,3 +455,91 @@ async def run_sim_job(
         await job.queue.put({"event": "error", "message": str(e)})
     finally:
         job.done = True
+
+
+# ---------------------------------------------------------------------------
+# コンソールジョブ実行（§18.4 GUI コンソール）
+# ---------------------------------------------------------------------------
+
+async def run_console_job(
+    job: Job,
+    interp,          # interp.SimSession
+    command: str,
+) -> None:
+    """Questa 風コマンドをコンソールセッション経由で非同期実行する。
+
+    出力はリアルタイムで SSE に流す（_output_callback を使用）。
+    quit/exit シグナルはジョブの quit=True フラグとして返し、サーバーは止めない。
+    run -all など長時間コマンドは cancel_event / request_cancel() で中断可能。
+    """
+    from deltasim.interp.session import SimSession as InterpSession
+
+    collected_output: List[str] = []
+
+    def _on_output(msg: str) -> None:
+        collected_output.append(msg)
+        if job.loop and job.loop.is_running():
+            asyncio.run_coroutine_threadsafe(
+                job.queue.put({"event": "output", "lines": [msg]}),
+                job.loop,
+            )
+
+    # キャンセルイベントを監視してインタプリタに伝える
+    def _cancel_watcher():
+        job.cancel_event.wait()
+        if hasattr(interp, "request_cancel"):
+            interp.request_cancel()
+    threading.Thread(target=_cancel_watcher, daemon=True).start()
+
+    def _run_in_thread():
+        old_callback = interp._output_callback
+        interp._output_callback = _on_output
+        interp._output_lines.clear()
+        quit_signal = False
+        try:
+            interp._tcl.eval(command)
+        except InterpSession._QuitSignal:
+            quit_signal = True
+        except Exception as e:
+            interp._out(f"ERROR: {e}")
+        finally:
+            interp._output_callback = old_callback
+
+        engine = getattr(interp._sim, "_engine", None)
+        time_ns = engine._time if engine else 0
+        cycle = getattr(interp._sim, "cycle", 0)
+        paused_bp = interp._paused_bp
+        paused_info = None
+        if paused_bp is not None:
+            paused_info = {
+                "id": paused_bp.id,
+                "label": paused_bp.label(),
+                "time_ns": time_ns,
+            }
+            interp._paused_bp = None  # 消費
+
+        return {
+            "quit": quit_signal,
+            "output": list(interp._output_lines),
+            "time_ns": time_ns,
+            "cycle": cycle,
+            "paused_bp": paused_info,
+        }
+
+    try:
+        result = await asyncio.to_thread(_run_in_thread)
+        job.result = result
+        evt = {
+            "event": "finish",
+            "time_ns": result["time_ns"],
+            "cycle": result["cycle"],
+            "output": collected_output,
+            "paused_bp": result["paused_bp"],
+            "quit": result["quit"],
+        }
+        await job.queue.put(evt)
+    except Exception as e:
+        job.result = {"error": str(e)}
+        await job.queue.put({"event": "error", "message": str(e)})
+    finally:
+        job.done = True

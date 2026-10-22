@@ -117,6 +117,9 @@ class SimSession:
         self._output_lines: List[str]       = []
         self._set_signal_warned = False           # §18.7 one-time set→force warning
         self._paused_bp: Optional[Breakpoint] = None  # BP that caused pause
+        # §18.4 GUI コンソール拡張（コアの挙動は変えない追加のみ）
+        self._cancel_requested: bool = False      # run 中断フラグ
+        self._output_callback: Optional[Callable[[str], None]] = None  # リアルタイム出力
 
         # Signal change tracking for when
         self._prev_sig_snap: Dict[str, Any]  = {}
@@ -130,9 +133,19 @@ class SimSession:
     # ----------------------------------------------------------------
 
     def _out(self, msg: str) -> None:
-        import click as _click
-        _click.echo(msg)
+        if self._output_callback is not None:
+            try:
+                self._output_callback(msg)
+            except Exception:
+                pass
+        else:
+            import click as _click
+            _click.echo(msg)
         self._output_lines.append(msg)
+
+    def request_cancel(self) -> None:
+        """実行中の run を次の反復で中断させる（GUI コンソール用）。"""
+        self._cancel_requested = True
 
     # ----------------------------------------------------------------
     # Command registration
@@ -245,6 +258,10 @@ class SimSession:
         hp = self._sim._engine.half_period
         MAX = 100_000
         for _ in range(MAX):
+            if self._cancel_requested:
+                self._cancel_requested = False
+                self._out(f"# 中断: t={self._sim._engine._time}ns")
+                return
             target = self._sim._engine._time + 2 * hp
             stopped = self._advance_to_ns(target)
             if stopped:
