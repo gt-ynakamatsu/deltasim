@@ -59,7 +59,14 @@ const state = {
   llmCurrentRunJob: null,
   llmCurrentDraftJob: null,
   llmCurrentExplainJob: null,
-  llmCurrentSuggestionId: null,  // サーバーが発行した提案 ID
+  llmCurrentSuggestionId: null,
+  // §18.3.2: 即時キャンセル用 EventSource と cancelled フラグ
+  llmCurrentSuggestES: null,
+  llmCurrentDraftES: null,
+  llmCurrentExplainES: null,
+  llmSuggestCancelled: false,
+  llmDraftCancelled: false,
+  llmExplainCancelled: false,
 };
 
 // =========================================================================
@@ -208,9 +215,8 @@ const dom = {
   btnLlmRun: $("btn-llm-run"),
   btnLlmRunCancel: $("btn-llm-run-cancel"),
   llmRunResult: $("llm-run-result"),
-  llmRunExitCode: $("llm-run-exit-code"),
-  llmRunStdout: $("llm-run-stdout"),
-  llmRunStderr: $("llm-run-stderr"),
+  llmRunLog: $("llm-run-log"),
+  btnLlmRunClear: $("btn-llm-run-clear"),
   llmDraftFilesLabel: $("llm-draft-files-label"),
   btnLlmDraft: $("btn-llm-draft"),
   btnLlmDraftCancel: $("btn-llm-draft-cancel"),
@@ -353,8 +359,8 @@ const api = {
   recentAdd:    (entry)             => apiFetch("POST", "/api/recent-projects/add", entry),
   // §18.3 LLM API
   llmStatus:    ()                  => apiFetch("GET", "/api/llm/status"),
-  llmSuggestStart: (text, svFiles, spec) => apiFetch("POST", "/api/llm/suggest/start", {
-    text, sv_files: svFiles ?? [], spec: spec ?? null,
+  llmSuggestStart: (text, svFiles, spec, moduleInfo) => apiFetch("POST", "/api/llm/suggest/start", {
+    text, sv_files: svFiles ?? [], spec: spec ?? null, module_info: moduleInfo ?? null,
   }),
   llmSuggestCancel: (jid)          => apiFetch("POST", `/api/llm/suggest/${jid}/cancel`, {}),
   llmRunStart:  (suggestionId)     => apiFetch("POST", "/api/llm/run/start", { suggestion_id: suggestionId }),
@@ -641,7 +647,8 @@ function openGenSaveDialog(result) {
   // デフォルト保存先: プロジェクトのフォルダまたはカレント
   const firstSv = state.project.svFiles[0]?.path ?? "";
   const projDir = firstSv ? firstSv.replace(/[\\/][^\\/]+$/, "") : ".";
-  if (dom.genSaveDir) dom.genSaveDir.value = projDir;
+  // genSaveDir が未設定の場合のみ更新（llmDraftSpec が既にセットしている場合もある）
+  if (dom.genSaveDir && !dom.genSaveDir.value) dom.genSaveDir.value = projDir;
   if (dom.genSaveTb) dom.genSaveTb.checked = !!result.tb_sv;
   if (dom.genSaveSpec) dom.genSaveSpec.checked = !!result.spec_yaml;
   _updateGenSavePreview();
@@ -2551,22 +2558,85 @@ async function openLlmPanel() {
   if (dom.btnLlmExplain) dom.btnLlmExplain.disabled = !hasResult;
 }
 
-// コマンド提案
+// §18.3.2: LLM実行結果の追記（最新2000行まで）
+const LLM_MAX_LOG_LINES = 2000;
+
+function _llmAppendRunResult(cmd, exitCode, stdout, stderr) {
+  if (!dom.llmRunResult || !dom.llmRunLog) return;
+  dom.llmRunResult.style.display = "block";
+
+  const now = new Date().toLocaleTimeString("ja-JP", { hour12: false });
+  const heading = document.createElement("div");
+  heading.style.cssText = "color:#7c6af7;font-weight:600;margin-top:6px;border-top:1px solid #2a2a40;padding-top:4px;";
+  heading.textContent = `--- ${now}  ${cmd} ---`;
+  dom.llmRunLog.appendChild(heading);
+
+  const exitEl = document.createElement("div");
+  exitEl.style.color = exitCode === 0 ? "#4ade80" : "#f87171";
+  exitEl.textContent = `終了コード: ${exitCode}`;
+  dom.llmRunLog.appendChild(exitEl);
+
+  if (stdout && stdout.trim()) {
+    const el = document.createElement("pre");
+    el.style.cssText = "color:#c9c9de;margin:2px 0;white-space:pre-wrap;word-break:break-all;";
+    el.textContent = stdout;
+    dom.llmRunLog.appendChild(el);
+  }
+  if (stderr && stderr.trim()) {
+    const el = document.createElement("pre");
+    el.style.cssText = "color:#f87171;margin:2px 0;white-space:pre-wrap;word-break:break-all;";
+    el.textContent = stderr;
+    dom.llmRunLog.appendChild(el);
+  }
+
+  // 最新 2000 行に制限
+  const children = Array.from(dom.llmRunLog.children);
+  if (children.length > LLM_MAX_LOG_LINES) {
+    children.slice(0, children.length - LLM_MAX_LOG_LINES).forEach(el => el.remove());
+  }
+  dom.llmRunLog.scrollTop = dom.llmRunLog.scrollHeight;
+}
+
+// コマンド提案（§18.3.2: 即時キャンセル・module_info でコンテキスト）
 async function llmAsk() {
   if (!state.llmConfigured) return;
   const text = dom.llmAskInput?.value?.trim();
   if (!text) return;
 
+  if (state.llmCurrentSuggestES) {
+    state.llmCurrentSuggestES.close();
+    state.llmCurrentSuggestES = null;
+  }
+  state.llmSuggestCancelled = false;
+
   if (dom.btnLlmAsk) dom.btnLlmAsk.disabled = true;
   if (dom.btnLlmAskCancel) dom.btnLlmAskCancel.style.display = "";
   if (dom.llmSuggestionArea) dom.llmSuggestionArea.style.display = "none";
-  if (dom.llmRunResult) dom.llmRunResult.style.display = "none";
 
   try {
     const svPaths = state.project.svFiles.map(f => f.path);
-    const { job_id } = await api.llmSuggestStart(text, svPaths, state.project.specFile?.path);
+    // §18.3.2: ファイル名+モジュール名+ポート一覧のみ渡す（RTL 中身なし）
+    const moduleInfo = state.module
+      ? { module: state.module.module, ports: state.module.ports || [] }
+      : null;
+    const { job_id } = await api.llmSuggestStart(text, svPaths, state.project.specFile?.path, moduleInfo);
     state.llmCurrentSuggestJob = job_id;
-    const result = await _llmConsumeSSE(`/api/llm/suggest/${job_id}/events`);
+
+    const result = await new Promise(resolve => {
+      const es = new EventSource(`/api/llm/suggest/${job_id}/events`);
+      state.llmCurrentSuggestES = es;
+      es.onmessage = e => {
+        if (state.llmSuggestCancelled) { es.close(); resolve({ cancelled: true }); return; }
+        try {
+          const ev = JSON.parse(e.data);
+          const t = ev.event || ev.type;
+          if (t === "finish" || t === "error") { es.close(); state.llmCurrentSuggestES = null; resolve(ev); }
+        } catch (_) {}
+      };
+      es.onerror = () => { es.close(); state.llmCurrentSuggestES = null; resolve({ event: "error", message: "SSE エラー" }); };
+    });
+
+    if (state.llmSuggestCancelled) return;
 
     if (result.event === "finish" && result.suggestion_id) {
       state.llmCurrentSuggestionId = result.suggestion_id;
@@ -2575,11 +2645,13 @@ async function llmAsk() {
       _llmShowError(result.code, result.message);
     }
   } catch (e) {
-    log(`LLM エラー: ${e.message}`, "log-error");
+    if (!state.llmSuggestCancelled) log(`LLM エラー: ${e.message}`, "log-error");
   } finally {
-    state.llmCurrentSuggestJob = null;
-    if (dom.btnLlmAsk) dom.btnLlmAsk.disabled = false;
-    if (dom.btnLlmAskCancel) dom.btnLlmAskCancel.style.display = "none";
+    if (!state.llmSuggestCancelled) {
+      state.llmCurrentSuggestJob = null;
+      if (dom.btnLlmAsk) dom.btnLlmAsk.disabled = false;
+      if (dom.btnLlmAskCancel) dom.btnLlmAskCancel.style.display = "none";
+    }
   }
 }
 
@@ -2621,35 +2693,35 @@ async function llmRunSuggestion() {
 
   if (dom.btnLlmRun) dom.btnLlmRun.disabled = true;
   if (dom.btnLlmRunCancel) dom.btnLlmRunCancel.style.display = "";
-  if (dom.llmRunResult) dom.llmRunResult.style.display = "none";
 
+  const cmd = dom.llmSuggestionCmd?.textContent || "";
   try {
     const { job_id } = await api.llmRunStart(sid);
     state.llmCurrentRunJob = job_id;
     const result = await _llmConsumeSSE(`/api/llm/run/${job_id}/events`);
 
-    if (dom.llmRunResult) dom.llmRunResult.style.display = "block";
-    if (dom.llmRunExitCode) dom.llmRunExitCode.textContent = `終了コード: ${result.exit_code ?? "?"}`;
-    if (dom.llmRunStdout) dom.llmRunStdout.textContent = result.stdout ?? "";
-    if (dom.llmRunStderr) dom.llmRunStderr.textContent = result.stderr ?? "";
+    // §18.3.2: 追記形式（時刻+コマンドの見出し付き）
+    _llmAppendRunResult(cmd, result.exit_code ?? -1, result.stdout ?? "", result.stderr ?? "");
   } catch (e) {
-    if (e.message?.includes("404") || e.message?.includes("400")) {
-      log(`LLM 実行エラー: ${e.message}`, "log-error");
-    } else {
-      log(`LLM 実行エラー: ${e.message}`, "log-error");
-    }
+    log(`LLM 実行エラー: ${e.message}`, "log-error");
   } finally {
     state.llmCurrentRunJob = null;
-    if (dom.btnLlmRun) dom.btnLlmRun.disabled = false;
+    if (dom.btnLlmRun) dom.btnLlmRun.disabled = !state.llmCurrentSuggestionId;
     if (dom.btnLlmRunCancel) dom.btnLlmRunCancel.style.display = "none";
   }
 }
 
-// YAML 下書き生成
+// YAML 下書き生成（§18.3.2: top 未設定時の保存名・即時キャンセル対応）
 async function llmDraftSpec() {
   if (!state.llmConfigured) return;
   const svPaths = state.project.svFiles.map(f => f.path);
   if (!svPaths.length) { log("SV ファイルを選択してください", "log-error"); return; }
+
+  if (state.llmCurrentDraftES) {
+    state.llmCurrentDraftES.close();
+    state.llmCurrentDraftES = null;
+  }
+  state.llmDraftCancelled = false;
 
   if (dom.btnLlmDraft) dom.btnLlmDraft.disabled = true;
   if (dom.btnLlmDraftCancel) dom.btnLlmDraftCancel.style.display = "";
@@ -2658,7 +2730,22 @@ async function llmDraftSpec() {
   try {
     const { job_id } = await api.llmDraftStart(svPaths, state.project.top);
     state.llmCurrentDraftJob = job_id;
-    const result = await _llmConsumeSSE(`/api/llm/draft-spec/${job_id}/events`);
+
+    const result = await new Promise(resolve => {
+      const es = new EventSource(`/api/llm/draft-spec/${job_id}/events`);
+      state.llmCurrentDraftES = es;
+      es.onmessage = e => {
+        if (state.llmDraftCancelled) { es.close(); resolve({ cancelled: true }); return; }
+        try {
+          const ev = JSON.parse(e.data);
+          const t = ev.event || ev.type;
+          if (t === "finish" || t === "error") { es.close(); state.llmCurrentDraftES = null; resolve(ev); }
+        } catch (_) {}
+      };
+      es.onerror = () => { es.close(); state.llmCurrentDraftES = null; resolve({ event: "error", message: "SSE エラー" }); };
+    });
+
+    if (state.llmDraftCancelled) return;
 
     if (result.yaml_text) {
       setEditorContent(result.yaml_text, "yaml");
@@ -2667,22 +2754,34 @@ async function llmDraftSpec() {
         dom.llmDraftErrors.style.display = "block";
         dom.llmDraftErrors.textContent = `⚠ 検証警告: ${(result.errors ?? []).join("; ")}`;
       }
-      // 生成保存ダイアログを開く
-      state.genResult = { module: state.project.top || "module", spec_yaml: result.yaml_text };
+      // §18.3.2: top 未設定時の保存名は <stem>_spec.yaml、保存先はプロジェクトフォルダ
+      const top = state.project.top;
+      const firstSv = svPaths[0] || "";
+      const stem = top || firstSv.split(/[\\/]/).pop().replace(/\.(sv|v)$/i, "");
+      const projDir = firstSv ? firstSv.replace(/[\\/][^\\/]+$/, "") : ".";
+      state.genResult = { module: stem, spec_yaml: result.yaml_text };
+      // 保存ダイアログに既定値をセット
+      if (dom.genSaveDir) dom.genSaveDir.value = projDir;
+      if (dom.genSaveTb) dom.genSaveTb.checked = false;   // TB は不要
+      if (dom.genSaveSpec) dom.genSaveSpec.checked = true;
+      // spec_path を指定して <stem>_spec.yaml にする
+      state.genResult._default_spec_name = `${stem}_spec.yaml`;
       openGenSaveDialog(state.genResult);
     } else if (result.event === "error") {
       _llmShowError(result.code, result.message);
     }
   } catch (e) {
-    log(`LLM 下書きエラー: ${e.message}`, "log-error");
+    if (!state.llmDraftCancelled) log(`LLM 下書きエラー: ${e.message}`, "log-error");
   } finally {
-    state.llmCurrentDraftJob = null;
-    if (dom.btnLlmDraft) dom.btnLlmDraft.disabled = false;
-    if (dom.btnLlmDraftCancel) dom.btnLlmDraftCancel.style.display = "none";
+    if (!state.llmDraftCancelled) {
+      state.llmCurrentDraftJob = null;
+      if (dom.btnLlmDraft) dom.btnLlmDraft.disabled = false;
+      if (dom.btnLlmDraftCancel) dom.btnLlmDraftCancel.style.display = "none";
+    }
   }
 }
 
-// 失敗の解析（LLM パネルから / ケース詳細パネルから）
+// 失敗の解析（§18.3.2: 即時キャンセル対応）
 async function llmExplainCase() {
   if (!state.llmConfigured || !state.testResult) return;
   openLlmPanel();
@@ -2691,6 +2790,12 @@ async function llmExplainCase() {
 
 async function llmExplain() {
   if (!state.llmConfigured || !state.testResult) return;
+
+  if (state.llmCurrentExplainES) {
+    state.llmCurrentExplainES.close();
+    state.llmCurrentExplainES = null;
+  }
+  state.llmExplainCancelled = false;
 
   if (dom.btnLlmExplain) dom.btnLlmExplain.disabled = true;
   if (dom.btnLlmExplainCancel) dom.btnLlmExplainCancel.style.display = "";
@@ -2705,21 +2810,37 @@ async function llmExplain() {
   try {
     const { job_id } = await api.llmExplainStart(state.testResult, svPaths, spec);
     state.llmCurrentExplainJob = job_id;
-    const result = await _llmConsumeSSE(`/api/llm/explain/${job_id}/events`);
+
+    const result = await new Promise(resolve => {
+      const es = new EventSource(`/api/llm/explain/${job_id}/events`);
+      state.llmCurrentExplainES = es;
+      es.onmessage = e => {
+        if (state.llmExplainCancelled) { es.close(); resolve({ cancelled: true }); return; }
+        try {
+          const ev = JSON.parse(e.data);
+          const t = ev.event || ev.type;
+          if (t === "finish" || t === "error") { es.close(); state.llmCurrentExplainES = null; resolve(ev); }
+        } catch (_) {}
+      };
+      es.onerror = () => { es.close(); state.llmCurrentExplainES = null; resolve({ event: "error", message: "SSE エラー" }); };
+    });
+
+    if (state.llmExplainCancelled) return;
 
     if (result.explanation != null && dom.llmExplainResult) {
       dom.llmExplainResult.style.display = "block";
-      // セキュリティ: textContent を使い innerHTML には入れない
-      dom.llmExplainResult.textContent = result.explanation;
+      dom.llmExplainResult.textContent = result.explanation;  // textContent（innerHTML 不可）
     } else if (result.event === "error") {
       _llmShowError(result.code, result.message);
     }
   } catch (e) {
-    log(`LLM 解析エラー: ${e.message}`, "log-error");
+    if (!state.llmExplainCancelled) log(`LLM 解析エラー: ${e.message}`, "log-error");
   } finally {
-    state.llmCurrentExplainJob = null;
-    if (dom.btnLlmExplain) dom.btnLlmExplain.disabled = !state.testResult;
-    if (dom.btnLlmExplainCancel) dom.btnLlmExplainCancel.style.display = "none";
+    if (!state.llmExplainCancelled) {
+      state.llmCurrentExplainJob = null;
+      if (dom.btnLlmExplain) dom.btnLlmExplain.disabled = !state.testResult;
+      if (dom.btnLlmExplainCancel) dom.btnLlmExplainCancel.style.display = "none";
+    }
   }
 }
 
@@ -2896,17 +3017,47 @@ if (dom.btnLlmClose) dom.btnLlmClose.addEventListener("click", () => { dom.llmOv
 if (dom.llmOverlay) dom.llmOverlay.addEventListener("click", e => { if (e.target === dom.llmOverlay) dom.llmOverlay.style.display = "none"; });
 if (dom.btnLlmAsk) dom.btnLlmAsk.addEventListener("click", llmAsk);
 if (dom.llmAskInput) dom.llmAskInput.addEventListener("keydown", e => { if (e.key === "Enter") llmAsk(); });
+// §18.3.2: 実行ログのクリアボタン（最新2000行制限、タイムスタンプ見出し付き追記形式）
+if (dom.btnLlmRunClear) dom.btnLlmRunClear.addEventListener("click", () => {
+  if (dom.llmRunLog) dom.llmRunLog.innerHTML = "";
+});
+// §18.3.2: 即時キャンセル（UIを即座に戻す、バックグラウンドHTTP要求は残ってよい）
 if (dom.btnLlmAskCancel) dom.btnLlmAskCancel.addEventListener("click", () => {
+  state.llmSuggestCancelled = true;
+  if (state.llmCurrentSuggestES) { state.llmCurrentSuggestES.close(); state.llmCurrentSuggestES = null; }
   if (state.llmCurrentSuggestJob) api.llmSuggestCancel(state.llmCurrentSuggestJob).catch(() => {});
+  state.llmCurrentSuggestJob = null;
+  if (dom.btnLlmAsk) dom.btnLlmAsk.disabled = false;
+  if (dom.btnLlmAskCancel) dom.btnLlmAskCancel.style.display = "none";
+  if (dom.llmSuggestionArea) {
+    dom.llmSuggestionArea.style.display = "block";
+    const msg = document.createElement("div");
+    msg.style.cssText = "color:#fbbf24;font-size:11px;padding:4px;";
+    msg.textContent = "中断しました";
+    dom.llmSuggestionArea.innerHTML = "";
+    dom.llmSuggestionArea.appendChild(msg);
+  }
 });
 if (dom.btnLlmRun) dom.btnLlmRun.addEventListener("click", llmRunSuggestion);
 if (dom.btnLlmDraft) dom.btnLlmDraft.addEventListener("click", llmDraftSpec);
 if (dom.btnLlmDraftCancel) dom.btnLlmDraftCancel.addEventListener("click", () => {
+  state.llmDraftCancelled = true;
+  if (state.llmCurrentDraftES) { state.llmCurrentDraftES.close(); state.llmCurrentDraftES = null; }
   if (state.llmCurrentDraftJob) api.llmDraftCancel(state.llmCurrentDraftJob).catch(() => {});
+  state.llmCurrentDraftJob = null;
+  if (dom.btnLlmDraft) dom.btnLlmDraft.disabled = false;
+  if (dom.btnLlmDraftCancel) dom.btnLlmDraftCancel.style.display = "none";
+  if (dom.llmDraftErrors) { dom.llmDraftErrors.style.display = "block"; dom.llmDraftErrors.textContent = "中断しました"; }
 });
 if (dom.btnLlmExplain) dom.btnLlmExplain.addEventListener("click", llmExplain);
 if (dom.btnLlmExplainCancel) dom.btnLlmExplainCancel.addEventListener("click", () => {
+  state.llmExplainCancelled = true;
+  if (state.llmCurrentExplainES) { state.llmCurrentExplainES.close(); state.llmCurrentExplainES = null; }
   if (state.llmCurrentExplainJob) api.llmExplainCancel(state.llmCurrentExplainJob).catch(() => {});
+  state.llmCurrentExplainJob = null;
+  if (dom.btnLlmExplain) dom.btnLlmExplain.disabled = !state.testResult;
+  if (dom.btnLlmExplainCancel) dom.btnLlmExplainCancel.style.display = "none";
+  if (dom.llmExplainResult) { dom.llmExplainResult.style.display = "block"; dom.llmExplainResult.textContent = "中断しました"; }
 });
 
 // =========================================================================

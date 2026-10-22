@@ -1306,6 +1306,7 @@ class LLMSuggestRequest(BaseModel):
     text: str
     sv_files: List[str] = []
     spec: Optional[str] = None
+    module_info: Optional[Dict] = None  # §18.3.2: {module, ports} パーサ結果から
 
 
 @app.post("/api/llm/suggest/start")
@@ -1314,12 +1315,18 @@ async def llm_suggest_start(req: LLMSuggestRequest):
 
     提案を実行するには /api/llm/run/{suggestion_id} を使う。
     任意のコマンド文字列をサーバーに実行させる API は存在しない。
+    §18.3.2: ask コンテキストはファイル名+モジュール名+ポート一覧のみ（RTL 中身なし）。
     """
     from deltasim.gui.jobs import create_job, run_llm_suggest_job
 
     job = create_job()
     job.task = asyncio.create_task(
-        run_llm_suggest_job(job, req.text, sv_files=req.sv_files, spec_file=req.spec)
+        run_llm_suggest_job(
+            job, req.text,
+            sv_files=req.sv_files,
+            spec_file=req.spec,
+            module_info=req.module_info,
+        )
     )
     return {"job_id": job.job_id}
 

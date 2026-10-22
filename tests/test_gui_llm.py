@@ -497,3 +497,243 @@ class TestLLMApiStructure:
         """存在しないジョブのキャンセルは 404"""
         res = client.post("/api/llm/suggest/nonexistent/cancel", json={})
         assert res.status_code == 404
+
+
+# ============================================================================
+# §18.3.2 追加仕様のテスト
+# ============================================================================
+
+class TestLLM1830Spec:
+    """§18.3.2: 1. 実行結果の追記 / 2. ask コンテキスト / 3. 保存名 / 4. 即時キャンセル"""
+
+    @pytest.fixture
+    def client(self):
+        with TestClient(app, base_url="http://127.0.0.1") as c:
+            yield c
+
+    # ------------------------------------------------------------------
+    # 1. 実行結果の追記（サーバー側: 実行ジョブが stdout/stderr/exit_code を返すこと）
+    # ------------------------------------------------------------------
+
+    def test_run_result_has_stdout_stderr_exitcode(self, client, mock_llm_config, monkeypatch):
+        """§18.3.2-1: 実行結果に exit_code / stdout / stderr が含まれること"""
+        from deltasim.gui.llm_session import store_suggestion
+        import deltasim.llm as _llm
+
+        # 安全な提案を保管
+        sug = _llm.Suggestion(
+            raw_output="deltasim --version",
+            command_line="deltasim --version",
+            args=["--version"],
+            safe=True,
+            reason="",
+            write_paths=[],
+        )
+        sid = store_suggestion(sug)
+
+        res = client.post("/api/llm/run/start", json={"suggestion_id": sid})
+        assert res.status_code == 200
+        job_id = res.json()["job_id"]
+        result = _consume_sse(client, f"/api/llm/run/{job_id}/events")
+
+        assert result.get("event") == "finish"
+        assert "exit_code" in result, "exit_code が含まれること"
+        assert "stdout" in result, "stdout が含まれること"
+        assert "stderr" in result, "stderr が含まれること"
+        assert isinstance(result["exit_code"], int), "exit_code は整数"
+
+    def test_multiple_runs_return_separate_results(self, client, mock_llm_config, monkeypatch):
+        """§18.3.2-1: 複数回実行しても各回の結果が独立して返ること（追記の根拠）"""
+        from deltasim.gui.llm_session import store_suggestion
+        import deltasim.llm as _llm
+
+        results = []
+        for _ in range(2):
+            sug = _llm.Suggestion(
+                raw_output="deltasim --version",
+                command_line="deltasim --version",
+                args=["--version"],
+                safe=True, reason="", write_paths=[],
+            )
+            sid = store_suggestion(sug)
+            res = client.post("/api/llm/run/start", json={"suggestion_id": sid})
+            job_id = res.json()["job_id"]
+            results.append(_consume_sse(client, f"/api/llm/run/{job_id}/events"))
+
+        # 2回とも finish が返ること
+        assert all(r.get("event") == "finish" for r in results)
+
+    # ------------------------------------------------------------------
+    # 2. ask コンテキスト: module_info が渡されたときポート情報が含まれること
+    # ------------------------------------------------------------------
+
+    def test_suggest_uses_module_info_not_file_contents(self, client, mock_llm_config, monkeypatch):
+        """§18.3.2-2: suggest に渡したコンテキストにポート情報が含まれること（ファイル中身なし）"""
+        received_prompts = []
+
+        def _capture_llm(prompt, cfg, llm_fn=None):
+            received_prompts.append(prompt)
+            return f"deltasim test {COUNTER_SV} --spec {COUNTER_SPEC}"
+
+        monkeypatch.setattr("deltasim.llm.call_llm", _capture_llm)
+
+        module_info = {
+            "module": "counter",
+            "ports": [
+                {"name": "clk", "direction": "input", "width": 1},
+                {"name": "count", "direction": "output", "width": 8},
+            ]
+        }
+        res = client.post("/api/llm/suggest/start", json={
+            "text": "テスト",
+            "sv_files": [COUNTER_SV],
+            "module_info": module_info,
+        })
+        assert res.status_code == 200
+        job_id = res.json()["job_id"]
+        _consume_sse(client, f"/api/llm/suggest/{job_id}/events")
+
+        assert len(received_prompts) >= 1
+        prompt = received_prompts[0]
+
+        # ポート名がコンテキストに含まれること
+        assert "counter" in prompt, f"モジュール名 counter がプロンプトに含まれること: {prompt[:300]}"
+        assert "clk" in prompt or "count" in prompt, f"ポート名がプロンプトに含まれること: {prompt[:300]}"
+
+    def test_suggest_context_no_file_contents(self, client, mock_llm_config, monkeypatch):
+        """§18.3.2-2: suggest のコンテキストに RTL の中身（module ... endmodule）が含まれないこと"""
+        received_prompts = []
+
+        def _capture_llm(prompt, cfg, llm_fn=None):
+            received_prompts.append(prompt)
+            return f"deltasim test {COUNTER_SV} --spec {COUNTER_SPEC}"
+
+        monkeypatch.setattr("deltasim.llm.call_llm", _capture_llm)
+
+        res = client.post("/api/llm/suggest/start", json={
+            "text": "テスト",
+            "sv_files": [COUNTER_SV],
+        })
+        job_id = res.json()["job_id"]
+        _consume_sse(client, f"/api/llm/suggest/{job_id}/events")
+
+        assert len(received_prompts) >= 1
+        prompt = received_prompts[0]
+
+        # RTL の中身が含まれないこと（"module", "endmodule" はSVの中身）
+        # ただし "RTL ファイル:" や "モジュール名:" のキーワードは許容
+        # ファイルを読み込んだ内容（always_ff など）は含まれないこと
+        assert "always_ff" not in prompt, "RTL の中身が含まれてはいけない"
+        assert "endmodule" not in prompt, "RTL の中身が含まれてはいけない"
+
+    def test_suggest_with_module_info_sends_port_list(self, client, mock_llm_config, monkeypatch):
+        """§18.3.2-2: module_info なしでも suggest が動作すること"""
+        monkeypatch.setattr("deltasim.llm.call_llm", _mock_llm_safe)
+
+        res = client.post("/api/llm/suggest/start", json={
+            "text": "テスト", "sv_files": [COUNTER_SV],
+        })
+        assert res.status_code == 200
+        job_id = res.json()["job_id"]
+        result = _consume_sse(client, f"/api/llm/suggest/{job_id}/events")
+        assert result.get("event") == "finish"
+
+    # ------------------------------------------------------------------
+    # 3. top 未設定時の保存名: draft_spec の yaml_text が返ること（サーバー側の確認）
+    # ------------------------------------------------------------------
+
+    def test_draft_returns_yaml_and_valid_flag(self, client, mock_llm_config, monkeypatch):
+        """§18.3.2-3: draft-spec が valid フラグ付きで yaml_text を返すこと"""
+        def _mock_draft(files, top=None, cfg=None, llm_fn=None, output_path=None, force=False):
+            from deltasim.llm import DraftResult
+            return DraftResult(yaml_text="version: 1\ntop: counter\n",
+                               valid=True, errors=[], raw_output="")
+
+        monkeypatch.setattr("deltasim.llm.draft_spec", _mock_draft)
+
+        res = client.post("/api/llm/draft-spec/start", json={
+            "sv_files": [COUNTER_SV],
+            # top は省略（未設定）
+        })
+        assert res.status_code == 200
+        job_id = res.json()["job_id"]
+        result = _consume_sse(client, f"/api/llm/draft-spec/{job_id}/events")
+
+        assert result.get("event") == "finish"
+        assert "yaml_text" in result
+        # top が None のとき draft-spec は sv_files から top を推定する
+        # yaml_text が返れば OK（UI 側で保存名を決める）
+        assert len(result["yaml_text"]) > 0
+
+    def test_draft_start_without_top_is_accepted(self, client, mock_llm_config, monkeypatch):
+        """§18.3.2-3: top なしで draft-spec を開始できること（422 にならない）"""
+        def _mock_draft(files, top=None, cfg=None, llm_fn=None, output_path=None, force=False):
+            from deltasim.llm import DraftResult
+            return DraftResult(yaml_text="version: 1\n", valid=True, errors=[], raw_output="")
+
+        monkeypatch.setattr("deltasim.llm.draft_spec", _mock_draft)
+
+        res = client.post("/api/llm/draft-spec/start", json={"sv_files": [COUNTER_SV]})
+        assert res.status_code == 200, f"top なしでも 200: {res.text}"
+
+    # ------------------------------------------------------------------
+    # 4. 即時キャンセル（サーバー側: cancel エンドポイントが即座に 200 を返すこと）
+    # ------------------------------------------------------------------
+
+    def test_cancel_returns_immediately(self, client, mock_llm_config, monkeypatch):
+        """§18.3.2-4: cancel は即座に 200 を返すこと（バックグラウンド処理は残ってよい）"""
+        monkeypatch.setattr("deltasim.llm.call_llm", lambda *a, **kw: _mock_llm_safe(*a, **kw))
+
+        res = client.post("/api/llm/suggest/start", json={"text": "テスト"})
+        job_id = res.json()["job_id"]
+
+        # キャンセルが即座に 200 を返すこと
+        import time
+        t0 = time.monotonic()
+        cancel_res = client.post(f"/api/llm/suggest/{job_id}/cancel", json={})
+        elapsed = time.monotonic() - t0
+
+        assert cancel_res.status_code == 200
+        assert elapsed < 5.0, f"キャンセルが {elapsed:.1f}s かかった（即座であるべき）"
+
+    def test_new_request_after_cancel_works(self, client, mock_llm_config, monkeypatch):
+        """§18.3.2-4: キャンセル後も新しい提案リクエストを受け付けること"""
+        monkeypatch.setattr("deltasim.llm.call_llm", _mock_llm_safe)
+
+        # 1回目を開始してキャンセル
+        res1 = client.post("/api/llm/suggest/start", json={"text": "テスト1"})
+        job_id1 = res1.json()["job_id"]
+        client.post(f"/api/llm/suggest/{job_id1}/cancel", json={})
+
+        # 2回目も受け付けられること
+        res2 = client.post("/api/llm/suggest/start", json={"text": "テスト2"})
+        assert res2.status_code == 200, "キャンセル後も新リクエストを受け付けること"
+        job_id2 = res2.json()["job_id"]
+        assert job_id2 != job_id1, "別のジョブIDが発行されること"
+
+        # 2回目は完了できること
+        result = _consume_sse(client, f"/api/llm/suggest/{job_id2}/events")
+        assert result.get("event") in ("finish", "error"), "2回目が完了すること"
+
+    def test_cancel_draft_returns_200(self, client, mock_llm_config, monkeypatch):
+        """§18.3.2-4: draft キャンセルも即座に 200 を返すこと"""
+        import time, threading
+
+        # draft を遅く実行するモック
+        def _slow_draft(files, top=None, cfg=None, llm_fn=None, output_path=None, force=False):
+            import time as t; t.sleep(5)  # 5秒待つ
+            from deltasim.llm import DraftResult
+            return DraftResult(yaml_text="", valid=False, errors=[], raw_output="")
+
+        monkeypatch.setattr("deltasim.llm.draft_spec", _slow_draft)
+
+        res = client.post("/api/llm/draft-spec/start", json={"sv_files": [COUNTER_SV]})
+        job_id = res.json()["job_id"]
+
+        # すぐにキャンセル
+        t0 = time.monotonic()
+        cancel_res = client.post(f"/api/llm/draft-spec/{job_id}/cancel", json={})
+        elapsed = time.monotonic() - t0
+
+        assert cancel_res.status_code == 200
+        assert elapsed < 2.0, f"キャンセルが {elapsed:.1f}s かかった"

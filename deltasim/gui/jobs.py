@@ -565,13 +565,30 @@ async def run_llm_suggest_job(
     spec_file: Optional[str] = None,
     cfg=None,
     llm_fn=None,
+    module_info: Optional[dict] = None,
 ) -> None:
-    """コマンド提案ジョブ（suggest_command を非同期実行）。"""
+    """コマンド提案ジョブ（suggest_command を非同期実行）。
+
+    §18.3.2: ask には RTL の中身を渡さない。
+    渡すのはファイル名・モジュール名・ポート一覧まで（パーサ結果から）。
+    """
     from deltasim.gui.llm_session import store_suggestion
 
+    # §18.3.2: ファイル名 + モジュール名 + ポート一覧のみ（RTL 中身なし）
     context = ""
     if sv_files:
         context += f"RTL ファイル: {', '.join(sv_files)}\n"
+    if module_info:
+        mod_name = module_info.get("module", "")
+        if mod_name:
+            context += f"モジュール名: {mod_name}\n"
+        ports = module_info.get("ports", [])
+        if ports:
+            port_lines = [
+                f"  {p.get('name', '')} ({p.get('direction', '')}, {p.get('width', 1)}bit)"
+                for p in ports[:30]
+            ]
+            context += "ポート一覧:\n" + "\n".join(port_lines) + "\n"
     if spec_file:
         context += f"スペック: {spec_file}\n"
 
