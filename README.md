@@ -198,7 +198,7 @@ deltasim gui deltasim.project.yaml
 | CLI 引数でファイル/フォルダ/.f/プロジェクトを開く | ✅ 実装済み |
 | SSE 進捗配信（start/progress/case_done/finish）| ✅ 実装済み |
 | キャンセル（REST POST）| ✅ 実装済み（シミュ開始前チェック、M5 で mid-cycle 対応予定）|
-| 対話デバッグ（step/force/bp） | 🔜 M5 Simulator API が必要 |
+| 対話デバッグ（step/force/bp、Questa 風）| ✅ 実装済み（§18）|
 | LLM 連携 | 🔜 M5 以降 |
 
 ### 大規模 VCD 性能実測値（Python 3.12, Ubuntu, 16.15 MB VCD）
@@ -437,7 +437,7 @@ pytest --cov=deltasim       # カバレッジ付き
 | `package` / `import` | **M3 完了**（基本的なインポート） |
 | 配列（1D アンパック）| M4 |
 | 符号付き整数（`integer` 型の負値） | M4 |
-| 対話デバッグ（force / examine / bp） | M5 |
+| 対話デバッグ（Questa 風コマンド） | **実装済み**（§18）|
 | LLM 連携 | M6 |
 
 ---

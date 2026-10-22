@@ -273,7 +273,8 @@ class TestRunner:
             ns = {k: v for k, v in snap.items()}
             ns["_cycle"] = cycle_num
             try:
-                passed = bool(eval(exp.expr, {"__builtins__": {}}, ns))  # noqa: S307
+                from deltasim.interp.expr import eval_bool as _eval_bool_sv
+                passed = _eval_bool_sv(exp.expr, ns)
                 actual_str = repr(ns.get(exp.expr.split()[0], snap))
             except Exception as e:
                 passed = False

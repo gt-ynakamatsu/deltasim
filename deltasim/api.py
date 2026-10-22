@@ -596,7 +596,8 @@ def _run_one_case(
             elif exp.expr:
                 ns_ctx = dict(engine.signals); ns_ctx["_cycle"] = cycle_num
                 try:
-                    passed = bool(eval(exp.expr, {"__builtins__": {}}, ns_ctx))
+                    from deltasim.interp.expr import eval_bool as _eval_bool_sv
+                    passed = _eval_bool_sv(exp.expr, ns_ctx)
                 except Exception:
                     passed = False
                 st = "PASS" if passed else "FAIL"
@@ -954,7 +955,8 @@ class Simulator:
             ns = dict(cur)
             for bp_id, cond in list(self._breakpoints.items()):
                 try:
-                    if eval(cond, {"__builtins__": {}}, ns):
+                    from deltasim.interp.expr import eval_bool as _eval_bool_sv
+                    if _eval_bool_sv(cond, ns):
                         bp_hit = bp_id
                         break
                 except Exception:
@@ -1096,6 +1098,10 @@ class Simulator:
     def list_breakpoints(self) -> List[dict]:
         """List all active breakpoints."""
         return [{"id": k, "condition": v} for k, v in self._breakpoints.items()]
+
+    def list_signals_dict(self) -> Dict[str, dict]:
+        """Return signal info as {name: info_dict} for quick lookup."""
+        return {s["name"]: s for s in self.list_signals()}
 
     # ------------------------------------------------------------------
     # State management
