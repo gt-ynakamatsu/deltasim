@@ -766,21 +766,47 @@ async function loadModule(svPaths, top) {
   try {
     const data = await api.load(svPaths, top);
     state.module = data;
-    log(`ロード成功: ${data.module} (${data.ports.length} ポート)`, "log-info");
-    // 構造化エラーをエディタに反映（M5 ErrorInfo 形式）
-    if (data.errors?.length > 0) {
-      setEditorErrors(data.errors.filter(e => e.severity === "error" || e.severity === "warning"));
-      data.errors.forEach(e =>
-        log(`[${e.severity}] ${e.message}${e.line ? ` (行 ${e.line})` : ""}`,
-            e.severity === "error" ? "log-error" : "log-warn")
-      );
+
+    // §18.5: E_AMBIGUOUS_TOP のとき candidates でドロップダウンを更新
+    const ambig = (data.errors || []).find(e => e.code === "E_AMBIGUOUS_TOP");
+    if (ambig) {
+      const cands = ambig.candidates || [];
+      log(`E_AMBIGUOUS_TOP: ${ambig.message}`, "log-warn");
+      if (cands.length > 0) {
+        log(`  トップ候補: ${cands.join(", ")} - サイドバーのドロップダウンから選択してください`, "log-warn");
+        if (!(data.all_modules && data.all_modules.length)) {
+          data.all_modules = cands.map(function(n) { return { name: n, is_top_candidate: true }; });
+        }
+      }
+    } else if (data.module) {
+      log(`ロード成功: ${data.module} (${data.ports.length} ポート)`, "log-info");
+    }
+
+    // §18.5: 構造化エラーをエディタに反映（各コードに対してわかりやすいメッセージ）
+    if (data.errors && data.errors.length > 0) {
+      setEditorErrors(data.errors.filter(function(e) { return e.severity === "error" || e.severity === "warning"; }));
+      data.errors.forEach(function(e) {
+        var prefixMap = {
+          "E_AMBIGUOUS_TOP": "トップモジュールが不明",
+          "E_UNKNOWN_PORT":  "不明なポート名",
+          "E_NO_CHECK":      "チェックなし (E_NO_CHECK)",
+          "E002":            "トップモジュールが見つかりません",
+        };
+        var prefix = prefixMap[e.code] || ("[" + e.severity + "]");
+        var locSuffix = e.line ? " (行 " + e.line + ")" : "";
+        log(prefix + ": " + e.message + locSuffix,
+            e.severity === "error" ? "log-error" : "log-warn");
+      });
     } else {
       clearEditorErrors();
     }
     renderFileList();
-    setStatus(`${data.module} ロード済み`, "idle");
+    var statusLabel = ambig
+      ? "top 未確定 (" + (data.all_modules ? data.all_modules.length : 0) + " 候補)"
+      : ((data.module || "?") + " ロード済み");
+    setStatus(statusLabel, "idle");
   } catch (e) {
-    log(`ロードエラー: ${e.message}`, "log-error");
+    log("ロードエラー: " + e.message, "log-error");
     setStatus("ロードエラー", "error");
   }
 }
@@ -1035,6 +1061,25 @@ function renderResults(result) {
     const existing = dom.resultList.parentElement?.querySelector("#top-warnings-banner");
     if (existing) existing.remove();
     dom.resultList.before(warnDiv);
+  }
+
+  // §18.5: E_NO_CHECK / E_UNKNOWN_PORT を ERROR として表示
+  const noCheckErr = (result.errors ?? []).find(e => e.code === "E_NO_CHECK");
+  const unknPortErrors = (result.errors ?? []).filter(e => e.code === "E_UNKNOWN_PORT");
+  if (noCheckErr) {
+    const banner = document.createElement("div");
+    banner.id = "top-warnings-banner";
+    banner.style.cssText = "padding:6px 10px;background:rgba(251,146,60,0.1);border-bottom:1px solid #fb923c;font-size:11px;";
+    const el = document.createElement("div");
+    el.textContent = `E_NO_CHECK: ${noCheckErr.message || "チェックが0件です。スペックにexpectを追加してください。"}`;
+    el.style.color = "#fb923c";
+    banner.appendChild(el);
+    const existing = dom.resultList.parentElement?.querySelector("#top-warnings-banner");
+    if (existing) existing.remove();
+    dom.resultList.before(banner);
+  }
+  if (unknPortErrors.length > 0) {
+    unknPortErrors.forEach(e => log("E_UNKNOWN_PORT: " + e.message, "log-error"));
   }
 
   // E_NO_CASE: フィルタに一致するケースがない（API が直接返す）
