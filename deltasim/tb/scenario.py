@@ -69,7 +69,7 @@ class SimSpec:
 @dataclass
 class InputEntry:
     at: Union[int, Tuple[int, int], str]
-    set_values: Optional[Dict[str, int]] = None
+    set_values: Optional[Dict[str, object]] = None  # int or str ('x','z','4\'b...')
     random_spec: Optional[Dict[str, object]] = None
     offset_ns: int = 0          # §15.2: サイクル途中のオフセット (ns)
 
@@ -77,7 +77,7 @@ class InputEntry:
 @dataclass
 class ExpectedEntry:
     at: Union[int, Tuple[int, int]]
-    check: Optional[Dict[str, int]] = None
+    check: Optional[Dict[str, object]] = None  # int or str (x/z/? pattern)
     expr: Optional[str] = None
     offset_ns: int = 0          # §15.2: サイクル途中のオフセット (ns)
 
@@ -373,7 +373,11 @@ def _parse_inputs(raw: list, warnings_out=None, parent_path: str = "stimulus") -
         offset = _parse_offset_ns(entry, i, "stimulus", warnings_out)
         inp = InputEntry(at=at, offset_ns=offset)
         if "set" in entry:
-            inp.set_values = {k: int(v) for k, v in entry["set"].items()}
+            # §18.7: set 値に x/z/4値リテラル文字列も許可
+            inp.set_values = {
+                k: (v if isinstance(v, str) else int(v))
+                for k, v in entry["set"].items()
+            }
         elif "random" in entry:
             inp.random_spec = dict(entry["random"])
         else:
@@ -404,7 +408,11 @@ def _parse_expected(raw: list, warnings_out=None, parent_path: str = "expect") -
         offset = _parse_offset_ns(entry, i, "expect", warnings_out)
         exp = ExpectedEntry(at=at, offset_ns=offset)
         if "check" in entry:
-            exp.check = {k: int(v) for k, v in entry["check"].items()}
+            # §18.7: expected/check に x/z/? パターン (str) も許可
+            exp.check = {
+                k: (v if isinstance(v, str) else int(v))
+                for k, v in entry["check"].items()
+            }
         elif "expr" in entry:
             exp.expr = str(entry["expr"])
         else:

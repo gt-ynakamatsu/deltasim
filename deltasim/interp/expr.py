@@ -190,6 +190,10 @@ class _Parser:
             return int(val)
         if kind == "ID":
             self._consume()
+            # §18.7 Fix: 'x'/'X'/'z'/'Z' are 4-state literals ONLY if not in env
+            # (SV semantics: bare 'x' is an identifier when it names a signal)
+            if val in self._env:
+                return self._env[val]
             if val in ("x", "X"):
                 return None
             if val in ("z", "Z"):

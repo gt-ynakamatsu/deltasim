@@ -629,6 +629,15 @@ def _run_one_case(
     def apply_stimulus(vals: dict):
         changed = []
         for s, v in vals.items():
+            # §18.7: 文字列 set 値を FourState に変換
+            if isinstance(v, str):
+                from deltasim.fourstate import parse_literal as _pl, to_legacy as _tl
+                w = design.signals[s].width if s in design.signals else 1
+                try:
+                    fs = _pl(v)
+                    v = _tl(fs)  # FourState → int/None/Z_VALUE（後方互換）
+                except Exception:
+                    v = 0
             old = engine.signals.get(s, 0)
             engine._write(s, v)
             new = engine.signals.get(s, 0)
@@ -670,7 +679,8 @@ def _run_one_case(
                     actual_raw = engine.signals.get(sig, 0)
                     w = design.signals.get(sig)
                     w_bits = w.width if w else 1
-                    passed = (actual_raw == expected_val)
+                    # §18.7: 4値比較（x/z/? を含む期待値対応）
+                    passed = _compare_signal_value(actual_raw, expected_val, w_bits)
                     st = "PASS" if passed else "FAIL"
                     if not passed:
                         overall_status = "FAIL"
@@ -1419,6 +1429,44 @@ def test_events(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _compare_signal_value(actual, expected_val, width: int) -> bool:
+    """§18.7: 4値対応シグナル比較。
+
+    - expected_val が str ("4'b1x0z", "?" を含む) なら FourStatePattern で比較。
+    - expected_val が int なら単純比較（x/z を含む actual は FAIL）。
+    """
+    from deltasim.fourstate import parse_expected_value, coerce, FourState
+    from deltasim.result import Z_VALUE
+
+    pattern = None
+    if isinstance(expected_val, str):
+        pattern = parse_expected_value(expected_val)
+
+    if pattern is not None:
+        # 4値パターン比較
+        if isinstance(actual, FourState):
+            actual_fs = actual
+        elif actual is None:
+            from deltasim.fourstate import from_x
+            actual_fs = from_x(width)
+        elif actual is Z_VALUE:
+            from deltasim.fourstate import from_z
+            actual_fs = from_z(width)
+        else:
+            from deltasim.fourstate import from_int
+            actual_fs = from_int(int(actual) & ((1 << width) - 1), width)
+        return pattern.matches(actual_fs)
+    else:
+        # 従来の整数比較: actual に x/z があれば FAIL
+        if isinstance(actual, FourState):
+            if actual.bval != 0:
+                return False  # x/z を含む実値は整数期待値に FAIL
+            return actual.aval == expected_val
+        if actual is None or actual is Z_VALUE:
+            return False
+        return actual == expected_val
+
 
 def _build_record_set(design, scenario=None):
     """§12.3: Build the default signal record set.

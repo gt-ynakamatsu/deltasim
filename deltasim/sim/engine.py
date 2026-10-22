@@ -131,6 +131,11 @@ def eval_expr(
     Signed signals are sign-extended when read (M4 signed arithmetic).
     """
     if isinstance(expr, NumberLiteral):
+        # §18.7: x/z リテラルを FourState として返す
+        if expr.xz_mask:
+            from deltasim.fourstate import FourState as _FS
+            w = expr.width if expr.width is not None else 32
+            return (_FS(expr.value, expr.xz_mask, w), expr.width)
         return (expr.value, expr.width)
 
     if isinstance(expr, FillLiteral):
