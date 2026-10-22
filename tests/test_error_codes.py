@@ -188,6 +188,136 @@ endmodule
 
 
 # ===========================================================================
+# 1b. E_LOOP_LIMIT 追加テスト（§18.9 退行修正: always_comb / always_ff / wloop）
+# ===========================================================================
+
+# wloop: 再現コードをそのまま使う（ユーザー報告の退行ケース）
+_WLOOP_SV = """\
+module wloop(input logic clk, input logic a, output logic [31:0] y);
+  logic [31:0] count;
+  always_comb begin
+    count = 0;
+    while (count < 32'hFFFFFFFF) count = count + 1;
+    y = count & {32{a}};
+  end
+endmodule
+"""
+_WLOOP_SPEC = {
+    "version": 1, "top": "wloop",
+    "clock": {"signal": "clk", "period_ns": 10},
+    "reset": {"signal": "rst", "active_low": False, "duration_cycles": 1},
+    "sim": {"cycles": 2},
+    "cases": [{"name": "t", "expected": [{"at": 1, "check": {"y": 0}}]}],
+}
+
+_ALWAYS_COMB_WHILE_SV = """\
+module m(input logic clk, input logic a, output logic [31:0] y);
+  logic [31:0] cnt;
+  always_comb begin
+    cnt = 0;
+    while (cnt < 32'hFFFFFFF) cnt = cnt + 1;
+    y = cnt;
+  end
+endmodule
+"""
+
+_ALWAYS_FF_WHILE_SV = """\
+module m(input logic clk, output logic [31:0] y);
+  integer i;
+  always_ff @(posedge clk) begin
+    i = 0;
+    while (i < 2000000) begin i = i + 1; end
+    y <= i[31:0];
+  end
+endmodule
+"""
+
+_LOOP_SPEC_TMPL = {
+    "version": 1,
+    "clock": {"signal": "clk", "period_ns": 10},
+    "reset": {"signal": "rst", "active_low": False, "duration_cycles": 1},
+    "sim": {"cycles": 2},
+    "cases": [{"name": "t", "expected": [{"at": 1, "check": {"y": 0}}]}],
+}
+
+
+class TestLoopLimitAlwaysComb:
+    """always_comb 内の while ループが E_LOOP_LIMIT を返すこと（新退行）"""
+
+    def test_wloop_cli(self, tmp_path):
+        """CLI: wloop（ユーザー報告の再現コード）→ E_LOOP_LIMIT"""
+        sv_p = _write(tmp_path, "wloop.sv", _WLOOP_SV)
+        spec_p = str(tmp_path / "spec.yaml")
+        with open(spec_p, "w", encoding="utf-8") as f:
+            yaml.dump(_WLOOP_SPEC, f)
+        out = _cli_test(sv_p, spec_p, tmp_path)
+        codes = _all_codes(out)
+        assert "E_LOOP_LIMIT" in codes, \
+            f"E_LOOP_LIMIT expected (wloop CLI), got: {codes}"
+        assert "E_INTERNAL" not in codes
+
+    def test_wloop_api(self, tmp_path):
+        """API: wloop → E_LOOP_LIMIT"""
+        sv_p = _write(tmp_path, "wloop.sv", _WLOOP_SV)
+        spec_p = str(tmp_path / "spec.yaml")
+        with open(spec_p, "w", encoding="utf-8") as f:
+            yaml.dump(_WLOOP_SPEC, f)
+        result = _api_test(sv_p, spec_p)
+        codes = _all_codes(result)
+        assert "E_LOOP_LIMIT" in codes, \
+            f"E_LOOP_LIMIT expected (wloop API), got: {codes}"
+        assert "E_INTERNAL" not in codes
+
+    def test_always_comb_while_cli(self, tmp_path):
+        """CLI: always_comb 内 while → E_LOOP_LIMIT"""
+        sv_p = _write(tmp_path, "m.sv", _ALWAYS_COMB_WHILE_SV)
+        spec = {**_LOOP_SPEC_TMPL, "top": "m"}
+        spec_p = str(tmp_path / "spec.yaml")
+        with open(spec_p, "w", encoding="utf-8") as f:
+            yaml.dump(spec, f)
+        out = _cli_test(sv_p, spec_p, tmp_path)
+        codes = _all_codes(out)
+        assert "E_LOOP_LIMIT" in codes
+        assert "E_INTERNAL" not in codes
+
+    def test_always_comb_while_api(self, tmp_path):
+        """API: always_comb 内 while → E_LOOP_LIMIT"""
+        sv_p = _write(tmp_path, "m.sv", _ALWAYS_COMB_WHILE_SV)
+        spec = {**_LOOP_SPEC_TMPL, "top": "m"}
+        spec_p = str(tmp_path / "spec.yaml")
+        with open(spec_p, "w", encoding="utf-8") as f:
+            yaml.dump(spec, f)
+        result = _api_test(sv_p, spec_p)
+        codes = _all_codes(result)
+        assert "E_LOOP_LIMIT" in codes
+        assert "E_INTERNAL" not in codes
+
+    def test_always_ff_while_cli(self, tmp_path):
+        """CLI: always_ff 内 while → E_LOOP_LIMIT"""
+        sv_p = _write(tmp_path, "m.sv", _ALWAYS_FF_WHILE_SV)
+        spec = {**_LOOP_SPEC_TMPL, "top": "m"}
+        spec_p = str(tmp_path / "spec.yaml")
+        with open(spec_p, "w", encoding="utf-8") as f:
+            yaml.dump(spec, f)
+        out = _cli_test(sv_p, spec_p, tmp_path)
+        codes = _all_codes(out)
+        assert "E_LOOP_LIMIT" in codes
+        assert "E_INTERNAL" not in codes
+
+    def test_always_ff_while_api(self, tmp_path):
+        """API: always_ff 内 while → E_LOOP_LIMIT"""
+        sv_p = _write(tmp_path, "m.sv", _ALWAYS_FF_WHILE_SV)
+        spec = {**_LOOP_SPEC_TMPL, "top": "m"}
+        spec_p = str(tmp_path / "spec.yaml")
+        with open(spec_p, "w", encoding="utf-8") as f:
+            yaml.dump(spec, f)
+        result = _api_test(sv_p, spec_p)
+        codes = _all_codes(result)
+        assert "E_LOOP_LIMIT" in codes
+        assert "E_INTERNAL" not in codes
+
+
+# ===========================================================================
 # 2. E_DELTA_LIMIT
 # ===========================================================================
 
@@ -620,6 +750,28 @@ endmodule
         _CEXPR_SPEC,
         "E_CONSTRAINT_EXPR",
         id="E_CONSTRAINT_EXPR",
+    ),
+    # wloop (always_comb while) — 新退行ケース
+    pytest.param(
+        "E_LOOP_LIMIT_always_comb_wloop",
+        _WLOOP_SV,
+        _WLOOP_SPEC,
+        "E_LOOP_LIMIT",
+        id="E_LOOP_LIMIT_always_comb_wloop",
+    ),
+    pytest.param(
+        "E_LOOP_LIMIT_always_comb",
+        _ALWAYS_COMB_WHILE_SV,
+        {**_LOOP_SPEC_TMPL, "top": "m"},
+        "E_LOOP_LIMIT",
+        id="E_LOOP_LIMIT_always_comb",
+    ),
+    pytest.param(
+        "E_LOOP_LIMIT_always_ff",
+        _ALWAYS_FF_WHILE_SV,
+        {**_LOOP_SPEC_TMPL, "top": "m"},
+        "E_LOOP_LIMIT",
+        id="E_LOOP_LIMIT_always_ff",
     ),
 ]
 

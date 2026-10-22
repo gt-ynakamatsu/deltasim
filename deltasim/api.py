@@ -530,8 +530,16 @@ def _run_one_case(
     # Engine setup
     _eff_max_delta = max_delta if max_delta is not None else _DEF_MAX_DELTA
     _eff_max_loop  = max_loop  if max_loop  is not None else _DEF_MAX_LOOP
-    engine = SimEngine(design, half_period_ns=hp, reset_cycles=eff_reset.duration_cycles,
-                       max_delta=_eff_max_delta, max_loop=_eff_max_loop)
+    try:
+        engine = SimEngine(design, half_period_ns=hp, reset_cycles=eff_reset.duration_cycles,
+                           max_delta=_eff_max_delta, max_loop=_eff_max_loop)
+    except (DeltaLimitError, LoopLimitError) as _eng_e:
+        # SimEngine.__init__ が (DeltaLimitError, LoopLimitError) を再 raise した場合
+        _ecode = "E_DELTA_LIMIT" if isinstance(_eng_e, DeltaLimitError) else "E_LOOP_LIMIT"
+        cr.status = "ERROR"
+        cr.errors.append(_exc_to_error(_eng_e, _ecode))
+        cr.elapsed_ms = (time.time() - case_t0) * 1000
+        return cr
     if eff_clock.signal:
         engine.set_clk(eff_clock.signal)
     if eff_reset.signal:
@@ -910,8 +918,14 @@ def run(
 
     _eff_max_delta = max_delta if max_delta is not None else _DEF_MAX_DELTA
     _eff_max_loop  = max_loop  if max_loop  is not None else _DEF_MAX_LOOP
-    engine = SimEngine(design, half_period_ns=half_period, reset_cycles=reset_cycles,
-                       max_delta=_eff_max_delta, max_loop=_eff_max_loop)
+    try:
+        engine = SimEngine(design, half_period_ns=half_period, reset_cycles=reset_cycles,
+                           max_delta=_eff_max_delta, max_loop=_eff_max_loop)
+    except (DeltaLimitError, LoopLimitError) as _eng_e:
+        _ecode = "E_DELTA_LIMIT" if isinstance(_eng_e, DeltaLimitError) else "E_LOOP_LIMIT"
+        result.status = "ERROR"
+        result.errors.append(_exc_to_error(_eng_e, _ecode))
+        return result
     change_db = SignalChangeDB() if keep_changes else None
 
     vcd_obj = None
@@ -1020,7 +1034,12 @@ class Simulator:
             reset_cycles=reset_cycles,
         )
         self._engine._result.history.append(dict(self._engine.signals))
-        self._engine._eval_comb_loop()
+        # §18.7: 初期コンビナショナル評価。ループ系エラーは Simulator.step/run 時に検出
+        from deltasim.sim.engine import DeltaLimitError as _DL, LoopLimitError as _LL
+        try:
+            self._engine._eval_comb_loop()
+        except (_DL, _LL):
+            pass
 
         self._cycle: int = 0
         self._forced: Dict[str, int] = {}
