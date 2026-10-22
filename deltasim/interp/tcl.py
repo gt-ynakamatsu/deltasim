@@ -66,8 +66,12 @@ def _parse_word(src: str, pos: int, interp: "MiniTcl") -> tuple[str, int]:
             if src[pos] == "\\":
                 pos += 1
                 if pos < n:
-                    esc = {"n": "\n", "t": "\t", "r": "\r"}.get(src[pos], src[pos])
-                    parts.append(esc)
+                    esc = {"n": "\n", "t": "\t", "r": "\r", "\\": "\\"}.get(src[pos])
+                    if esc is not None:
+                        parts.append(esc)
+                    else:
+                        parts.append("\\")
+                        parts.append(src[pos])
                     pos += 1
             elif src[pos] == "$":
                 val, pos = _expand_var(src, pos, interp)
@@ -99,8 +103,14 @@ def _parse_word(src: str, pos: int, interp: "MiniTcl") -> tuple[str, int]:
         if src[pos] == "\\":
             pos += 1
             if pos < n:
-                esc = {"n": "\n", "t": "\t", "r": "\r"}.get(src[pos], src[pos])
-                parts.append(esc)
+                # 認識されないシーケンスはバックスラッシュを保持（Tcl 仕様）
+                esc = {"n": "\n", "t": "\t", "r": "\r", "\\": "\\"}.get(src[pos])
+                if esc is not None:
+                    parts.append(esc)
+                else:
+                    # Windows パス等: \U → \U として保持
+                    parts.append("\\")
+                    parts.append(src[pos])
                 pos += 1
         elif src[pos] == "$":
             val, pos = _expand_var(src, pos, interp)

@@ -342,7 +342,7 @@ class TestSimSession:
         p = tmp_path / "test.do"
         p.write_text(script, encoding="utf-8")
         session, sim = _make_session()
-        session.eval_script(f"do {p}")
+        session.eval_script(f"do {{{p}}}")
         assert session._tcl.get_var("x") == "99"
 
     def test_do_file_crlf(self, tmp_path):
@@ -351,7 +351,7 @@ class TestSimSession:
         p = tmp_path / "test_crlf.do"
         p.write_bytes(script.encode("utf-8"))
         session, sim = _make_session()
-        session.eval_script(f"do {p}")
+        session.eval_script(f"do {{{p}}}")
         assert session._tcl.get_var("x") == "77"
         assert session._tcl.get_var("y") == "88"
 
@@ -540,7 +540,8 @@ class TestE2ECli:
         do_script = "run 20ns\nputs DO_DONE\n"
         do_p = tmp_path / "test.do"
         do_p.write_text(do_script, encoding="utf-8")
-        script = f"do {do_p}\nquit\n"
+        # {} で引用して Windows バックスラッシュをエスケープとして扱わないようにする
+        script = f"do {{{do_p}}}\nquit\n"
         rc, out, err = self._run_cli_script(COUNTER_SV, script)
         assert rc == 0
         assert "DO_DONE" in out
