@@ -109,6 +109,29 @@ when {rst_n == 0} {puts "reset asserted!"}
 > **互換性の注意（§18.1.1）**: `set <信号名> <値>` は Tcl 変数への代入であり、信号は変わりません。
 > 信号に値を入れるには `force <信号名> <値>` を使ってください。
 
+---
+
+## 行ブレークポイントの動作方針（§18.1.1 実装メモ）
+
+### 停止タイミング: deferred（その時刻の処理を完了してから停止）
+
+行ブレークポイント (`bp file:line`) は、その文を含む時刻の処理（posedge → NBA 適用 → 組み合わせループ → negedge → VCD 記録）をすべて完了してから停止します。
+
+**理由**: `execute()` の途中で即時例外を発生させると、NBA キューが不完全なまま negedge や VCD 記録がスキップされ、シミュレーション結果が壊れるため。
+
+**動作例**:
+```
+vsim> bp counter.sv:7   # q <= q + d が line 7
+vsim> run -all
+# t=10ns  cycle=1
+# t=20ns  cycle=2
+# bp [1] counter.sv:7 t=25ns   ← t=25 の全処理完了後に停止（NBA・negedge 込み）
+vsim> examine q
+q = 01         ← NBA が正しく適用されている
+```
+
+`run -continue` で次の実行まで進みます。
+
 ```tcl
 step [N]          # N サイクル進める（デフォルト 1）
 until TIME_NS     # 指定時刻まで実行

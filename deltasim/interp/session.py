@@ -255,20 +255,29 @@ class SimSession:
         self._run_until_end()
 
     def _make_bp_check(self):
-        """行ブレークポイントチェック用コールバックを返す。"""
-        from deltasim.sim.engine import BreakpointHit
-        engine_time = [self._sim._engine._time]
+        """行ブレークポイントチェック用コールバックを返す（deferred 方式）。
+
+        §18.1.1: 即時 raise せず engine._deferred_bp_hit に記録する。
+        これにより NBA・negedge・VCD の処理が完了してから bp を通知できる。
+        """
+        engine = self._sim._engine
 
         def _check(file: str, line: int):
-            t = self._sim._engine._time
+            if engine._deferred_bp_hit is not None:
+                return  # already hit in this time step
+            t = engine._time
             for bp in self._breakpoints:
                 if bp.kind != "line":
                     continue
                 bp_file = bp.kwargs.get("file", "")
                 bp_line = bp.kwargs.get("line", 0)
-                if bp_line == line and (not bp_file or bp_file in file or file.endswith(bp_file)):
+                if bp_line == line and (
+                    not bp_file or bp_file in file or file.endswith(bp_file)
+                    or (bp_file and file.endswith(bp_file.replace("\\", "/")))
+                ):
                     bp.hit_count += 1
-                    raise BreakpointHit(bp.id, file, line, t)
+                    engine._deferred_bp_hit = (bp.id, file, line, t)
+                    return
         return _check
 
     # ----------------------------------------------------------------

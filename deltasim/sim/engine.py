@@ -73,12 +73,17 @@ class SimError(Exception):
 
 
 class BreakpointHit(Exception):
-    """Raised by the executor when a line breakpoint is hit (§18)."""
+    """Raised after a time step completes when a line breakpoint fired (§18.1.1).
+
+    Deferred approach: the executor records hits without raising immediately.
+    After the full time step (posedge + NBA + negedge + VCD) the hit is raised.
+    This ensures NBA, negedge, and VCD recording are never skipped.
+    """
     def __init__(self, bp_id: int, source_file: str, source_line: int, time_ns: int):
-        self.bp_id      = bp_id
+        self.bp_id       = bp_id
         self.source_file = source_file
         self.source_line = source_line
-        self.time_ns    = time_ns
+        self.time_ns     = time_ns
         super().__init__(f"bp [{bp_id}] {source_file}:{source_line} @ {time_ns}ns")
 
 
@@ -475,12 +480,12 @@ class _Executor:
         self.display_log: List[str] = []
 
     def execute(self, stmt) -> None:
-        # §18: Check line breakpoints before executing each statement
+        # §18.1.1: Check line breakpoints — deferred (does not raise, stores hit)
         if self._bp_check is not None:
             sl = getattr(stmt, "source_line", 0)
             sf = getattr(stmt, "source_file", "")
             if sl:
-                self._bp_check(sf, sl)
+                self._bp_check(sf, sl)  # records hit in engine._deferred_bp_hit, no raise
 
         if isinstance(stmt, Block):
             for s in stmt.stmts:
@@ -964,6 +969,12 @@ class SimEngine:
         # until the force is released.  Populated by Simulator.force().
         self._force_overrides: Dict[str, int] = {}
 
+        # §18.1.1 deferred breakpoint: set by bp_check callback (not raised immediately)
+        # checked in Simulator.step_to_ns() after each full time step
+        self._deferred_bp_hit: Optional[tuple] = None  # (bp_id, file, line, time_ns)
+        # active bp_check callable (set by Simulator.step_to_ns before each cycle)
+        self._active_bp_check = None
+
     # ------------------------------------------------------------------
     # EvalContext builder  (M4)
     # ------------------------------------------------------------------
@@ -1065,7 +1076,8 @@ class SimEngine:
         cycle_idx: int,
         pre_posedge_hook: Optional[Callable] = None,
         post_posedge_hook: Optional[Callable] = None,
-        posedge_only: bool = False,  # §18: stop after posedge (for sub-cycle timing)
+        posedge_only: bool = False,   # §18: stop after posedge (sub-cycle timing)
+        negedge_only: bool = False,   # §18: skip posedge, only run negedge (resume)
     ) -> bool:
         """Run one clock cycle.  Returns True if both posedge and negedge ran."""
         hp = self.half_period
@@ -1073,6 +1085,30 @@ class SimEngine:
 
         # --- Run initial blocks up to posedge time ---
         posedge_time = cycle_idx * 2 * hp + hp
+
+        # §18.1.1 negedge_only: skip posedge phase entirely (resuming mid-cycle)
+        if negedge_only:
+            negedge_time = (cycle_idx + 1) * 2 * hp
+            if self._initial_scheduler:
+                self._initial_scheduler.advance_to(negedge_time - 1, self)
+            if self._clk is not None:
+                prev_clk = self.signals.get(self._clk, 0)
+                self._prev[self._clk] = prev_clk
+                self._time = negedge_time
+                self._write(self._clk, 0)
+                if self._initial_scheduler:
+                    self._initial_scheduler.notify_edge(
+                        self._clk, prev_clk, 0, self._time, self
+                    )
+                nba = self._collect_nba_for_edge(self._clk, 1, 0)
+                self._apply_nba(nba)
+                self._eval_comb_loop()
+            else:
+                self._time = negedge_time
+            if self.vcd_writer:
+                self.vcd_writer.record(self._time, self.signals)
+            return True  # both phases done (posedge was done in previous call)
+
         if self._initial_scheduler:
             self._initial_scheduler.advance_to(posedge_time - 1, self)
 
@@ -1170,7 +1206,8 @@ class SimEngine:
         for proc in self.design.seq_procs:
             if self._is_triggered(proc.sensitivity, sig_name, old_val, new_val):
                 ex = _Executor(self.signals, self._widths, self._params, self._ctx,
-                               max_loop=self.max_loop, time_ns=self._time)
+                               max_loop=self.max_loop, time_ns=self._time,
+                               bp_check=getattr(self, "_active_bp_check", None))
                 try:
                     ex.execute(proc.body)
                 except _FinishSignal:
@@ -1242,7 +1279,8 @@ class SimEngine:
 
             for proc in self.design.comb_procs:
                 ex = _Executor(self.signals, self._widths, self._params, self._ctx,
-                               max_loop=self.max_loop, time_ns=self._time)
+                               max_loop=self.max_loop, time_ns=self._time,
+                               bp_check=getattr(self, "_active_bp_check", None))
                 try:
                     ex.execute(proc.body)
                 except _FinishSignal:
