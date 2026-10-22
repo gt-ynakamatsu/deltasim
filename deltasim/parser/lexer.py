@@ -21,6 +21,9 @@ class Token:
     value: str
     line: int
     col: int
+    # §18.9: プリプロセッサ通過後の元ファイル・元行（ソースマップ由来）
+    source_file: str = ""
+    source_line: int = 0   # 0 = line と同じ（未セット）
 
     def __repr__(self) -> str:
         return f"Token({self.type}, {self.value!r}, {self.line}:{self.col})"
@@ -106,13 +109,20 @@ class LexError(Exception):
 # Public API
 # ---------------------------------------------------------------------------
 
-def tokenize(source: str, filename: str = "<string>") -> List[Token]:
+def tokenize(
+    source: str,
+    filename: str = "<string>",
+    source_map: "Optional[dict]" = None,
+) -> List[Token]:
     """Tokenize *source* and return a list of Tokens (no WHITESPACE/COMMENT).
     
     CRLF (\\r\\n) and bare CR (\\r) are normalised to LF before tokenising,
     which ensures Windows-edited files are handled correctly.
     §16: Unclosed block comments and unterminated string literals raise LexError.
+    §18.9: source_map が与えられた場合、各トークンに元ファイル・元行を設定する。
     """
+    from typing import Optional as _Opt  # local import to avoid circular
+
     # Normalise line endings (Windows CRLF / old Mac CR)
     source = source.replace("\r\n", "\n").replace("\r", "\n")
 
@@ -128,7 +138,11 @@ def tokenize(source: str, filename: str = "<string>") -> List[Token]:
         m = _MASTER_RE.match(source, pos)
         if m is None:
             col = pos - line_start + 1
-            raise LexError(f"{filename}:{line}:{col}: unexpected character {source[pos]!r}")
+            # ソースマップから元ファイル・元行を取得
+            orig_file, orig_line = _resolve_loc(filename, line, source_map)
+            raise LexError(
+                f"{orig_file}:{orig_line}:{col}: unexpected character {source[pos]!r}"
+            )
 
         # Identify which group matched
         matched_type: str = ""
@@ -147,7 +161,11 @@ def tokenize(source: str, filename: str = "<string>") -> List[Token]:
             tok_value = text
             if matched_type == "ID" and text in KEYWORDS:
                 tok_type = "KW"
-            tokens.append(Token(tok_type, tok_value, line, col))
+            # §18.9: ソースマップから元位置を取得
+            orig_file, orig_line = _resolve_loc(filename, line, source_map)
+            tok = Token(tok_type, tok_value, line, col,
+                        source_file=orig_file, source_line=orig_line)
+            tokens.append(tok)
 
         # Update line / position tracking
         newlines = text.count("\n")
@@ -156,8 +174,19 @@ def tokenize(source: str, filename: str = "<string>") -> List[Token]:
             line_start = pos + text.rfind("\n") + 1
         pos = m.end()
 
-    tokens.append(Token("EOF", "EOF", line, 0))
+    orig_file, orig_line = _resolve_loc(filename, line, source_map)
+    tokens.append(Token("EOF", "EOF", line, 0,
+                         source_file=orig_file, source_line=orig_line))
     return tokens
+
+
+def _resolve_loc(filename: str, line: int, source_map) -> "tuple":
+    """ソースマップから (original_file, original_line) を取得する。"""
+    if source_map is not None:
+        loc = source_map.get(line)
+        if loc is not None:
+            return loc.file, loc.line
+    return filename, line
 
 
 def _check_unclosed(source: str, filename: str) -> None:

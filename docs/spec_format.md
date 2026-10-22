@@ -252,3 +252,64 @@ cases:
 - 式は SV 式サブセット（`deltasim.interp.expr` パーサ）で評価。Python `eval` は使用しません。
 - `+incdir+`/`+define+` 同様に `constraints:` は既知キーなので `W_UNKNOWN_KEY` は出ません。
 - `max_constraint_attempts` を超えると `E_CONSTRAINT` エラー（`--json` の `errors[]` に入ります）。
+
+---
+
+## §18.9 プリプロセッサ
+
+`deltasim` はパーサ実行前にプリプロセッサを通します。`.f` ファイルの `+define+`/`+incdir+`、CLI の `-D`/`-I`、YAML の `defines`/`incdirs` キーで設定できます。
+
+### YAML での設定
+
+```yaml
+# YAML で defines / incdirs を指定する例
+version: 1
+top: counter
+
+# §18.9: プリプロセッサ設定
+defines:
+  - "+define+SIM_MODE=1"   # マクロ定義
+  - "+define+DEBUG"        # フラグマクロ（値 "1"）
+incdirs:
+  - "./include"            # インクルードパス
+```
+
+`defines`/`incdirs` は既知キーとして登録されているため、`W_UNKNOWN_KEY` は出ません。
+
+### CLI オプション
+
+```bash
+# -D でマクロ定義、-I でインクルードパス追加
+deltasim test top.sv --spec spec.yaml -D SIM_MODE=1 -D DEBUG -I ./include
+
+# .f ファイルの +define+/+incdir+ も有効（-f より -D/-I が後勝ち）
+deltasim test -f files.f --spec spec.yaml -D OVERRIDE=1
+```
+
+### RTL での使用例
+
+```verilog
+// §18.9: 条件コンパイル
+`ifdef SIM_MODE
+  // シミュレーション専用コード
+`else
+  // 実機コード
+`endif
+
+// マクロ定義と引数付きマクロ
+`define DATA_W 8
+`define MAX(a, b) ((a) > (b) ? (a) : (b))
+
+// インクルード（相対パス → +incdir+ の順に探す）
+`include "config.sv"
+```
+
+### エラーコード
+
+| コード | 条件 |
+|---|---|
+| `E_INCLUDE_LOOP` | 循環 `include`（A→B→A など） |
+| `E001` | `include` ファイル未発見 / 未定義マクロ / 引数数不一致 |
+
+`W_TIMESCALE` 警告: `` `timescale `` は受け付けますが時間単位への反映は未対応。  
+`W_UNKNOWN_DIRECTIVE` 警告: `` `pragma `` 等の非対応指令は無視します。

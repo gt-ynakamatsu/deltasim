@@ -64,6 +64,8 @@ def load(
     files: FilesOrDesign,
     top: Optional[str] = None,
     params: Optional[Dict[str, int]] = None,
+    defines=None,
+    incdirs=None,
 ) -> DesignInfo:
     """Parse and elaborate SV files.
 
@@ -92,9 +94,20 @@ def load(
     result = DesignInfo(schema_version=SCHEMA_VERSION)
 
     try:
-        mods, cat = _parse_files(files)
+        mods, cat = _parse_files(files, defines=defines, incdirs=incdirs)
     except Exception as e:
         result.status = "ERROR"
+        # §18.9: PreprocError には固有コードを保持する
+        try:
+            from deltasim.preproc import PreprocError as _PE
+            if isinstance(e, _PE) and e.code != "E001":
+                result.errors.append(ErrorInfo(
+                    code=e.code, message=str(e),
+                    file=e.file, line=e.line, severity="error",
+                ))
+                return result
+        except ImportError:
+            pass
         result.errors.append(_exc_to_error(e, "E001"))
         return result
 
@@ -148,6 +161,8 @@ def gen(
     out_dir: Optional[Union[str, Path]] = None,
     tb_path: Optional[Union[str, Path]] = None,
     spec_path: Optional[Union[str, Path]] = None,
+    defines=None,
+    incdirs=None,
 ) -> dict:
     """Generate testbench SV and YAML scenario skeleton.
 
@@ -158,7 +173,7 @@ def gen(
     from deltasim.tb.generator import generate_tb_sv, generate_yaml_spec
     import io, textwrap
 
-    di = load(files, top=top, params=params)
+    di = load(files, top=top, params=params, defines=defines, incdirs=incdirs)
     if di.status != "PASS":
         return {"status": "ERROR", "errors": [e.to_dict() for e in di.errors]}
 
@@ -222,6 +237,8 @@ def test(
     filter_cases: Optional[List[str]] = None,
     max_delta: Optional[int] = None,
     max_loop: Optional[int] = None,
+    defines=None,
+    incdirs=None,
 ) -> TestResult:
     """Run simulation driven by a YAML scenario spec.
 
@@ -288,7 +305,11 @@ def test(
     # Elaborate
     _emit("progress", phase="elab")
     top_name = top or scenario.top
-    di = load(files, top=top_name, params=params)
+    # §18.9: YAML の defines/incdirs をマージ（CLI/-D/-I が後勝ち）
+    eff_defines = list(scenario.defines or []) + list(defines or []) or None
+    eff_incdirs = list(scenario.incdirs or []) + list(incdirs or []) or None
+    di = load(files, top=top_name, params=params,
+              defines=eff_defines, incdirs=eff_incdirs)
     if di.status != "PASS":
         result.status = "ERROR"
         result.errors = di.errors
@@ -881,6 +902,8 @@ def run(
     cancel: Optional[CancelToken] = None,
     max_delta: Optional[int] = None,
     max_loop: Optional[int] = None,
+    defines=None,
+    incdirs=None,
 ) -> RunResult:
     """Run a bare simulation without a spec file.
 
@@ -906,7 +929,7 @@ def run(
 
     _emit("start", phase="parse")
 
-    di = load(files, top=top, params=params)
+    di = load(files, top=top, params=params, defines=defines, incdirs=incdirs)
     if di.status != "PASS":
         result.status = "ERROR"
         result.errors = di.errors
@@ -1023,11 +1046,14 @@ class Simulator:
         half_period: int = 5,
         reset_cycles: int = 10,
         keep_changes: bool = True,
+        defines=None,
+        incdirs=None,
     ):
         from deltasim.sim.engine import SimEngine
 
         di = (design_or_files if isinstance(design_or_files, DesignInfo)
-              else load(design_or_files, top=top, params=params))
+              else load(design_or_files, top=top, params=params,
+                        defines=defines, incdirs=incdirs))
         if di.status != "PASS":
             raise ValueError(f"Elaboration failed: {di.errors}")
 
@@ -1526,12 +1552,12 @@ def _build_record_set(design, scenario=None):
     return ports | spec_refs
 
 
-def _parse_files(files):
+def _parse_files(files, defines=None, incdirs=None):
     from deltasim.parser.parser import parse_file
     mods = []
     cat = {}
     for f in files:
-        mod = parse_file(str(f))
+        mod = parse_file(str(f), defines=defines, incdirs=incdirs)
         mods.append(mod)
         cat[mod.name] = mod
     return mods, cat

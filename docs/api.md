@@ -1028,8 +1028,8 @@ result = ds.test(fl.files, spec="spec.yaml")
 | フィールド | 型 | 説明 |
 |-----------|-----|------|
 | `files` | `List[str]` | 絶対パスに解決された SV ファイルリスト |
-| `incdirs` | `List[str]` | `+incdir+` ディレクトリリスト（**保持のみ。まだパーサに渡されません**） |
-| `defines` | `Dict[str, str]` | `+define+NAME[=VAL]` マクロ辞書（**保持のみ。まだパーサに渡されません**） |
+| `incdirs` | `List[str]` | `+incdir+` ディレクトリリスト（§18.9 プリプロセッサに渡される） |
+| `defines` | `Dict[str, str]` | `+define+NAME[=VAL]` マクロ辞書（§18.9 プリプロセッサに渡される） |
 | `warnings` | `List[FileListWarning]` | 未対応オプション警告（`W_FILELIST_OPT`） |
 | `errors` | `List[FileListError]` | 存在しないファイルのエラー |
 
@@ -1153,3 +1153,98 @@ deltasim の信号初期値は信号の種類とドライバによって決ま�
 `x` / `z` という名前の信号ポートが制約式・RTL 両方で使えます:
 - 環境（signals dict）に存在する場合は識別子として扱う
 - 存在しない場合は4値リテラルとして扱う
+
+---
+
+## §18.9 プリプロセッサ
+
+deltasim は SystemVerilog プリプロセッサ（`deltasim/preproc.py`）を持ちます。
+パーサ実行前にファイルを展開します。
+
+### 対応指令
+
+| 指令 | 説明 |
+|---|---|
+| `` `define NAME[= body] `` | マクロ定義（引数なし） |
+| `` `define NAME(a, b=default) body `` | 引数付きマクロ（デフォルト値対応） |
+| `` `undef NAME `` | マクロ削除 |
+| `` `ifdef / `ifndef / `elsif / `else / `endif `` | 条件分岐 |
+| `` `include "file.sv" `` | ファイルインクルード |
+| `` `timescale `` | 受け付け（時間単位未反映; W_TIMESCALE 警告） |
+| `` `default_nettype `` | 受け付けのみ |
+
+非対応指令（`` `pragma `` 等）は W_UNKNOWN_DIRECTIVE 警告を出して無視します。
+
+### マクロ定義
+
+```verilog
+`define WIDTH 8
+logic [`WIDTH-1:0] x;   // → logic [8-1:0] x;
+
+`define ADD(a, b) ((a) + (b))
+assign y = `ADD(x, 1);  // → assign y = ((x) + (1));
+```
+
+複数行マクロは行末 `\` で継続できます。
+
+### 条件コンパイル
+
+```verilog
+`ifdef SIM
+  // シミュレーション専用コード
+`elsif FPGA
+  // FPGA 合成コード
+`else
+  // デフォルト
+`endif
+```
+
+### `include パス解決順
+
+1. インクルード元ファイルのディレクトリからの相対パス
+2. `-I` / `+incdir+` で指定したディレクトリ（指定順）
+
+インクルードパスは Windows の `\`、Linux の `/` 両方に対応します。
+
+### CLI オプション
+
+```bash
+deltasim test counter.sv --spec spec.yaml \
+    -D SIM_MODE=1 \      # マクロ定義（= が省略されると値 "1"）
+    -D DEBUG \           # フラグマクロ
+    -I ./include \       # インクルードパス追加
+    -f files.f           # .f ファイル内の +define+/+incdir+ も有効
+```
+
+**優先順位**: `-f` の `+define+`/`+incdir+` が先、CLI の `-D`/`-I` が後から追加（後勝ち）。
+
+### Python API
+
+```python
+ds.load(["top.sv"], defines={"SIM": "1", "WIDTH": "8"}, incdirs=["./include"])
+ds.test(["top.sv"], "spec.yaml", defines={"SIM": "1"}, incdirs=["./include"])
+```
+
+`defines` は `Dict[str, str]` または `List["+define+NAME=VAL"]` 形式を受け付けます。
+
+### YAML キー
+
+```yaml
+version: 1
+top: counter
+defines:
+  - "+define+SIM_MODE=1"
+  - "+define+DEBUG"
+incdirs:
+  - "./include"
+```
+
+YAML の `defines`/`incdirs` は CLI と同じ形式で指定します。
+CLI の `-D`/`-I` は YAML の値の後に追加されます（CLI 後勝ち）。
+
+### エラーコード
+
+| コード | 条件 |
+|---|---|
+| `E_INCLUDE_LOOP` | 循環 include を検出（A → B → A など） |
+| `E001` | `include ファイルが見つからない / 未定義マクロ / 引数数不一致 |

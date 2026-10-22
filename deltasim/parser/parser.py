@@ -111,7 +111,10 @@ class Parser:
 
     def _error(self, msg: str) -> None:
         tok = self._peek()
-        raise ParseError(f"{self._filename}:{tok.line}:{tok.col}: {msg}")
+        # §18.9: ソースマップ由来の元ファイル・元行を使う
+        ef = tok.source_file if tok.source_file else self._filename
+        el = tok.source_line if tok.source_line else tok.line
+        raise ParseError(f"{ef}:{el}:{tok.col}: {msg}")
 
     # ------------------------------------------------------------------
     # Top-level: one module per file
@@ -1105,9 +1108,20 @@ def _parse_number_token(s: str) -> NumberLiteral:
 # Public convenience functions
 # ---------------------------------------------------------------------------
 
-def parse_string(source: str, filename: str = "<string>") -> Module:
-    """Parse SV source string and return a Module AST."""
-    tokens = tokenize(source, filename)
+def parse_string(
+    source: str,
+    filename: str = "<string>",
+    defines=None,
+    incdirs=None,
+) -> Module:
+    """Parse SV source string and return a Module AST.
+
+    §18.9: プリプロセッサを常に通す（ifdef 等の処理のため）。
+    """
+    from deltasim.preproc import Preprocessor
+    pp = Preprocessor(defines=defines, incdirs=incdirs)
+    source, source_map = pp.process_string(source, filename)
+    tokens = tokenize(source, filename, source_map=source_map)
     parser = Parser(tokens, filename)
     # Skip to 'module' keyword
     while not parser._at("module", "EOF"):
@@ -1117,14 +1131,25 @@ def parse_string(source: str, filename: str = "<string>") -> Module:
     return parser.parse_module()
 
 
-def parse_file(path: str) -> Module:
+def parse_file(path: str, defines=None, incdirs=None) -> Module:
     """Parse a .sv file and return a Module AST.
     
     The file is read as UTF-8 with CRLF normalisation (Windows compatible).
+    §18.9: プリプロセッサを常に通す（ifdef/include 等の処理のため）。
     """
     from pathlib import Path
+    from deltasim.preproc import Preprocessor
     p = Path(path)
-    source = p.read_text(encoding="utf-8")
-    mod = parse_string(source, filename=str(p))
-    mod.source_file = str(p)
+    pp = Preprocessor(defines=defines, incdirs=incdirs)
+    source, source_map = pp.process_file(str(p))
+    mod_filename = str(p)
+    tokens = tokenize(source, mod_filename, source_map=source_map)
+    parser = Parser(tokens, mod_filename)
+    # Skip to 'module' keyword
+    while not parser._at("module", "EOF"):
+        parser._consume()
+    if parser._at("EOF"):
+        raise ParseError("No module declaration found")
+    mod = parser.parse_module()
+    mod.source_file = mod_filename
     return mod
