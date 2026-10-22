@@ -45,13 +45,28 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, field_validator
+
+# ---------------------------------------------------------------------------
+# ライフサイクル: サーバー終了時に一時 VCD をクリーンアップ（§18.4）
+# ---------------------------------------------------------------------------
+
+@asynccontextmanager
+async def _lifespan(application: FastAPI):
+    # 起動時: 前回の異常終了で残った一時 VCD を削除（§18.4.1）
+    from deltasim.gui.jobs import startup_cleanup_stale_vcds, cleanup_all_temp_vcds
+    await asyncio.to_thread(startup_cleanup_stale_vcds)
+    yield
+    # 終了時: 自プロセスの全一時 VCD を削除（§18.4.1）
+    cleanup_all_temp_vcds()
+
 
 # ---------------------------------------------------------------------------
 # アプリ初期化
@@ -59,10 +74,16 @@ from pydantic import BaseModel, field_validator
 
 _STATIC_DIR = Path(__file__).parent / "static"
 
+try:
+    from deltasim import __version__ as _deltasim_version
+except ImportError:
+    _deltasim_version = "0.0.0"
+
 app = FastAPI(
     title="deltasim GUI",
     description="SystemVerilog シミュレータ GUI",
-    version="0.1.0",
+    version=_deltasim_version,
+    lifespan=_lifespan,
 )
 
 if _STATIC_DIR.exists():
@@ -466,8 +487,18 @@ class TestRequest(BaseModel):
 
 @app.post("/api/test")
 async def api_test(req: TestRequest):
-    """テストを同期実行して結果 JSON を返す（後方互換）。"""
+    """テストを同期実行して結果 JSON を返す（後方互換）。
+
+    §18.4.1: vcd_out 未指定かつ spec に sim.vcd も無い場合、専用フォルダに一時 VCD を自動生成する。
+    """
     from deltasim.gui.adapter import test
+    from deltasim.gui.jobs import _peek_spec_vcd, _make_temp_vcd
+
+    vcd_out = req.vcd_out
+    if vcd_out is None:
+        spec_vcd = _peek_spec_vcd(req.spec)
+        if spec_vcd is None:
+            vcd_out = _make_temp_vcd(spec=req.spec, sv_files=req.sv_files)
 
     try:
         result = await asyncio.to_thread(
@@ -476,12 +507,13 @@ async def api_test(req: TestRequest):
             req.spec,
             top=req.top,
             seed=req.seed,
-            vcd_path=req.vcd_out,
+            vcd_path=vcd_out,
             param_overrides=req.params,
             filter_cases=req.filter_cases,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    result.pop("_test_result", None)  # 同期版ではエクスポート不要
 
     return result
 
@@ -918,3 +950,154 @@ async def api_waveform(
         raise HTTPException(status_code=422, detail=str(e))
 
     return data
+
+# ---------------------------------------------------------------------------
+# /api/gen — テストベンチ・スペック生成（§18.4: 生成ボタン）
+# ---------------------------------------------------------------------------
+
+class GenRequest(BaseModel):
+    sv_files: List[str]
+    top: Optional[str] = None
+    params: Dict[str, int] = {}
+    out_dir: Optional[str] = None
+    tb_path: Optional[str] = None
+    spec_path: Optional[str] = None
+
+    @field_validator("sv_files")
+    @classmethod
+    def sv_files_must_exist(cls, v: List[str]) -> List[str]:
+        for f in v:
+            if not os.path.isfile(f):
+                raise ValueError(f"SV ファイルが見つかりません: {f!r}")
+        return v
+
+
+@app.post("/api/gen")
+async def api_gen(req: GenRequest):
+    """テストベンチ SV と YAML スペックのスケルトンを生成する（§18.4 生成ボタン）。
+
+    out_dir / tb_path / spec_path を省略するとファイルを書き出さず文字列で返す。
+    """
+    from deltasim.gui.adapter import gen
+
+    try:
+        result = await asyncio.to_thread(
+            gen,
+            req.sv_files,
+            req.top,
+            param_overrides=req.params,
+            out_dir=req.out_dir,
+            tb_path=req.tb_path,
+            spec_path=req.spec_path,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# /api/test/{job_id}/export — JUnit XML / JSON エクスポート（§18.4）
+# ---------------------------------------------------------------------------
+
+@app.get("/api/test/{job_id}/export")
+async def test_export(
+    job_id: str,
+    fmt: str = Query("json", description="'json' または 'junit'"),
+):
+    """テスト結果を JSON または JUnit XML としてダウンロードする（§18.4）。
+
+    CLI の `test --json` / `test --junit` と同じ出力を返す。
+    job.test_result（TestResult オブジェクト）を直接使い、dict からの再構築は行わない。
+    """
+    from deltasim.gui.jobs import get_job
+
+    job = get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"ジョブが見つかりません: {job_id}")
+    if not job.done or job.result is None:
+        raise HTTPException(status_code=425, detail="ジョブはまだ完了していません")
+
+    test_result = job.test_result
+
+    if fmt == "junit":
+        import tempfile as _tempfile
+        from deltasim.report.junit import write_junit_v2
+
+        if test_result is None:
+            raise HTTPException(status_code=422, detail="TestResult オブジェクトが保存されていません")
+
+        fd, tmp_path_str = _tempfile.mkstemp(suffix=".xml")
+        os.close(fd)
+        try:
+            await asyncio.to_thread(write_junit_v2, test_result, tmp_path_str)
+            xml_body = Path(tmp_path_str).read_text(encoding="utf-8")
+        finally:
+            try:
+                Path(tmp_path_str).unlink(missing_ok=True)
+            except (PermissionError, OSError):
+                pass
+
+        return Response(
+            content=xml_body,
+            media_type="application/xml",
+            headers={"Content-Disposition": f'attachment; filename="result_{job_id[:8]}.xml"'},
+        )
+    else:
+        # JSON: CLI の test --json と同じ構造（TestResult.to_json() ベース）
+        if test_result is not None:
+            body = test_result.to_json()
+        else:
+            import json as _json
+            body = _json.dumps(job.result, ensure_ascii=False, indent=2)
+        return Response(
+            content=body,
+            media_type="application/json",
+            headers={"Content-Disposition": f'attachment; filename="result_{job_id[:8]}.json"'},
+        )
+
+
+# ---------------------------------------------------------------------------
+# /api/recent-projects — 最近使ったプロジェクト（§18.4）
+# ---------------------------------------------------------------------------
+
+class RecentProjectEntry(BaseModel):
+    sv_files: List[str]
+    top: Optional[str] = None
+    spec: Optional[str] = None
+    name: Optional[str] = None
+
+
+@app.get("/api/recent-projects")
+async def get_recent_projects():
+    """最近使ったプロジェクト一覧を返す（§18.4）。
+
+    存在しないパスは missing=true で識別できるよう付加して返す。
+    """
+    from deltasim.gui.recent import load_recent
+
+    entries = load_recent()
+    enriched = []
+    for e in entries:
+        item = dict(e)
+        sv_missing = [f for f in item.get("sv_files", []) if not os.path.exists(f)]
+        spec_missing = item.get("spec") and not os.path.exists(item["spec"])
+        item["missing"] = bool(sv_missing or spec_missing)
+        item["missing_paths"] = sv_missing + ([item["spec"]] if spec_missing else [])
+        enriched.append(item)
+    return {"recent": enriched}
+
+
+@app.post("/api/recent-projects/add")
+async def add_recent_project(req: RecentProjectEntry):
+    """プロジェクトを最近使った一覧に追加する（§18.4）。"""
+    from deltasim.gui.recent import add_recent
+
+    entry = {
+        "sv_files": req.sv_files,
+        "top": req.top,
+        "spec": req.spec,
+        "name": req.name or (req.top or (Path(req.sv_files[0]).stem if req.sv_files else "unknown")),
+    }
+    await asyncio.to_thread(add_recent, entry)
+    return {"ok": True}

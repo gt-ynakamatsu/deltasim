@@ -161,6 +161,8 @@ deltasim gui --no-browser
 4. 右ペインにテスト結果（PASS/FAIL/ERROR）が表示される
 5. 下ペインの波形ビューアに VCD 波形が表示される（クリックでカーソル、Shift+クリックでカーソル B）
 
+詳しい操作方法と HTTP API 仕様は **[docs/gui.md](docs/gui.md)** を参照してください。
+
 ### GUI の使い方（拡張版）
 
 ```bash
