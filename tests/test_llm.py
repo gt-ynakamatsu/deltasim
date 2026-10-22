@@ -816,7 +816,7 @@ class TestRunSuggestionSubprocess:
             capture_output=True, text=True,
         )
         assert proc.returncode == 0, proc.stderr
-        assert "0.3.0" in proc.stdout
+        assert "0.4.0" in proc.stdout
 
 
 class TestWritePathRestriction:

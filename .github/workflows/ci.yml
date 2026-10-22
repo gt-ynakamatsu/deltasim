@@ -82,7 +82,7 @@ jobs:
         run: |
           VER=$(smoke_venv/bin/deltasim --version)
           echo "version output: $VER"
-          echo "$VER" | grep "0.3.0"
+          echo "$VER" | grep "0.4.0"
 
       - name: Smoke — deltasim --version (Windows)
         if: runner.os == 'Windows'
@@ -90,7 +90,7 @@ jobs:
         run: |
           $ver = smoke_venv\Scripts\deltasim --version
           Write-Host "version output: $ver"
-          if ($ver -notmatch "0\.3\.0") { Write-Error "version mismatch: $ver"; exit 1 }
+          if ($ver -notmatch "0\.4\.0") { Write-Error "version mismatch: $ver"; exit 1 }
 
       - name: Smoke — deltasim gui --help (Linux/macOS)
         if: runner.os != 'Windows'

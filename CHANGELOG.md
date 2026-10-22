@@ -5,6 +5,63 @@
 
 ---
 
+## [0.4.0] — 2026-10-22
+
+### ⚠ 挙動の変更（Behavior Changes）
+
+これらの変更により、v0.3.0 と比べてシミュレーション結果が変わる場合があります。
+
+**1. 信号の初期値が変わりました**（§18.7）
+
+| 信号の種類 | v0.3.0 | v0.4.0 |
+|---|---|---|
+| `output`/内部 logic（always_ff 駆動）| 0 | **x** |
+| `input` ポート | 0 | 0（変わらず） |
+| `assign`/`always_comb` 駆動 | 0 | **すぐに評価された値**（実質 0 に近い） |
+| 未駆動 net | 0 | **z** |
+
+リセット付き回路は影響を受けません。リセット前の FF 出力が x になります。
+`initial` ブロックや明示的な初期値がある回路は引き続き正常動作します。
+
+**2. `initial` / `always_comb` 内の無限ループが E_LOOP_LIMIT を正しく返すようになりました**（#30/#31）
+
+v0.3.0 では `initial` ブロック内および `always_comb` 内の無限 while ループが
+`E_INTERNAL` を返していました（`always_ff` 内のループは元から正常）。
+v0.4.0 では正しく `E_LOOP_LIMIT` を返します。
+
+**3. `constraints:` を使うスペックで乱数列が変わりました**（§18.6）
+
+YAML スペックに `constraints:` を指定している場合、同じ seed でも v0.3.0 と異なる
+乱数列になります。RNG 消費順が (cycle, offset) 昇順に正規化されたためです。
+`constraints:` を使わない `random:` 指定のみのスペックは影響を受けません。
+
+**4. 対話デバッグ（`deltasim sim`）の `set` が Tcl 変数代入専用になりました**（§18.4.1）
+
+`deltasim sim`（`run -i`）上での `set <名前> <値>` は Tcl の変数代入であり、
+信号値には影響しません。信号に値を入れるには `force <信号名> <値>` を使ってください。
+以前の独自コマンド `set <信号名> <値>` から互換性のない変更です（詳細: `docs/interactive.md`）。
+
+YAML スペックの `stimulus/set:` の意味は変わっていません。
+
+---
+
+### 新機能（§18.1〜§18.9.1）
+
+| § | 機能 |
+|---|---|
+| §18.1 | 対話デバッグ（`deltasim sim`）: Questa 風コマンド、bp/when、Tcl、force/noforce、restart |
+| §18.2 | `-f filelist.f` 対応（`+define+`/`+incdir+`/複数 SV） |
+| §18.3 | ローカル LLM 連携（`deltasim ask`/`llm draft-spec`/`llm explain`） |
+| §18.4 | GUI: 波形表示・デバッグパネル・コンソール入力欄 |
+| §18.5 | 不具合修正（E_AMBIGUOUS_TOP、E_UNKNOWN_PORT、E_NO_CHECK、find_top_candidates、--log） |
+| §18.6 | `constraints:` による制約付き乱数刺激、E_CONSTRAINT/E_CONSTRAINT_EXPR |
+| §18.7 | 4値論理（x/z）: aval/bval 表現、IEEE 1800 演算、casez/casex、初期値 x/z、$display x/z |
+| §18.8 | ユーザーマニュアル（docs/spec_format.md 等の説明書更新） |
+| §18.9 | プリプロセッサ: `` `define ``/`` `undef ``/`` `ifdef ``/`` `include ``、`-D`/`-I`、E_INCLUDE_LOOP |
+| §18.9.1 | W_TIMESCALE/W_UNKNOWN_DIRECTIVE → `test --json` の `warnings[]` |
+
+---
+
 ## [0.3.0+] — 開発中（§18.2 -f ファイルリスト + §18 対話デバッグ）
 
 ### 追加（§18.9.1 プリプロセッサ警告 → JSON warnings[]）
