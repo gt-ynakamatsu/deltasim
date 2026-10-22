@@ -23,8 +23,8 @@ from deltasim.llm.client import (
     call_llm, LLMCallable, LLMConnectError, LLMResponseError,
 )
 from deltasim.llm.safety import (
-    check_command, check_session_command, UnsafeCommandError,
-    ALLOWED_SUBCOMMANDS,
+    check_command, check_session_command_deep, UnsafeCommandError,
+    ALLOWED_SUBCOMMANDS, _check_write_paths,
 )
 
 
@@ -35,11 +35,17 @@ from deltasim.llm.safety import (
 @dataclass
 class Suggestion:
     """suggest_command の戻り値"""
-    raw_output:   str       # LLM の生出力
-    command_line: str       # 提案コマンド行（"deltasim test ..." 形式）
-    args:         List[str] # ["test", "counter.sv", ...]
-    safe:         bool      # 安全判定
-    reason:       str       # 理由（不正の場合はエラー説明）
+    raw_output:   str        # LLM の生出力
+    command_line: str        # 提案コマンド行（"deltasim test ..." 形式）
+    args:         List[str]  # ["test", "counter.sv", ...]
+    safe:         bool       # 安全判定
+    reason:       str        # 理由（不正の場合はエラー説明）
+    write_paths:  List[str] = field(default_factory=list)  # 書き込むファイルリスト
+
+
+# subprocess 実行関数の型
+ExecutorCallable = Callable[[List[str]], int]
+"""サブプロセス実行シグネチャ: (argv) -> exit_code"""
 
 
 @dataclass
@@ -157,14 +163,14 @@ def suggest_command(
     raw = call_llm(prompt, cfg, llm_fn)
 
     try:
-        cmd_line, args = check_command(raw)
-        subcmd = cmd_line.split()[1] if len(cmd_line.split()) > 1 else ""
+        cmd_line, args, write_paths = check_command(raw)
         return Suggestion(
             raw_output=raw,
             command_line=cmd_line,
-            args=[subcmd] + args,
+            args=args,
             safe=True,
             reason="",
+            write_paths=write_paths,
         )
     except UnsafeCommandError as exc:
         return Suggestion(
@@ -173,6 +179,7 @@ def suggest_command(
             args=[],
             safe=False,
             reason=str(exc),
+            write_paths=[],
         )
 
 
@@ -180,22 +187,29 @@ def run_suggestion(
     suggestion: Suggestion,
     yes: bool = False,
     prompt_fn=None,
+    executor: Optional[ExecutorCallable] = None,
 ) -> int:
-    """Suggestion を確認して実行する。
+    """Suggestion を確認してサブプロセスで実行する。
 
     Args:
         suggestion: suggest_command の戻り値
         yes: True なら確認なしで実行
         prompt_fn: 確認プロンプト関数（テスト用）。None なら input()
+        executor: (argv) -> int のサブプロセス実行関数（テスト用）。
+                  None なら sys.executable + subprocess.run を使う。
 
     Returns:
         終了コード（0 = 成功、非0 = 失敗・拒否）
     """
+    import subprocess
+
     if not suggestion.safe:
         print(f"ERROR (E_LLM_UNSAFE_CMD): {suggestion.reason}", file=sys.stderr)
         return 2
 
     print(f"\n提案コマンド: {suggestion.command_line}")
+    if suggestion.write_paths:
+        print(f"書き込むファイル: {', '.join(suggestion.write_paths)}")
 
     if not yes:
         fn = prompt_fn or (lambda p: input(p))
@@ -208,13 +222,12 @@ def run_suggestion(
             print("実行しませんでした")
             return 0
 
-    # プロセス内で CLI を実行
-    from deltasim.cli import main as _cli_main
-    from click.testing import CliRunner
-    runner = CliRunner(catch_exceptions=False)
-    result = runner.invoke(_cli_main, suggestion.args, catch_exceptions=True)
-    print(result.output, end="")
-    return result.exit_code
+    # subprocess で実行（stdin/stdout/stderr を親から継承）
+    argv = [sys.executable, "-m", "deltasim"] + suggestion.args
+    if executor is not None:
+        return executor(argv)
+    proc = subprocess.run(argv, shell=False)
+    return proc.returncode
 
 
 def draft_spec(
