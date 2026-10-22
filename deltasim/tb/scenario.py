@@ -544,6 +544,10 @@ class StimulusSchedule:
                               else DEFAULT_MAX_CONSTRAINT_ATTEMPTS)
         self._signal_widths = signal_widths or {}
         self._signal_signed = signal_signed or {}
+        # §18.6 Fix 1: initial values for all known input ports = 0
+        # This matches the engine initial state (SimEngine initialises all signals to 0).
+        # Without this, constraints that reference a port not yet set would raise ExprError.
+        self._initial_port_vals: Dict[str, int] = {name: 0 for name in self._signal_widths}
         # (cycle, offset_ns) -> {signal: value}
         self._schedule: Dict[tuple, Dict[str, int]] = {}
         self._build(inputs, total_cycles)
@@ -574,7 +578,8 @@ class StimulusSchedule:
         # Pass 2: process keys in SORTED order (Fix 2: deterministic RNG order)
         # Maintain persistent_state: last applied value for each input signal
         # so that constraints can reference signals set in previous cycles (Fix 1)
-        persistent_state: Dict[str, int] = {}  # starts empty (all inputs at reset value 0)
+        # §18.6 Fix 1: start from known initial values (all input ports = 0)
+        persistent_state: Dict[str, int] = dict(self._initial_port_vals)
 
         all_keys = set(per_key_fixed) | set(per_key_random)
         for key in sorted(all_keys):  # Fix 2: sorted → deterministic RNG order

@@ -176,42 +176,98 @@ class TestStimulusScheduleConstraints:
 
     def test_persistent_state_in_constraint(self):
         """保持値が制約コンテキストに入ること（Fix 1）。
-        
-        cycle1-2 で b=5 を set → cycle3-5 で a を random、制約 a != b。
+
+        cycle1-2 で b=5 を set → cycle3-5 で a だけ random、制約 a != b。
         保持値 b=5 がコンテキストにあるので a は 5 にならない。
-        ハードコード値でも確認する。
+        ハードコード値をリテラルで assert する。
         """
         inputs = [
             InputEntry(at=(1, 2), set_values={"b": 5}),
             InputEntry(at=(3, 5), random_spec={"a": {"range": [0, 10]}}),
         ]
-        stim = StimulusSchedule(inputs, 5, seed=42, constraints=["a != b"])
+        stim = StimulusSchedule(inputs, 5, seed=42, constraints=["a != b"],
+                                signal_widths={"a": 8, "b": 8})
         # b=5 が保持されているため a は決して 5 にならない
         for cycle in range(3, 6):
             vals = stim.get(cycle)
             a = vals.get("a")
             assert a is not None, f"cycle={cycle}: a が未定義"
             assert a != 5, f"cycle={cycle}: a={a} == b=5 （制約違反）"
-        # ハードコード値（seed=42, a != b, range 0-10）
-        # cycle3-5 の a 値をリテラルで確認（Windows/Linux 同一）
-        stim2 = StimulusSchedule(inputs, 5, seed=42, constraints=["a != b"])
-        for cycle in range(3, 6):
-            v1 = stim.get(cycle)
-            v2 = stim2.get(cycle)
-            assert v1 == v2, f"cycle={cycle} 再現しない: {v1} vs {v2}"
+        # ハードコード値（seed=42, range 0-10, a != 5）をリテラルで確認（Windows/Linux 同一）
+        assert stim.get(3)["a"] == 10, f"cycle3: a={stim.get(3)['a']} != 10"
+        assert stim.get(4)["a"] == 1,  f"cycle4: a={stim.get(4)['a']} != 1"
+        assert stim.get(5)["a"] == 0,  f"cycle5: a={stim.get(5)['a']} != 0"
 
-    def test_signal_width_masking(self):
-        """4bit 信号幅マスクが適用されること（SV 幅規則）"""
-        inputs = [InputEntry(at=1, random_spec={"a": {"range": [0, 15]}, "b": {"range": [0, 15]}})]
-        # signal_widths=4 で a=15, b=1 のとき a+b は 4bit で 0（SV overflow）
-        # ただしサンプル値自体は 0-15 なので制約の値がマスクされる
-        stim = StimulusSchedule(inputs, 1, seed=42,
-                                constraints=["a + b < 16"],
-                                signal_widths={"a": 4, "b": 4})
-        vals = stim.get(1)
-        a, b = vals["a"], vals["b"]
-        # 4bit マスク後の a+b（Python 算術）< 16
-        assert (a & 0xF) + (b & 0xF) < 16
+    def test_persistent_b_zero_a_not_zero(self):
+        """b が一度も set されない場合、初期値 0 が persistent_state に入り a != 0 になること。
+
+        Fix 1: persistent_state を全 input ports = 0 で初期化する。
+        これがないと制約 'a != b' 評価時に b が未定義で E_CONSTRAINT_EXPR になる。
+        """
+        inputs = [InputEntry(at=(1, 5), random_spec={"a": {"range": [0, 3]}})]
+        # b は一度も set されない → 初期値 0 がコンテキストに入る
+        stim = StimulusSchedule(inputs, 5, seed=42, constraints=["a != b"],
+                                signal_widths={"a": 8, "b": 8})
+        # a は 0 (= b の初期値) にならない
+        for cycle in range(1, 6):
+            vals = stim.get(cycle)
+            a = vals.get("a")
+            assert a is not None, f"cycle={cycle}: a が未定義"
+            assert a != 0, f"cycle={cycle}: a={a} は b=0 と等しい（制約違反）"
+        # ハードコード値（seed=42, range 0-3, a != 0）をリテラルで確認
+        assert stim.get(1)["a"] == 2, f"cycle1: {stim.get(1)['a']}"
+        assert stim.get(2)["a"] == 1, f"cycle2: {stim.get(2)['a']}"
+        assert stim.get(3)["a"] == 1, f"cycle3: {stim.get(3)['a']}"
+
+    def test_constraint_a_plus_b_less_than_8_literal(self):
+        """seed=42、制約 a+b<8 での具体的な値列をリテラルで確認（棄却が起きる制約）。
+
+        a+b<16 は seed=42 の値列が全部 <16 なので棄却は起きない。
+        a+b<8 はより厳しく実際に棄却が発生する → RNG 消費が多く値が変わる。
+        """
+        inputs = [InputEntry(at=(1, 5), random_spec={"a": {"range": [0, 15]}, "b": {"range": [0, 15]}})]
+        stim = StimulusSchedule(inputs, 5, seed=42, constraints=["a + b < 8"],
+                                signal_widths={"a": 8, "b": 8})
+        # seed=42, a+b<8 でのリテラル値（Windows/Linux 両方で同一）
+        expected = [(3, 0), (3, 2), (0, 2), (0, 6), (0, 5)]
+        for cycle, (ea, eb) in enumerate(expected, 1):
+            vals = stim.get(cycle)
+            assert vals["a"] == ea, f"cycle={cycle}: a={vals['a']} != {ea}"
+            assert vals["b"] == eb, f"cycle={cycle}: b={vals['b']} != {eb}"
+            assert ea + eb < 8, f"constraint violated: {ea}+{eb}={ea+eb}"
+
+    def test_signal_width_masking_signed(self):
+        """signed 4-bit マスクで値が負に解釈されて制約 sv < 0 が成功すること。
+
+        range [8, 15] は unsigned では 8-15 (all >= 0)、
+        signed 4-bit では 8=−8, 9=−7, ..., 15=−1 (all < 0)。
+        signal_signed=True なら sv < 0 は必ず成功する。
+        注: シグナル名として 'x' は SV 式パーサの不定値リテラルと衝突するため使わない。
+        """
+        inputs = [InputEntry(at=1, random_spec={"sv": {"range": [8, 15]}})]
+        # signed 4-bit: range [8,15] → masked to [-8,-7,...,-1] → all < 0
+        stim_signed = StimulusSchedule(
+            inputs, 1, seed=0, constraints=["sv < 0"],
+            signal_widths={"sv": 4}, signal_signed={"sv": True},
+        )
+        # E_CONSTRAINT にならずにサンプルが返ること（signed マスクで < 0 になっているため）
+        vals = stim_signed.get(1)
+        assert vals["sv"] is not None
+        assert vals["sv"] in range(8, 16), f"range 外: {vals['sv']}"
+
+    def test_signal_width_masking_unsigned_fails(self):
+        """unsigned マスクでは range [8,15] の sv<0 は E_CONSTRAINT になること。
+
+        signal_signed なしで sv<0 を評価すると sv は 8-15 (all > 0) なので満たせない。
+        """
+        inputs = [InputEntry(at=1, random_spec={"sv": {"range": [8, 15]}})]
+        # unsigned (default): range [8,15] → 8-15, none < 0
+        with pytest.raises(ConstraintError):
+            StimulusSchedule(
+                inputs, 1, seed=0, constraints=["sv < 0"],
+                signal_widths={"sv": 4},  # signal_signed は指定しない → unsigned
+                max_constraint_attempts=5,
+            )
 
 
 # ---------------------------------------------------------------------------
