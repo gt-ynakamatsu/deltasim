@@ -603,8 +603,24 @@ def _run_one_case(
     engine._time = 0
     engine._result = SimResult()
     engine._initial_scheduler = _InitialScheduler()
+    # Fix: initial_scheduler.add() が LoopLimitError/DeltaLimitError を
+    # 投げる可能性がある（initial ブロック内の無限ループ等）。
+    # try-except で捕捉して適切なエラーコードを返す。
+    _init_error: Optional[Exception] = None
+    _init_error_code: str = ""
     for ib in getattr(design, "initial_blocks", []):
-        engine._initial_scheduler.add(ib, engine)
+        try:
+            engine._initial_scheduler.add(ib, engine)
+        except LoopLimitError as _e:
+            _init_error = _e; _init_error_code = "E_LOOP_LIMIT"; break
+        except DeltaLimitError as _e:
+            _init_error = _e; _init_error_code = "E_DELTA_LIMIT"; break
+    if _init_error is not None:
+        cr.status = "ERROR"
+        cr.errors.append(_exc_to_error(_init_error, _init_error_code))
+        cr.checks = []
+        cr.elapsed_ms = (time.time() - case_t0) * 1000
+        return cr
 
     if engine._rst is not None:
         rst_assert_val = 0 if engine._rst_active_low else 1
