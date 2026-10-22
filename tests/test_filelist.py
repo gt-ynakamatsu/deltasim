@@ -277,7 +277,10 @@ class TestCliFilelist:
         sv_p = os.path.join(EXAMPLES, "counter.sv")
         f_path = str(tmp_path / "files.f")
         _write(f_path, f"{sv_p}\n")
-        result = _cli(["gen", "-f", f_path, "--top", "counter", "--strings"])
+        out_dir = str(tmp_path / "out")
+        os.makedirs(out_dir, exist_ok=True)
+        result = _cli(["gen", "-f", f_path, "--top", "counter",
+                       "--out-dir", out_dir, "--no-tb"])
         assert result.exit_code == 0, f"exit={result.exit_code}\n{result.output}"
 
     def test_parse_with_f(self, tmp_path):
@@ -312,12 +315,15 @@ class TestCliFilelist:
         _write(f_path, "counter.sv\n")  # relative to .f file location
         spec_p = os.path.join(EXAMPLES, "counter_spec.yaml")
 
-        old_cwd = os.getcwd()
-        try:
-            os.chdir("/tmp")  # change to a different directory
-            result = _cli(["test", "-f", f_path, "--spec", spec_p])
-        finally:
-            os.chdir(old_cwd)
+        # Change to a different temp directory (not /tmp directly — works on all OS)
+        import tempfile
+        with tempfile.TemporaryDirectory() as other_dir:
+            old_cwd = os.getcwd()
+            try:
+                os.chdir(other_dir)
+                result = _cli(["test", "-f", f_path, "--spec", spec_p])
+            finally:
+                os.chdir(old_cwd)
         assert result.exit_code == 0, \
             f"CWD変更後に失敗: exit={result.exit_code}\n{result.output}"
 
@@ -367,7 +373,10 @@ class TestFilelstE2E:
         sv_p = os.path.join(EXAMPLES, "counter.sv")
         f_path = str(tmp_path / "files.f")
         Path(f_path).write_text(f"{sv_p}\n", encoding="utf-8")
-        rc, out = self._run_cli(["gen", "-f", f_path, "--top", "counter", "--strings"])
+        out_dir = str(tmp_path / "out")
+        os.makedirs(out_dir, exist_ok=True)
+        rc, out = self._run_cli(["gen", "-f", f_path, "--top", "counter",
+                                  "--out-dir", out_dir, "--no-tb"])
         assert rc == 0, f"exit={rc}\n{out}"
 
     def test_e2e_parse_with_f(self, tmp_path):
