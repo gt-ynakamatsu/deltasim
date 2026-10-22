@@ -729,3 +729,130 @@ GET /api/console/{session_id}/state
 PR #25 以降、CLI の `test`/`run`/`gen`/`parse` コマンドはデフォルトで `deltasim.log` を作業フォルダに書き出します。
 
 GUI の LLM 機能（コマンド提案の実行）でこれらのコマンドを起動する場合、**PR #26** で実装された §18.5.1 の方針により、実行時の作業フォルダをプロジェクトフォルダに設定します。そのため `deltasim.log` はプロジェクトフォルダに書かれ、CLI を直接使った場合と同じ動作になります。コマンドへの余分な引数追加は行いません（表示コマンドと実行が一致）。
+## 7. LLM 連携（§18.3）
+
+### 7.1 設定
+
+`simconfig.yaml` に LLM 設定を追加してください（詳細は `docs/llm.md`）:
+
+```yaml
+llm:
+  endpoint: http://127.0.0.1:11434
+  model: llama3
+```
+
+設定がない場合、🤖 LLM ボタンに ❌ マークが表示され、LLM 機能は無効になります。他の機能（テスト実行・波形表示等）は影響を受けません。
+
+### 7.2 コマンド提案（§18.3.2 仕様確定）
+
+LLM パネルのテキスト入力に「counter をテストして」などと入力して「提案」ボタンを押します。
+
+- 提案コマンドが表示されます（例: `deltasim test counter.sv --spec counter_spec.yaml`）
+- 書き込みファイルがある場合はその一覧も表示されます
+- **「実行」ボタンを押したときだけ実行されます**（提案だけでは何も実行されません）
+- `safe=False`（シェル記号・再帰等を含む）の提案は実行ボタンが無効になり、理由を表示します
+
+**LLM に渡すコンテキスト（§18.3.2）**: ファイル名・モジュール名・ポート一覧のみ。RTL ファイルの中身は渡しません。YAML 下書きと失敗の解析には中身も渡します。
+
+**実行結果の追記（§18.3.2）**: 実行ごとに「時刻+コマンド」の見出しを付けて追記します。「クリア」ボタンで消去できます。最新 2000 行を保持します。
+
+**セキュリティ**: サーバーはサーバーが発行した提案 ID のみを受け付けます。任意のコマンド文字列を受け取って実行する API は存在しません。
+
+### 7.3 YAML スペック下書き生成（§18.3.2 仕様確定）
+
+「スペック YAML 下書き生成」ボタンで LLM が RTL を解析してスペックを生成します。生成結果はエディタに表示され、検証に通らない場合は警告を表示します。
+
+**保存先（§18.3.2）**: 「💾 保存」ダイアログが開きます。
+- **top が設定されている場合**: 
+- **top が未設定の場合**: 最初の SV ファイルの stem を使った 
+- 保存先はプロジェクトフォルダ
+- 同名ファイルがある場合は上書き確認ダイアログが表示されます
+
+### 7.4 テスト失敗の解析
+
+テスト実行後に FAIL/ERROR ケースの詳細パネルに「🤖 失敗を解析」ボタンが表示されます。RTL・スペック・失敗結果を LLM に送って日本語の解析を返します。**出力は常にテキストとして表示します（HTML として解釈しません）**。
+
+**中断（§18.3.2）**: 「■」ボタンを押すと即座に「中断しました」と表示され、UI が操作可能に戻ります。バックグラウンドの HTTP リクエストは残りますが、返ってきた結果は破棄されます。中断後すぐに新しい要求を送れます。
+
+### 7.5 エラーコード
+
+| コード | 説明 |
+|--------|------|
+| `E_LLM_NOT_CONFIGURED` | simconfig.yaml に llm 設定がない |
+| `E_LLM_CONNECT` | LLM サーバーへの接続失敗・タイムアウト |
+| `E_LLM_UNSAFE_CMD` | LLM が返したコマンドが安全でない（実行ボタン無効） |
+
+### 7.6 LLM HTTP API
+
+```
+GET /api/llm/status
+→ {"configured": true/false, "model": "...", "endpoint": "..."}
+
+POST /api/llm/suggest/start
+{"text": "counter をテストして", "sv_files": [...], "spec": "..."}
+→ {"job_id": "..."}
+
+GET /api/llm/suggest/{job_id}/events  (SSE)
+→ finish: {"suggestion_id": "...", "command_line": "...", "safe": true, "write_paths": [...]}
+→ error:  {"code": "E_LLM_NOT_CONFIGURED", "message": "..."}
+
+POST /api/llm/run/start
+{"suggestion_id": "xxxxxxxx-..."}   ← suggestion_id フィールドのみ。任意コマンド文字列は不可。
+→ {"job_id": "..."}
+
+GET /api/llm/run/{job_id}/events  (SSE)
+→ finish: {"exit_code": 0, "stdout": "...", "stderr": "..."}
+
+POST /api/llm/draft-spec/start
+{"sv_files": [...], "top": "counter"}
+→ {"job_id": "..."}
+
+GET /api/llm/draft-spec/{job_id}/events  (SSE)
+→ finish: {"yaml_text": "...", "valid": true, "errors": [...]}
+
+POST /api/llm/explain/start
+{"result": {...}, "sv_files": [...], "spec": "..."}
+→ {"job_id": "..."}
+
+GET /api/llm/explain/{job_id}/events  (SSE)
+→ finish: {"explanation": "テスト失敗の原因は..."}
+```
+
+---
+
+## 8. .f ファイルリスト（§18.2）
+
+ファイルブラウザで `.f` ファイルを選択すると `load_filelist` を使って解析し、解決した SV ファイルをプロジェクトに追加します。`W_FILELIST_OPT`（未対応オプション）などの警告とエラーは、`code`・`message`・`file:line` 付きでバナーに表示されます。
+
+**HTTP API**:
+```
+POST /api/filelist/load
+{"path": "/path/to/files.f"}
+→ {
+    "files": ["counter.sv", ...],
+    "warnings": [{"code": "W_FILELIST_OPT", "message": "...", "file": "...", "line": 3}],
+    "errors": [...]
+  }
+```
+
+---
+
+## 9. `deltasim.log` の生成について（§18.5.1）
+
+PR #25 以降、CLI の `test`/`run`/`gen`/`parse` コマンドは実行時に作業フォルダへ `deltasim.log` を書き出します（既定）。
+
+GUI の LLM 機能でコマンド提案を実行する場合（`/api/llm/run/start`）:
+
+- **作業フォルダ**: プロジェクトの SV ファイルが置かれているフォルダ（`project_dir`）
+- **コマンド引数**: 変更なし（表示コマンドと実際の実行が一致する）
+- **`deltasim.log` の保存先**: プロジェクトフォルダ（CLI を直接使った場合と同じ）
+
+`/api/llm/run/start` のリクエスト:
+```json
+{
+  "suggestion_id": "xxxxxxxx-...",
+  "project_dir": "/path/to/project"
+}
+```
+
+`project_dir` が指定されない場合は実行プロセスの現在ディレクトリで実行されます。
