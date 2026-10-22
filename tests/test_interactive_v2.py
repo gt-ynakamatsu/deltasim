@@ -176,6 +176,46 @@ class TestLineBreakpoint:
         bp_line = stmts[0][0]  # 最初の文の行番号
         assert bp_line > 0, f"source_line not set: {stmts}"
 
+    def test_bp_snap_to_next_line(self, tmp_path):
+        """文のない行に bp を設定すると次の文のある行に寄せて警告が出ること"""
+        sv_p = str(tmp_path / "test_bp.sv")
+        Path(sv_p).write_text(SV_WITH_LOC, encoding="utf-8")
+        import deltasim.api as ds
+        from deltasim.interp.session import SimSession
+        sim = ds.Simulator([sv_p], top="test_bp", reset_cycles=2)
+        session = SimSession(sim)
+
+        # 行 2 はコメント行で文がない → 次の文のある行（4か5など）に寄せる
+        session.eval_script(f"bp {{{sv_p}:2}}")
+        out = session._output_lines
+        # Warning が出ていること
+        assert any("Warning" in l for l in out), \
+            f"スナップ警告が出なかった: {out}"
+        # bp が登録されていること（行番号は 2 ではない）
+        assert session._breakpoints, "bp が登録されなかった"
+        bp = session._breakpoints[-1]
+        assert bp.kwargs["line"] != 2, f"スナップされなかった: line={bp.kwargs['line']}"
+
+    def test_bp_error_no_statement_after(self, tmp_path):
+        """文のない行でそれより後ろに文もない場合、エラーで登録しないこと"""
+        sv_p = str(tmp_path / "test_bp.sv")
+        Path(sv_p).write_text(SV_WITH_LOC, encoding="utf-8")
+        import deltasim.api as ds
+        from deltasim.interp.session import SimSession
+        sim = ds.Simulator([sv_p], top="test_bp", reset_cycles=2)
+        session = SimSession(sim)
+
+        # 行 9999 は存在しない（ファイル末尾より後ろ）
+        prev_len = len(session._breakpoints)
+        session.eval_script(f"bp {{{sv_p}:9999}}")
+        out = session._output_lines
+        # Error が出ていること
+        assert any("Error" in l for l in out), \
+            f"エラーメッセージが出なかった: {out}"
+        # bp が登録されていないこと
+        assert len(session._breakpoints) == prev_len, \
+            f"bp が登録されてしまった: {session._breakpoints}"
+
     def test_ast_nodes_have_source_line(self, tmp_path):
         """AST ノードに source_line が設定されること"""
         sv_p = str(tmp_path / "test_bp.sv")
@@ -412,17 +452,35 @@ class TestRunInteractiveE2E:
 class TestSetForceWarning:
     """set <信号名> <値> が一度だけ警告を出すこと"""
 
-    def test_set_signal_shows_one_warning(self):
-        """set count 42 が force で実行され、一度だけ警告が出ること"""
+    def test_set_tcl_var_not_signal(self):
+        """§18.1.1: set は Tcl 変数に代入し、信号には触らないこと"""
         session, sim = _make_counter_session()
         session.eval_script("run 30ns")
-        # 'count' は信号名なので force 相当になり、警告が出る
+        count_before = sim.get("count")
+
+        # 'count' は信号名と同じだが、set は Tcl 変数に代入するだけ
+        session.eval_script("set count 42")
+
+        # 信号値が変わっていないこと
+        count_after = sim.get("count")
+        assert count_after == count_before, \
+            f"信号 count が変わってしまった: {count_before} → {count_after}"
+
+        # $count で Tcl 変数として取り出せること
+        assert session._tcl.get_var("count") == "42", \
+            f"Tcl 変数 count が設定されていない: {session._tcl.get_var('count')!r}"
+
+    def test_set_signal_name_warns_once(self):
+        """§18.1.1: 信号名と同じ変数名を set したとき警告が1回だけ出ること"""
+        session, sim = _make_counter_session()
+        session.eval_script("run 30ns")
+
         session.eval_script("set count 42")
         warns1 = [l for l in session._output_lines if "Warning" in l]
-        assert len(warns1) >= 1, f"1回目の警告が出なかった: {session._output_lines}"
-        # 2回目は警告なし（_set_signal_warned フラグ確認）
-        assert session._set_signal_warned is True, "_set_signal_warned が False のまま"
-        prev_warn_len = len(warns1)
-        session.eval_script("set count 43")  # 2回目
+        assert len(warns1) == 1, f"警告が1回出なかった: {warns1}"
+        assert "force" in warns1[0].lower(), f"force を案内していない: {warns1[0]!r}"
+
+        # 2回目は警告なし
+        session.eval_script("set count 99")
         warns2 = [l for l in session._output_lines if "Warning" in l]
         assert len(warns2) == 0, f"2回目に警告が出た: {warns2}"

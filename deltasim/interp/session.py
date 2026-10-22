@@ -446,22 +446,27 @@ class SimSession:
         m = re.match(r"^(.+):([0-9]+)$", args[0])
         if m:
             fname, lineno = m.group(1), int(m.group(2))
-            # Snap to nearest line with a statement
             actual_line = self._snap_to_statement_line(fname, lineno)
+            if actual_line is None:
+                # 後ろに文が一つもない → エラー、登録しない
+                self._out(
+                    f"# Error: {fname}:{lineno} より後ろに文がありません。"
+                    f"ブレークポイントを登録しませんでした。"
+                )
+                return ""
             if actual_line != lineno:
-                self._out(f"# Warning: {fname}:{lineno} には文がありません。"
-                          f"{fname}:{actual_line} に設定しました。")
+                self._out(
+                    f"# Warning: {fname}:{lineno} には文がありません。"
+                    f"{fname}:{actual_line} に設定しました。"
+                )
             bp = Breakpoint("line", file=fname, line=actual_line)
             self._breakpoints.append(bp)
             self._out(f"# bp [{bp.id}] {fname}:{actual_line}")
             return str(bp.id)
         raise TclError(f"bp: 不明な引数 {args!r}")
 
-    def _snap_to_statement_line(self, fname: str, line: int) -> int:
-        """設計の AST から、file:line 近くにある文の行番号を返す。"""
-        from deltasim.parser.ast_nodes import (
-            BlockingAssign, NonBlockingAssign, IfStmt, CaseStmt, ForStmt, WhileStmt
-        )
+    def _collect_stmt_lines(self, fname: str) -> list:
+        """設計の AST から、指定ファイルに含まれる文の行番号リストを返す。"""
         stmt_lines: list[int] = []
 
         def _collect(node):
@@ -469,9 +474,9 @@ class SimSession:
                 return
             sl = getattr(node, "source_line", 0)
             sf = getattr(node, "source_file", "")
-            if sl and (not fname or sf.endswith(fname) or fname in sf):
+            if sl and (not fname or sf.endswith(fname) or fname in sf
+                       or (fname and fname in sf.replace("\\", "/"))):
                 stmt_lines.append(sl)
-            # recurse
             for attr in ("stmts", "then_body", "else_body", "body", "init", "update"):
                 child = getattr(node, attr, None)
                 if child is not None:
@@ -489,13 +494,29 @@ class SimSession:
                      list(getattr(self._sim._design, "assign_procs", []))):
             _collect(getattr(proc, "body", None))
 
+        return sorted(set(stmt_lines))
+
+    def _snap_to_statement_line(self, fname: str, line: int) -> Optional[int]:
+        """指定行に文がなければ後ろの最近傍行に寄せる。
+
+        Returns:
+            行番号 (int): 実際のブレークポイント行（正確な行か、寄せた行）
+            None: 後ろに文が1つもない → 登録不可（エラー）
+        """
+        stmt_lines = self._collect_stmt_lines(fname)
         if not stmt_lines:
-            return line
-        # Find the nearest line >= requested
-        above = [l for l in stmt_lines if l >= line]
-        if above:
-            return min(above)
-        return max(stmt_lines)
+            return None  # ファイルに文がない → エラー
+
+        if line in stmt_lines:
+            return line  # 完全一致 → そのまま
+
+        # 指定行より後ろ（>= line）に文があれば最も近い行に寄せる
+        after = [l for l in stmt_lines if l >= line]
+        if after:
+            return min(after)
+
+        # 指定行より後ろに文が1つもない → エラー（登録しない）
+        return None
 
     def _list_bps(self) -> str:
         if not self._breakpoints and not self._whens:
@@ -528,16 +549,23 @@ class SimSession:
         return self._cmd_examine([args[0]])
 
     def _cmd_set_compat(self, args: List[str]) -> str:
+        """§18.1.1: set は常に Tcl 変数に代入する。
+        信号名と一致しても信号には触らない（force を使うこと）。
+        初回のみ警告を出す。
+        """
         if len(args) >= 2:
             try:
                 if args[0] in self._sim.list_signals_dict():
                     if not self._set_signal_warned:
-                        self._out("# Warning: 'set <信号> <値>' は force の別名です。"
-                                  "'force <信号> <値>' を使ってください。")
+                        self._out(
+                            f"# Warning: 信号に値を入れるには "
+                            f"'force {args[0]} {args[1]}' を使ってください。"
+                            f" 'set' は Tcl 変数への代入です（信号は変わりません）。"
+                        )
                         self._set_signal_warned = True
-                    return self._cmd_force(args)
             except Exception:
                 pass
+        # 常に Tcl 変数に代入（信号には触らない）
         return self._tcl._cmd_set(args)
 
     def _cmd_release_compat(self, args: List[str]) -> str:
