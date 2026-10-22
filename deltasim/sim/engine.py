@@ -131,6 +131,11 @@ def eval_expr(
     Signed signals are sign-extended when read (M4 signed arithmetic).
     """
     if isinstance(expr, NumberLiteral):
+        # §18.7: x/z リテラルを FourState として返す
+        if expr.xz_mask:
+            from deltasim.fourstate import FourState as _FS
+            w = expr.width if expr.width is not None else 32
+            return (_FS(expr.value, expr.xz_mask, w), expr.width)
         return (expr.value, expr.width)
 
     if isinstance(expr, FillLiteral):
@@ -153,6 +158,16 @@ def eval_expr(
         w = widths.get(name, 1)
         if val is None:
             return (None, w)
+        from deltasim.result import Z_VALUE
+        if val is Z_VALUE:
+            return (Z_VALUE, w)
+        # §18.7: FourState 信号値をそのまま返す
+        try:
+            from deltasim.fourstate import FourState as _FS
+            if isinstance(val, _FS):
+                return (val, w)
+        except ImportError:
+            pass
         # M4: sign-extend signed signals
         if ctx and ctx.signs.get(name, False) and w > 0 and val >= (1 << (w - 1)):
             val = val - (1 << w)
@@ -170,8 +185,25 @@ def eval_expr(
 
     if isinstance(expr, Conditional):
         cond_v, _ = eval_expr(expr.cond, signals, widths, params, ctx)
-        if cond_v is None:
-            return (None, None)
+        if _has_xz(cond_v):
+            # §18.7 ?: x 条件: per-bit merge（一致ビットは値、不一致は x）
+            then_v, then_w = eval_expr(expr.then_expr, signals, widths, params, ctx)
+            else_v, else_w = eval_expr(expr.else_expr, signals, widths, params, ctx)
+            w = max(_eff_width(then_w), _eff_width(else_w))
+            from deltasim.fourstate import FourState, coerce
+            from deltasim.fourstate import _mask as _fsmask
+            then_fs = coerce(then_v, w)
+            else_fs = coerce(else_v, w)
+            mask = _fsmask(w)
+            # ビットが一致し、かつ両方 0/1 なら確定。それ以外は x
+            pure_mask = ~(then_fs.bval | else_fs.bval) & mask
+            agree_mask = pure_mask & ~(then_fs.aval ^ else_fs.aval)
+            new_aval = then_fs.aval & agree_mask
+            new_bval = ~agree_mask & mask
+            result_fs = FourState(new_aval, new_bval, w)
+            if result_fs.bval == 0:
+                return (result_fs.aval, w)
+            return (result_fs, w)
         if cond_v:
             return eval_expr(expr.then_expr, signals, widths, params, ctx)
         else:
@@ -184,17 +216,53 @@ def eval_expr(
             return _eval_array_element(expr, signals, widths, params, ctx)
         base_v, _ = eval_expr(expr.base, signals, widths, params, ctx)
         idx_v, _ = eval_expr(expr.index, signals, widths, params, ctx)
-        if base_v is None or idx_v is None:
+        if idx_v is None:
             return (None, 1)
+        if base_v is None:
+            return (None, 1)    # all-x base → 1-bit x
+        # §18.7: FourState base → extract specific bit
+        try:
+            from deltasim.fourstate import FourState as _FS
+            from deltasim.result import Z_VALUE as _ZV
+            if base_v is _ZV:
+                return (None, 1)   # z → x for bit-select
+            if isinstance(base_v, _FS):
+                aval_bit = (base_v.aval >> idx_v) & 1
+                bval_bit = (base_v.bval >> idx_v) & 1
+                if bval_bit:
+                    return (None, 1)   # x or z bit → x
+                return (aval_bit, 1)
+        except ImportError:
+            pass
         return ((base_v >> idx_v) & 1, 1)
 
     if isinstance(expr, PartSelect):
         base_v, _ = eval_expr(expr.base, signals, widths, params, ctx)
         hi_v, _ = eval_expr(expr.hi, signals, widths, params, ctx)
         lo_v, _ = eval_expr(expr.lo, signals, widths, params, ctx)
-        if base_v is None or hi_v is None or lo_v is None:
+        if hi_v is None or lo_v is None:
             return (None, 1)
         w = hi_v - lo_v + 1
+        if base_v is None:
+            # all-x base: return w-bit all-x
+            return (None, w)
+        # §18.7: FourState base → extract per-bit slice
+        try:
+            from deltasim.fourstate import FourState as _FS
+            from deltasim.result import Z_VALUE as _ZV
+            if base_v is _ZV:
+                # all-z base: return w-bit z
+                from deltasim.fourstate import from_z
+                return (from_z(w), w)
+            if isinstance(base_v, _FS):
+                aval = (base_v.aval >> lo_v) & ((1 << w) - 1)
+                bval = (base_v.bval >> lo_v) & ((1 << w) - 1)
+                result_fs = _FS(aval, bval, w)
+                if result_fs.bval == 0:
+                    return (result_fs.aval, w)
+                return (result_fs, w)
+        except ImportError:
+            pass
         mask = (1 << w) - 1
         return ((base_v >> lo_v) & mask, w)
 
@@ -229,32 +297,181 @@ def _to_x(v):
     return None if isinstance(v, Z_VALUE.__class__) else v
 
 
+# ---------------------------------------------------------------------------
+# §18.7: 4値演算ヘルパー
+# ---------------------------------------------------------------------------
+
+def _has_xz(v) -> bool:
+    """True ならオペランドに x/z ビットが含まれる（FourState 演算が必要）。"""
+    if v is None:
+        return True
+    from deltasim.result import Z_VALUE
+    if v is Z_VALUE:
+        return True
+    try:
+        from deltasim.fourstate import FourState as _FS
+        if isinstance(v, _FS):
+            return v.bval != 0
+    except ImportError:
+        pass
+    return False
+
+
+def _to_fs(v, w: int):
+    """int/None/Z_VALUE/FourState を FourState に変換する。"""
+    from deltasim.fourstate import FourState, from_int, from_x, from_z, coerce
+    return coerce(v, w)
+
+
+def _fs_to_val(fs):
+    """FourState を int/None/Z_VALUE に変換する（後方互換レガシー形式）。"""
+    from deltasim.fourstate import to_legacy
+    return to_legacy(fs)
+
+
+def _apply_binop_fs(op: str, lv, rv, lw: int, rw: int):
+    """FourState を使った 4 値バイナリ演算。(value, width) を返す。"""
+    from deltasim.fourstate import FourState, coerce, from_int
+    w = max(lw, rw)
+    lfs = coerce(lv, w)
+    rfs = coerce(rv, w)
+
+    # 比較演算（=== は常に 0/1、== は x/z で None を返す）
+    if op == "===":
+        return (int(lfs.ceq(rfs)), 1)
+    if op == "!==":
+        return (int(not lfs.ceq(rfs)), 1)
+    if op == "==":
+        eq = lfs.eq_4state(rfs)
+        return (None if eq is None else int(eq), 1)
+    if op == "!=":
+        eq = lfs.eq_4state(rfs)
+        return (None if eq is None else int(not eq), 1)
+
+    # ビット演算: IEEE 1800 per-bit ルール（0&x=0, 1|x=1 等）
+    # 結果に x/z ビットが残る場合は FourState のまま返す（幅マスクは _write_signal が行う）
+    if op == "&":
+        res = lfs.bitwise_and(rfs)
+        return (res.aval if res.bval == 0 else res, w)
+    if op == "|":
+        res = lfs.bitwise_or(rfs)
+        return (res.aval if res.bval == 0 else res, w)
+    if op == "^":
+        res = lfs.bitwise_xor(rfs)
+        return (res.aval if res.bval == 0 else res, w)
+    if op in ("^~", "~^"):
+        from deltasim.fourstate import FourState
+        res_xor = lfs.bitwise_xor(rfs)
+        mask = (1 << w) - 1
+        not_aval = (~res_xor.aval) & mask
+        res = FourState(not_aval | res_xor.bval, res_xor.bval, w)
+        return (res.aval if res.bval == 0 else res, w)
+
+    # 算術・シフト・論理比較: x/z があれば全ビット x に伝搬
+    if lfs.bval != 0 or rfs.bval != 0:
+        return (None, w)
+
+    # 純2値（高速パス）
+    lv_int, rv_int = lfs.aval, rfs.aval
+    mask = (1 << w) - 1
+
+    if op == "<":   return (int(lv_int < rv_int), 1)
+    if op == ">":   return (int(lv_int > rv_int), 1)
+    if op == "<=":  return (int(lv_int <= rv_int), 1)
+    if op == ">=":  return (int(lv_int >= rv_int), 1)
+    if op == "&&":  return (int(bool(lv_int) and bool(rv_int)), 1)
+    if op == "||":  return (int(bool(lv_int) or bool(rv_int)), 1)
+    if op == "+":   return ((lv_int + rv_int) & mask, w)
+    if op == "-":   return ((lv_int - rv_int) & mask, w)
+    if op == "*":   return ((lv_int * rv_int) & mask, w)
+    if op == "/":   return ((lv_int // rv_int if rv_int != 0 else 0), w)
+    if op == "%":   return ((lv_int % rv_int if rv_int != 0 else 0), w)
+    if op == "<<":  return ((lv_int << rv_int) & mask, w)
+    if op == ">>":  return (lv_int >> rv_int, w)
+    if op == "<<<": return ((lv_int << rv_int) & mask, w)
+    if op == ">>>": return (lv_int >> rv_int, w)
+    if op == "**":  return ((lv_int ** rv_int) & mask, w)
+    return (None, w)
+
+
+def _case_match(expr_v, pat_v, w: int, kind: str) -> bool:
+    """§18.7: case/casez/casex 比較。
+
+    - case:  === 相当（x/z も一致しないと False）
+    - casez: pattern 側の z/? ビットはワイルドカード
+    - casex: pattern 側の x/z ビットはワイルドカード
+    """
+    from deltasim.fourstate import FourState, coerce
+    ef = coerce(expr_v, w)
+    pf = coerce(pat_v, w)
+    if kind == "case":
+        return ef.ceq(pf)
+    # casez/casex: don't-care mask from pattern
+    from deltasim.fourstate import _mask as _fm
+    if kind == "casez":
+        dont_care = pf.bval & ~pf.aval  # z bits in pattern (aval=0, bval=1)
+    else:  # casex
+        dont_care = pf.bval             # both x and z bits in pattern
+    compare_mask = _fm(w) & ~dont_care
+    # Expression bits must be pure 0/1 at compared positions
+    if ef.bval & compare_mask:
+        return False  # expression has x/z where we must compare
+    return (ef.aval & compare_mask) == (pf.aval & compare_mask)
+
+
+def _apply_unaryop_fs(op: str, v, w: int):
+    """FourState を使った 4 値単項演算。(value, width) を返す。"""
+    from deltasim.fourstate import FourState, coerce
+    fs = coerce(v, w)
+    mask = (1 << w) - 1
+
+    if fs.bval != 0:
+        # x/z ビットあり
+        if op == "~":
+            res = fs.bitwise_not()
+            return (res.aval if res.bval == 0 else res, w)
+        return (None, w)  # 論理/算術演算は x に
+
+    v_int = fs.aval
+    if op == "!":    return (int(not v_int), 1)
+    if op == "~":    return (~v_int & mask, w)
+    if op == "-":    return (-v_int & mask, w)
+    if op == "+":    return (v_int, w)
+    if op == "&":    return (int(v_int & mask == mask), 1)
+    if op == "~&":   return (int(v_int & mask != mask), 1)
+    if op == "|":    return (int(v_int != 0), 1)
+    if op == "~|":   return (int(v_int == 0), 1)
+    if op == "^":
+        p = 0
+        t = v_int & mask
+        while t:
+            p ^= t & 1
+            t >>= 1
+        return (p, 1)
+    if op in ("^~", "~^"):
+        p = 0
+        t = v_int & mask
+        while t:
+            p ^= t & 1
+            t >>= 1
+        return (p ^ 1, 1)
+    return (None, w)
+
+
 def _eval_binop(expr, signals, widths, params, ctx=None) -> Tuple[Optional[int], Optional[int]]:
     lv_raw, lw = eval_expr(expr.left, signals, widths, params, ctx)
     rv_raw, rw = eval_expr(expr.right, signals, widths, params, ctx)
-    # §12.4: Z treated as X for arithmetic
-    lv = _to_x(lv_raw)
-    rv = _to_x(rv_raw)
     op = expr.op
     w = max(_eff_width(lw), _eff_width(rw))
     mask = (1 << w) - 1
 
-    # X/Z propagation with special cases per IEEE 4-state logic
-    if lv is None or rv is None:
-        # 0 & X = 0,  X | 1 = 1
-        if op == "&":
-            if lv == 0 or rv == 0:
-                return (0, w)
-        elif op == "|":
-            if (lv is not None and lv & mask == mask) or (rv is not None and rv & mask == mask):
-                return (mask, w)
-        elif op == "&&":
-            if (lv is not None and not lv) or (rv is not None and not rv):
-                return (0, 1)
-        elif op == "||":
-            if (lv is not None and lv) or (rv is not None and rv):
-                return (1, 1)
-        return (None, w)
+    # §18.7: どちらかに x/z があれば FourState パスへ（per-bit 精度）
+    if _has_xz(lv_raw) or _has_xz(rv_raw):
+        return _apply_binop_fs(op, lv_raw, rv_raw, _eff_width(lw), _eff_width(rw))
+
+    # 純2値高速パス（既存ロジックを維持）
+    lv = _to_x(lv_raw)
+    rv = _to_x(rv_raw)
 
     if op == "==":   return (int(lv == rv), 1)
     if op == "!=":   return (int(lv != rv), 1)
@@ -291,9 +508,13 @@ def _eval_binop(expr, signals, widths, params, ctx=None) -> Tuple[Optional[int],
 def _eval_unaryop(expr, signals, widths, params, ctx=None) -> Tuple[Optional[int], Optional[int]]:
     v, w = eval_expr(expr.operand, signals, widths, params, ctx)
     op = expr.op
-    if v is None:
-        return (None, w)
     ew = _eff_width(w)
+
+    # §18.7: x/z があれば FourState パスへ
+    if _has_xz(v):
+        return _apply_unaryop_fs(op, v, ew)
+
+    # 純2値高速パス
     mask = (1 << ew) - 1
 
     if op == "!":    return (int(not v), 1)
@@ -324,14 +545,33 @@ def _eval_unaryop(expr, signals, widths, params, ctx=None) -> Tuple[Optional[int
 def _eval_concat(expr, signals, widths, params, ctx=None) -> Tuple[Optional[int], int]:
     result = 0
     total_w = 0
+    has_xz = False
+    parts_vals = []
     for part in expr.parts:
         v, w = eval_expr(part, signals, widths, params, ctx)
         pw = _eff_width(w)
-        if v is None:
-            return (None, total_w + pw)
-        result = (result << pw) | (v & ((1 << pw) - 1))
+        parts_vals.append((v, pw))
+        if _has_xz(v):
+            has_xz = True
         total_w += pw
-    return (result, total_w)
+
+    if not has_xz:
+        for v, pw in parts_vals:
+            result = (result << pw) | (v & ((1 << pw) - 1))
+        return (result, total_w)
+
+    # §18.7: x/z ビットを含む concat → FourState で組み立て
+    from deltasim.fourstate import FourState, coerce
+    aval = 0
+    bval = 0
+    for v, pw in parts_vals:
+        fs = coerce(v, pw)
+        aval = (aval << pw) | fs.aval
+        bval = (bval << pw) | fs.bval
+    result_fs = FourState(aval, bval, total_w)
+    if result_fs.bval == 0:
+        return (result_fs.aval, total_w)
+    return (result_fs, total_w)
 
 
 def _eval_sysfunc(expr, signals, widths, params, ctx=None) -> Tuple[int, Optional[int]]:
@@ -389,6 +629,51 @@ def _eval_array_element(
 # $display / $write format string handling
 # ---------------------------------------------------------------------------
 
+def _fmt_val_display(val, spec: str) -> str:
+    """§18.7: $display の 1 引数を spec に従ってフォーマット（x/z 対応）。"""
+    from deltasim.result import Z_VALUE
+    from deltasim.fourstate import FourState as _FS
+
+    # x/z 判定
+    is_x = val is None
+    is_z = val is Z_VALUE
+    is_fs = isinstance(val, _FS)
+
+    if spec in ('d', 'D'):
+        if is_x or is_z:
+            return "x"
+        if is_fs:
+            return val.to_display_str("d")
+        return str(val)
+    if spec in ('h', 'H', 'x', 'X'):
+        if is_x:
+            return "x"
+        if is_z:
+            return "z"
+        if is_fs:
+            return val.to_display_str("h").lower()
+        return hex(val)[2:]
+    if spec in ('b', 'B'):
+        if is_x:
+            return "x"
+        if is_z:
+            return "z"
+        if is_fs:
+            return val.to_display_str("b")
+        return bin(val)[2:]
+    if spec in ('o', 'O'):
+        if is_x or is_z:
+            return "x"
+        if is_fs:
+            return oct(val.aval)[2:] if val.bval == 0 else "x"
+        return oct(val)[2:]
+    if spec == 's':
+        return str(val) if not (is_x or is_z) else "x"
+    if spec == 't':
+        return str(val)
+    return str(val)
+
+
 def _format_display(fmt: str, args: List[int]) -> str:
     """Very small subset of SV format specifiers."""
     arg_idx = 0
@@ -400,33 +685,16 @@ def _format_display(fmt: str, args: List[int]) -> str:
             spec = fmt[i + 1]
             val = args[arg_idx] if arg_idx < len(args) else 0
             arg_idx += 1
-            if spec in ('d', 'D'):
-                out.append(str(val))
-            elif spec in ('h', 'H', 'x', 'X'):
-                out.append(hex(val))
-            elif spec in ('b', 'B'):
-                out.append(bin(val))
-            elif spec in ('o', 'O'):
-                out.append(oct(val))
-            elif spec == '0':
+            if spec == '0':
                 # %0d / %0h etc.
                 if i + 2 < len(fmt):
                     spec2 = fmt[i + 2]
-                    if spec2 in ('d', 'D'):
-                        out.append(str(val))
-                    elif spec2 in ('h', 'H', 'x', 'X'):
-                        out.append(hex(val)[2:])
-                    else:
-                        out.append(str(val))
+                    out.append(_fmt_val_display(val, spec2))
                     i += 3
                     continue
                 out.append(str(val))
-            elif spec == 's':
-                out.append(str(val))
-            elif spec == 't':
-                out.append(str(val))
             else:
-                out.append(f'%{spec}')
+                out.append(_fmt_val_display(val, spec))
             i += 2
         elif c == '\\':
             if i + 1 < len(fmt):
@@ -503,15 +771,18 @@ class _Executor:
                 self.execute(stmt.else_body)
 
         elif isinstance(stmt, CaseStmt):
-            expr_v = eval_val(stmt.expr, self.signals, self.widths, self.params, self.ctx)
+            expr_raw, expr_w = eval_expr(stmt.expr, self.signals, self.widths, self.params, self.ctx)
             matched = False
             default_body = None
+            kind = getattr(stmt, "keyword", "case")  # "case"|"casez"|"casex"
             for item in stmt.items:
                 if item.exprs is None:
                     default_body = item.body
                 else:
                     for e in item.exprs:
-                        if eval_val(e, self.signals, self.widths, self.params, self.ctx) == expr_v:
+                        pat_raw, pat_w = eval_expr(e, self.signals, self.widths, self.params, self.ctx)
+                        w = max(_eff_width(expr_w), _eff_width(pat_w))
+                        if _case_match(expr_raw, pat_raw, w, kind):
                             self.execute(item.body)
                             matched = True
                             break
@@ -523,11 +794,7 @@ class _Executor:
         elif isinstance(stmt, BlockingAssign):
             v, w = eval_expr(stmt.rhs, self.signals, self.widths, self.params, self.ctx)
             lhs_name = _lhs_name(stmt.lhs)
-            if v is None:
-                self.signals[lhs_name] = None
-            else:
-                sig_w = self.widths.get(lhs_name, _eff_width(w))
-                self.signals[lhs_name] = v & ((1 << sig_w) - 1)
+            _write_signal(self.signals, lhs_name, v, self.widths)
 
         elif isinstance(stmt, NonBlockingAssign):
             v, _ = eval_expr(stmt.rhs, self.signals, self.widths, self.params, self.ctx)
@@ -673,6 +940,64 @@ def _lhs_name(lhs) -> str:
     raise SimError(f"Unsupported LHS expression type: {type(lhs).__name__}")
 
 
+def _collect_lhs_from_stmt(stmt, out: set) -> None:
+    """stmt ツリーを再帰的に走査して LHS 信号名を out に追加する。"""
+    from deltasim.parser.ast_nodes import (
+        Block, IfStmt, CaseStmt, BlockingAssign, NonBlockingAssign,
+        ForStmt, WhileStmt, RepeatStmt, ForeverStmt,
+    )
+    if isinstance(stmt, (BlockingAssign, NonBlockingAssign)):
+        try:
+            out.add(_lhs_name(stmt.lhs))
+        except (SimError, Exception):
+            pass
+    elif isinstance(stmt, Block):
+        for s in stmt.stmts:
+            _collect_lhs_from_stmt(s, out)
+    elif isinstance(stmt, IfStmt):
+        _collect_lhs_from_stmt(stmt.then_body, out)
+        if stmt.else_body is not None:
+            _collect_lhs_from_stmt(stmt.else_body, out)
+    elif isinstance(stmt, CaseStmt):
+        for item in stmt.items:
+            if item.body is not None:
+                _collect_lhs_from_stmt(item.body, out)
+    elif isinstance(stmt, (ForStmt, WhileStmt, RepeatStmt, ForeverStmt)):
+        body = getattr(stmt, "body", None)
+        if body is not None:
+            _collect_lhs_from_stmt(body, out)
+
+
+def _collect_driven_signals(design):
+    """プロセス別に書き込まれる信号名を収集する。
+
+    返り値: (seq_driven, any_driven)
+      - seq_driven: always_ff など seq_proc が書き込む信号名の集合 → x で初期化
+      - any_driven: いずれかのプロセスが書き込む信号名の集合 → 駆動あり信号
+    """
+    seq_driven: set = set()
+    any_driven: set = set()
+
+    for proc in design.assign_procs:
+        try:
+            name = _lhs_name(proc.lhs)
+            any_driven.add(name)
+        except Exception:
+            pass
+
+    for proc in design.comb_procs:
+        _collect_lhs_from_stmt(proc.body, any_driven)
+
+    for proc in design.seq_procs:
+        _collect_lhs_from_stmt(proc.body, seq_driven)
+        any_driven.update(seq_driven)
+
+    for blk in getattr(design, "initial_blocks", []):
+        _collect_lhs_from_stmt(blk, any_driven)
+
+    return seq_driven, any_driven
+
+
 # ---------------------------------------------------------------------------
 # Initial-block coroutine executor
 # ---------------------------------------------------------------------------
@@ -786,19 +1111,25 @@ def _exec_initial_gen(stmt, engine: "SimEngine"):
             yield from _exec_initial_gen(stmt.else_body, engine)
 
     elif isinstance(stmt, CaseStmt):
-        expr_v = eval_val(stmt.expr, engine.signals, engine._widths, engine._params)
+        expr_raw, expr_w = eval_expr(stmt.expr, engine.signals, engine._widths, engine._params)
         matched = False
+        default_body = None
+        _kind = getattr(stmt, "keyword", "case")
         for item in stmt.items:
             if item.exprs is None:
-                yield from _exec_initial_gen(item.body, engine)
-                break
-            for e in item.exprs:
-                if eval_val(e, engine.signals, engine._widths, engine._params) == expr_v:
-                    yield from _exec_initial_gen(item.body, engine)
-                    matched = True
-                    break
+                default_body = item.body
+            else:
+                for e in item.exprs:
+                    pat_raw, pat_w = eval_expr(e, engine.signals, engine._widths, engine._params)
+                    w2 = max(_eff_width(expr_w), _eff_width(pat_w))
+                    if _case_match(expr_raw, pat_raw, w2, _kind):
+                        yield from _exec_initial_gen(item.body, engine)
+                        matched = True
+                        break
             if matched:
                 break
+        if not matched and default_body is not None:
+            yield from _exec_initial_gen(default_body, engine)
 
     elif isinstance(stmt, SysTaskStmt):
         name = stmt.name
@@ -1056,8 +1387,27 @@ class SimEngine:
         }
         self._params = design.params
 
-        self.signals: Dict[str, int] = {name: 0 for name in design.signals}
-        self._prev: Dict[str, int] = dict(self.signals)
+        # §18.7: 初期値ポリシー（IEEE 1800 準拠）
+        # - input  ポート              → 0    (テストベンチが駆動; §18.6 constraints との整合)
+        # - output/inout ポート        → x    (未リセット FF 出力は x)
+        # - 内部信号 (direction=None)  → x    (未初期化 logic/reg は x)
+        # - 上記のうち assign/always_comb だけで駆動される信号
+        #                              → x のまま初期化後の _eval_comb_loop() で上書き
+        # - どこからも駆動されない信号  → z    (未駆動 net は z)
+        from deltasim.result import Z_VALUE as _Z_INIT
+        _seq_driven, _any_driven = _collect_driven_signals(design)
+        self.signals: Dict[str, object] = {}
+        for _name, _info in design.signals.items():
+            if _info.direction == "input":
+                self.signals[_name] = 0              # テストベンチ駆動 → 0
+            elif _name in _seq_driven:
+                self.signals[_name] = None           # always_ff 駆動 → x（未リセット FF）
+            elif _name in _any_driven:
+                self.signals[_name] = 0              # assign/always_comb 駆動 → 0
+                                                     # (_eval_comb_loop() で即時上書き)
+            else:
+                self.signals[_name] = _Z_INIT        # 未駆動 net → z
+        self._prev: Dict[str, object] = dict(self.signals)
 
         self.vcd_writer = None
 
@@ -1090,6 +1440,13 @@ class SimEngine:
         self._monitor_last_values: Optional[tuple] = None   # last emitted arg values
         # §18.5: $dumpfile path (set by $dumpfile sys task)
         self._dumpfile_path: Optional[str] = None
+
+        # §18.7: 初期コンビナショナル評価（assign/always_comb の初期値を解決）
+        # DeltaLimitError はコンビナショナルループを示す—run() 時に改めて検出される
+        try:
+            self._eval_comb_loop()
+        except DeltaLimitError:
+            pass
 
     # ------------------------------------------------------------------
     # EvalContext builder  (M4)
@@ -1506,21 +1863,43 @@ def _write_signal(
 ) -> bool:
     """Write *raw_val* to *signals[name]* with width masking. Returns True if changed."""
     from deltasim.result import Z_VALUE
+    old = signals.get(name, 0)
+
     if raw_val is None:
-        old = signals.get(name, 0)
         if old is not None:
             signals[name] = None
             return True
         return False
-    if isinstance(raw_val, type(Z_VALUE)):   # Z_VALUE sentinel
-        old = signals.get(name)
-        if not isinstance(old, type(Z_VALUE)):
+    if raw_val is Z_VALUE:
+        if old is not Z_VALUE:
             signals[name] = Z_VALUE
             return True
         return False
+
+    # §18.7: FourState 値の書き込み
+    try:
+        from deltasim.fourstate import FourState as _FS
+        if isinstance(raw_val, _FS):
+            w = widths.get(name, 1)
+            new_fs = _FS(raw_val.aval & ((1 << w) - 1),
+                         raw_val.bval & ((1 << w) - 1), w)
+            if new_fs.bval == 0:
+                # 純2値に落とす
+                new_int = new_fs.aval
+                if old != new_int:
+                    signals[name] = new_int
+                    return True
+                return False
+            if old != new_fs:
+                signals[name] = new_fs
+                return True
+            return False
+    except ImportError:
+        pass
+
     w = widths.get(name, 1)
     new_val = raw_val & ((1 << w) - 1)
-    if signals.get(name, 0) != new_val:
+    if old != new_val:
         signals[name] = new_val
         return True
     return False

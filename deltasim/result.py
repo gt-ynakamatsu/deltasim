@@ -54,9 +54,10 @@ def _is_xz(v) -> bool:
 def val_to_4state(val: Optional[int], width: int) -> str:
     """Convert a simulation value to a 4-state bit string (§12.4 小文字統一).
 
-    * None (X) → "x" / "xxx..."
-    * Z_VALUE  → "z" / "zzz..."
-    * int      → "0" / "1" / "0101..."
+    * None (X)    → "x" / "xxx..."
+    * Z_VALUE     → "z" / "zzz..."
+    * int         → "0" / "1" / "0101..."
+    * str (§18.7) → SV リテラル文字列をそのまま表示用に変換
     """
     if width <= 0:
         width = 1
@@ -64,6 +65,20 @@ def val_to_4state(val: Optional[int], width: int) -> str:
         return "x" if width == 1 else "x" * width
     if isinstance(val, _ZValue):
         return "z" if width == 1 else "z" * width
+    if isinstance(val, str):
+        # §18.7: SV リテラル文字列（"4'b1x0z" 等）を 4値ビット文字列に変換
+        try:
+            from deltasim.fourstate import parse_literal as _pl
+            return _pl(val).to_4state_str()
+        except Exception:
+            return val
+    # FourState オブジェクト対応
+    try:
+        from deltasim.fourstate import FourState as _FS
+        if isinstance(val, _FS):
+            return val.to_4state_str()
+    except ImportError:
+        pass
     if width == 1:
         return str(val & 1)
     return bin(val & ((1 << width) - 1))[2:].zfill(width)

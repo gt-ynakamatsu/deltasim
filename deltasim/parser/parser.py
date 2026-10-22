@@ -1081,8 +1081,14 @@ def _parse_number_token(s: str) -> NumberLiteral:
         digits = rest[1:]
         base_map = {"b": 2, "o": 8, "d": 10, "h": 16}
         base = base_map.get(base_char, 10)
-        # X/Z digits → treat as 0 for binary/X, ignored for now (4-val future work)
-        digits_clean = digits.replace("x", "0").replace("z", "0").replace("X", "0").replace("Z", "0")
+        # §18.7: x/z/? digits → parse as FourState if present
+        has_xz = any(d.lower() in ("x", "z") or d == "?" for d in digits)
+        if has_xz and base in (2, 8, 16):
+            from deltasim.fourstate import _parse_xz_digits, _mask
+            eff_width = width if width is not None else 32
+            aval, bval = _parse_xz_digits(digits, base, eff_width)
+            return NumberLiteral(value=aval, width=width, signed=signed, xz_mask=bval)
+        digits_clean = digits.replace("x", "0").replace("z", "0").replace("X", "0").replace("Z", "0").replace("?", "0")
         if not digits_clean:
             digits_clean = "0"
         value = int(digits_clean, base)

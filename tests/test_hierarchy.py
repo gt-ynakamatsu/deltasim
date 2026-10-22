@@ -330,8 +330,10 @@ endmodule
         design = elaborate(mod)
         eng = SimEngine(design, reset_cycles=0)
         eng.set_input("a", 0)
-        # 0 | X = X (any bit is unknown)
-        assert eng.get_output("b") is None  # X
+        # 0 | X = X (any bit is unknown) — §18.7: FourState または None
+        b = eng.get_output("b")
+        from deltasim.sim.engine import _has_xz
+        assert _has_xz(b), f"expected x but got {b!r}"
 
     def test_x_in_vcd(self, tmp_path):
         """X 値が VCD に x として出力されること"""

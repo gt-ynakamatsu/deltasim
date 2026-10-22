@@ -182,6 +182,16 @@ def _int_to_id(n: int) -> str:
 def _format_value(vcd_id: str, val, width: int) -> str:
     """Format a signal value as VCD text (§12.4: 0/1/x/z 小文字統一)."""
     from deltasim.result import Z_VALUE, _ZValue
+    # §18.7: FourState サポート
+    try:
+        from deltasim.fourstate import FourState as _FS
+        if isinstance(val, _FS):
+            bits = val.to_4state_str().lower()  # e.g. "1x0z"
+            if width == 1:
+                return f"{bits[-1]}{vcd_id}\n"
+            return f"b{bits} {vcd_id}\n"
+    except ImportError:
+        pass
     if val is None:
         if width == 1:
             return f"x{vcd_id}\n"

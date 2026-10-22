@@ -72,7 +72,12 @@ class TestExprParser:
         assert eval_expr("3'd7")    == 7
 
     def test_x_literal_returns_none(self):
-        assert self._e("x") is None
+        # §18.7.1: bare x は識別子。基数つき形式が4値リテラル。
+        from deltasim.interp.expr import ExprError
+        with pytest.raises(ExprError):
+            self._e("x")
+        # 基数つき形式は正しく x を返す
+        assert self._e("'bx") is None
 
     def test_sv_x_literal(self):
         from deltasim.interp.expr import eval_expr
@@ -92,9 +97,9 @@ class TestExprParser:
         assert self._e("count + 1", {"count": 9}) == 10
 
     def test_x_propagation(self):
-        """x が含まれると結果は None (x)"""
-        assert self._e("x + 5") is None
-        assert self._e("5 + x") is None
+        """x が含まれると結果は None (x)（基数つきリテラルで確認）"""
+        assert self._e("'bx + 5") is None
+        assert self._e("5 + 'bx") is None
 
     def test_strict_equal(self):
         """=== / !== は x/z を含む厳密比較"""
@@ -437,30 +442,20 @@ class TestE2ECli:
     """CLI 経由で stdin からスクリプトを流す E2E テスト"""
 
     def _run_cli_script(self, sv_path: str, script: str):
-        """CLI を通じてスクリプトを実行し (exit_code, stdout, stderr) を返す。"""
-        import subprocess, sys, shutil
-        # deltasim コマンドを探す（PATH から、または pip インストール済み）
-        cmd = shutil.which("deltasim")
-        if cmd is None:
-            # フォールバック: CliRunner を使う（サブプロセス不使用）
-            return self._run_cli_runner(sv_path, script)
+        """CLI を通じてスクリプトを実行し (exit_code, stdout, stderr) を返す。
+
+        PATH に deltasim が入っているかに依存しないよう、常に
+        ``sys.executable -m deltasim`` で起動する。
+        """
+        import subprocess, sys
         proc = subprocess.run(
-            [cmd, "sim", sv_path],
+            [sys.executable, "-m", "deltasim", "sim", sv_path],
             input=script,
             capture_output=True,
             text=True,
             timeout=15,
         )
         return proc.returncode, proc.stdout, proc.stderr
-
-    def _run_cli_runner(self, sv_path: str, script: str):
-        """CliRunner 経由（deltasim コマンドが PATH にない場合のフォールバック）。"""
-        from click.testing import CliRunner
-        from deltasim.cli import main as cli_main
-        import io
-        runner = CliRunner(mix_stderr=False)
-        result = runner.invoke(cli_main, ["sim", sv_path], input=script)
-        return result.exit_code, result.output, result.stderr if hasattr(result, "stderr") else ""
 
     def test_run_and_examine(self):
         """run + examine が stdout に出力されること"""
@@ -505,22 +500,15 @@ class TestE2ECli:
 
     def test_run_i_flag(self):
         """`deltasim run -i` も同じように動作すること"""
-        import subprocess, shutil
+        import subprocess, sys
         script = "run 20ns\nexamine count\nquit\n"
-        cmd = shutil.which("deltasim")
-        if cmd is None:
-            from click.testing import CliRunner
-            from deltasim.cli import main as cli_main
-            runner = CliRunner(mix_stderr=False)
-            result = runner.invoke(cli_main, ["run", "-i", COUNTER_SV], input=script)
-            assert result.exit_code == 0, f"exit_code={result.exit_code}\n{result.output}"
-            assert "count" in result.output
-            return
         proc = subprocess.run(
-            [cmd, "run", "-i", COUNTER_SV],
+            [sys.executable, "-m", "deltasim", "run", "-i", COUNTER_SV],
             input=script, capture_output=True, text=True, timeout=15,
         )
-        assert proc.returncode == 0
+        assert proc.returncode == 0, (
+            f"exit_code={proc.returncode}\nstdout={proc.stdout}\nstderr={proc.stderr}"
+        )
         assert "count" in proc.stdout
 
     def test_when_in_script(self):

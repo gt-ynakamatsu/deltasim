@@ -283,8 +283,10 @@ endmodule
         design = elaborate(mod)
         eng = SimEngine(design, reset_cycles=0)
         eng.set_input("a", 1)
-        # a & X = X
-        assert eng.get_output("b") is None
+        # a & X = X (§18.7: FourState(1'bx) または None が返る)
+        b = eng.get_output("b")
+        from deltasim.sim.engine import _has_xz
+        assert _has_xz(b), f"expected x but got {b!r}"
 
     def test_zero_and_x_is_zero(self, tmp_path):
         """0 & X = 0 (IEEE 4 値特例)"""

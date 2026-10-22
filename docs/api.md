@@ -1084,3 +1084,72 @@ max_constraint_attempts: 10000  # 既定値、省略可
 **関連エラーコード**:
 - `E_CONSTRAINT` — 制約を満たす値が見つからなかった
 - `E_CONSTRAINT_EXPR` — 制約式の構文エラーまたは未知の信号名
+
+---
+
+## §18.7 4値論理
+
+### 内部表現
+
+`FourState(aval, bval, width)` の2マスク形式（IEEE 1800 Annex A 準拠）:
+
+| aval bit | bval bit | 意味 |
+|---------|---------|------|
+| 0 | 0 | 0 |
+| 1 | 0 | 1 |
+| 0 | 1 | z |
+| 1 | 1 | x |
+
+### YAML での使用
+
+`expected/check` に 4値リテラル文字列を書けます:
+
+```yaml
+cases:
+  - name: tristate
+    expected:
+      - at: 3
+        check:
+          y: "1'bz"     # z と一致するか (=== 相当)
+          q: "4'b1x??"  # ? はワイルドカード (==? 相当)
+          data: "8'hxx"  # 全ビット x
+```
+
+- 文字列 expected: `===` 相当の比較（`?` を含む場合は `==?` 相当）
+- 整数 expected: 純2値比較。actual に x/z があれば FAIL
+
+`stimulus/set` にも x/z を書けます:
+
+```yaml
+stimulus:
+  - at: 3
+    set:
+      d: "1'bx"   # 入力を x に設定
+```
+
+### `deltasim test --json` の出力
+
+`checks[].expected` / `checks[].actual` は 4値文字列（例: `"1x0z"`）として出力されます。既存の数値フィールド形式は変わりません。
+
+### 初期値（§18.7 ポリシー）
+
+deltasim の信号初期値は信号の種類とドライバによって決まります:
+
+| 信号の種類 | 初期値 | 備考 |
+|---|---|---|
+| `input` ポート | **0** | テストベンチが駆動。§18.6 constraints の前提値 |
+| `output`/`inout`（always_ff 駆動） | **x** | 未リセット FF 出力は x。リセット後は定義済み |
+| `output`/`inout`（assign/always_comb 駆動） | **0 → 即評価** | 組み合わせ論理は init 後の comb loop で上書き |
+| 内部 logic/reg（direction=None, always_ff 駆動） | **x** | 未初期化 FF/reg |
+| 内部 logic（assign/always_comb 駆動） | **0 → 即評価** | 同上 |
+| 未駆動 net | **z** | どこからも書き込まれない信号 |
+
+**§18.6 constraints との整合**: input ポートの初期値 0 は維持しています。制約式（`a + b < 16` 等）は input ポートの値を参照しますが、その初期値は 0 なので、リセット前でも制約式は定義済み値で評価されます。
+
+**リセット付き回路は影響なし**: FF 出力が x で始まっても、リセット後（always_ff の if/reset 分岐で 0 に設定）は 0 になります。`examples/counter.sv` 等の典型例は引き続き PASS します。
+
+### 信号名 x/z の衝突（Fix §18.7.6）
+
+`x` / `z` という名前の信号ポートが制約式・RTL 両方で使えます:
+- 環境（signals dict）に存在する場合は識別子として扱う
+- 存在しない場合は4値リテラルとして扱う

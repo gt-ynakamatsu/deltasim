@@ -347,6 +347,8 @@ class NumberLiteral:
     value: int
     width: Optional[int]   # None = unsized (treated as 32-bit in context)
     signed: bool = False
+    # §18.7: x/z マスク (bval). 0 = 純2値, !=0 = x/z を含む
+    xz_mask: int = 0
 
 
 @dataclass
