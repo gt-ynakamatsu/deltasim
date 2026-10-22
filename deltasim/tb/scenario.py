@@ -35,11 +35,43 @@ from __future__ import annotations
 
 import fnmatch
 import os
+import re
 import random as _random_mod
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Union
 
 import yaml
+
+# ---------------------------------------------------------------------------
+# §18.7.1: YAML set/check 文字列バリデーション
+# ---------------------------------------------------------------------------
+
+# 有効な SV リテラル形式: sized ('4'b1x0z'), unsized ('bx), fill ('x)
+_SV_LITERAL_RE = re.compile(
+    r"^[0-9]*'[sS]?[bBoOdDhH][0-9a-fA-FxXzZ?_]+$"
+    r"|^'[01xXzZ]$",
+)
+
+
+def _coerce_yaml_sv_value(v, path: str):
+    """YAML の set/check 値を検証して int または有効な SV リテラル文字列を返す。
+
+    §18.7.1: 文字列の場合は基数つき形式（例: "4'b1x0z"、"'bx"）のみ許可。
+    裸の "x"/"z" 等は ScenarioError。
+    """
+    if isinstance(v, bool):
+        return int(v)
+    if isinstance(v, int):
+        return v
+    if isinstance(v, str):
+        sv = v.strip()
+        if _SV_LITERAL_RE.match(sv):
+            return sv
+        raise ScenarioError(
+            f"{path} の値 {v!r} は不正です。"
+            "整数または基数つきリテラル（\"4'b1x0z\"、\"'bx\"、\"'z\" 等）を使ってください。"
+        )
+    return int(v)
 
 
 # ---------------------------------------------------------------------------
@@ -373,9 +405,9 @@ def _parse_inputs(raw: list, warnings_out=None, parent_path: str = "stimulus") -
         offset = _parse_offset_ns(entry, i, "stimulus", warnings_out)
         inp = InputEntry(at=at, offset_ns=offset)
         if "set" in entry:
-            # §18.7: set 値に x/z/4値リテラル文字列も許可
+            # §18.7.1: 基数つきリテラル文字列のみ許可。裸の "x"/"z" は ScenarioError。
             inp.set_values = {
-                k: (v if isinstance(v, str) else int(v))
+                k: _coerce_yaml_sv_value(v, f"stimulus/set.{k}")
                 for k, v in entry["set"].items()
             }
         elif "random" in entry:
@@ -408,9 +440,9 @@ def _parse_expected(raw: list, warnings_out=None, parent_path: str = "expect") -
         offset = _parse_offset_ns(entry, i, "expect", warnings_out)
         exp = ExpectedEntry(at=at, offset_ns=offset)
         if "check" in entry:
-            # §18.7: expected/check に x/z/? パターン (str) も許可
+            # §18.7.1: 基数つきリテラル文字列のみ許可。裸の "x"/"z" は ScenarioError。
             exp.check = {
-                k: (v if isinstance(v, str) else int(v))
+                k: _coerce_yaml_sv_value(v, f"expected/check.{k}")
                 for k, v in entry["check"].items()
             }
         elif "expr" in entry:

@@ -183,28 +183,55 @@ def from_z(width: int) -> FourState:
 def parse_literal(s: str) -> FourState:
     """SV 数値リテラル文字列をパースして FourState を返す。
 
-    例: "4'b1x0z", "8'hxx", "4'bxxxx", "2'b1x", "1'bz"
+    §18.7.1: 基数つき形式のみ4値として扱う。
+    - sized:        "4'b1x0z"、"8'hxx"、"4'bxxxx"
+    - unsized base: "'bx"、"'hz"、"'b1010"
+    - fill:         "'x"、"'z"、"'0"、"'1"
+
+    bare 文字列 ("x"、"z" など) はエラー。
     """
     s = s.strip().replace("_", "")
+
+    # Fill: 'x 'z '0 '1
+    m_fill = re.fullmatch(r"'([01xXzZ])", s)
+    if m_fill:
+        ch = m_fill.group(1).lower()
+        if ch == "x":
+            return from_x(1)
+        if ch == "z":
+            return from_z(1)
+        return from_int(int(ch), 1)
+
+    # Sized or unsized base: [N]'[s]B digits
     m = re.fullmatch(
-        r"(\d+)'([sS]?)([bBoOdDhH])([0-9a-fA-FxXzZ?]+)", s
+        r"([0-9]*)'([sS]?)([bBoOdDhH])([0-9a-fA-FxXzZ?]+)", s
     )
-    if not m:
-        # Plain integer (no base)
+    if m:
+        width_str = m.group(1)
+        width = int(width_str) if width_str else None
+        base_ch = m.group(3).lower()
+        digits = m.group(4)
+        base = {"b": 2, "o": 8, "d": 10, "h": 16}[base_ch]
+
+        if base == 10:
+            if width is None:
+                return from_int(int(digits), 32)
+            return from_int(int(digits) & _mask(width), width)
+
+        # infer width from digit count if not specified
+        bits_per_digit = {2: 1, 8: 3, 16: 4}[base]
+        eff_width = width if width is not None else len(digits) * bits_per_digit
+        aval, bval = _parse_xz_digits(digits, base, eff_width)
+        return FourState(aval, bval, eff_width)
+
+    # Plain integer (no base prefix, no tick)
+    try:
         return from_int(int(s), 32)
-
-    width = int(m.group(1))
-    # signed = bool(m.group(2))
-    base_ch = m.group(3).lower()
-    digits = m.group(4)
-    base = {"b": 2, "o": 8, "d": 10, "h": 16}[base_ch]
-
-    if base == 10:
-        # Decimal: no x/z allowed
-        return from_int(int(digits) & _mask(width), width)
-
-    aval, bval = _parse_xz_digits(digits, base, width)
-    return FourState(aval, bval, width)
+    except ValueError:
+        raise ValueError(
+            f"SV リテラルとして不正な文字列: {s!r}。"
+            "基数つきリテラル（\"4'b1x0z\"、\"'bx\"、\"'z\" 等）を使ってください。"
+        )
 
 
 def coerce(v, width: int) -> FourState:

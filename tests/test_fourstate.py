@@ -161,11 +161,11 @@ class TestFourStateOps:
 # ---------------------------------------------------------------------------
 
 class TestExprXZIdentifier:
-    """x/z という名前の信号を使えること（Fix §18.6.6）"""
+    """§18.7.1: bare x/z は常に識別子。4値リテラルは基数つき形式のみ。"""
 
     def test_x_as_signal_name_not_literal(self):
         from deltasim.interp.expr import eval_expr
-        # env に 'x' があれば識別子として使う（4値リテラルでない）
+        # env に 'x' があれば識別子として使う
         result = eval_expr("x + 1", {"x": 5})
         assert result == 6, f"x=5 なのに {result}"
 
@@ -174,10 +174,43 @@ class TestExprXZIdentifier:
         result = eval_expr("z > 0", {"z": 3})
         assert result == 1
 
-    def test_x_without_env_is_literal(self):
+    def test_bare_x_without_env_is_error(self):
+        """§18.7.1: bare x（env なし）は ExprError"""
+        from deltasim.interp.expr import eval_expr, ExprError
+        with pytest.raises(ExprError, match="未定義のシンボル"):
+            eval_expr("x", {})
+
+    def test_bare_z_without_env_is_error(self):
+        """§18.7.1: bare z（env なし）は ExprError"""
+        from deltasim.interp.expr import eval_expr, ExprError
+        with pytest.raises(ExprError, match="未定義のシンボル"):
+            eval_expr("z", {})
+
+    def test_tick_bx_is_literal(self):
+        """'bx はリテラル x"""
         from deltasim.interp.expr import eval_expr
-        result = eval_expr("x", {})
-        assert result is None  # 4値リテラル x
+        result = eval_expr("'bx", {})
+        assert result is None  # x
+
+    def test_tick_fill_x_is_literal(self):
+        """'x はリテラル x"""
+        from deltasim.interp.expr import eval_expr
+        result = eval_expr("'x", {})
+        assert result is None  # x
+
+    def test_tick_fill_z_is_literal(self):
+        """'z はリテラル z"""
+        from deltasim.interp.expr import eval_expr
+        from deltasim.result import Z_VALUE
+        result = eval_expr("'z", {})
+        assert result is Z_VALUE  # z
+
+    def test_unsized_hz_is_z_literal(self):
+        """'hz はリテラル z"""
+        from deltasim.interp.expr import eval_expr
+        from deltasim.result import Z_VALUE
+        result = eval_expr("'hz", {})
+        assert result is Z_VALUE  # z
 
     def test_sv_signal_name_works(self):
         from deltasim.interp.expr import eval_expr
@@ -360,3 +393,172 @@ endmodule
         codes = [e.code for e in result.errors] + [e.code for cr in result.cases for e in cr.errors]
         assert "E_CONSTRAINT" not in codes
         assert "E_CONSTRAINT_EXPR" not in codes
+
+
+# ---------------------------------------------------------------------------
+# 6. §18.7.1 追加仕様: 基数つきのみ4値リテラル
+# ---------------------------------------------------------------------------
+
+class TestFourStateLiteralSpec:
+    """§18.7.1: 基数つき形式のみが4値リテラル。bare x/z は識別子。"""
+
+    # --- parse_literal: 新形式サポート ---
+
+    def test_parse_literal_fill_x(self):
+        """'x → FourState(bval=全1)"""
+        fs = parse_literal("'x")
+        assert fs.bval != 0
+
+    def test_parse_literal_fill_z(self):
+        """'z → FourState(aval=0, bval=全1)"""
+        fs = parse_literal("'z")
+        assert fs.bval != 0 and fs.aval == 0
+
+    def test_parse_literal_unsized_bx(self):
+        """'bx → FourState x"""
+        fs = parse_literal("'bx")
+        assert fs.bval != 0
+
+    def test_parse_literal_unsized_hz(self):
+        """'hz → FourState z"""
+        fs = parse_literal("'hz")
+        assert fs.bval != 0 and fs.aval == 0
+
+    def test_parse_literal_unsized_b1x0(self):
+        """'b1x0 → 3bit FourState with x at bit1"""
+        fs = parse_literal("'b1x0")
+        assert fs.width == 3
+        assert fs.bval != 0
+
+    def test_parse_literal_bare_x_raises(self):
+        """bare "x" は ValueError"""
+        with pytest.raises((ValueError, Exception)):
+            parse_literal("x")
+
+    def test_parse_literal_bare_z_raises(self):
+        """bare "z" は ValueError"""
+        with pytest.raises((ValueError, Exception)):
+            parse_literal("z")
+
+    # --- expr: 基数つきリテラルが評価される ---
+
+    def test_expr_tick_x_in_operation(self):
+        """'x を式の中で使える（1 & 'bx == x）"""
+        from deltasim.interp.expr import eval_expr
+        result = eval_expr("1 & 'bx", {})
+        assert result is None  # 1 & x = x
+
+    def test_expr_tick_z_in_ternary(self):
+        """'z を式の中で使える"""
+        from deltasim.interp.expr import eval_expr
+        from deltasim.result import Z_VALUE
+        result = eval_expr("0 ? 1 : 'z", {})
+        assert result is Z_VALUE
+
+    def test_expr_fill_zero(self):
+        """'0 はリテラル 0"""
+        from deltasim.interp.expr import eval_expr
+        result = eval_expr("'0", {})
+        assert result == 0
+
+    def test_expr_fill_one(self):
+        """'1 はリテラル 1"""
+        from deltasim.interp.expr import eval_expr
+        result = eval_expr("'1", {})
+        assert result == 1
+
+    # --- YAML: 裸の文字列は ScenarioError ---
+
+    def test_yaml_bare_x_in_check_raises(self, tmp_path):
+        """expected/check に "x" を書くと ScenarioError"""
+        from deltasim.tb.scenario import load_scenario, ScenarioError
+        spec = {
+            "version": 1, "top": "mod",
+            "clock": {"signal": "clk", "period_ns": 10},
+            "reset": {"signal": "rst", "active_low": False, "duration_cycles": 1},
+            "sim": {"cycles": 3},
+            "cases": [{"name": "t",
+                       "expected": [{"at": 1, "check": {"out": "x"}}]}],
+        }
+        yaml_p = str(tmp_path / "spec.yaml")
+        with open(yaml_p, "w", encoding="utf-8") as f:
+            yaml.dump(spec, f, allow_unicode=True)
+        with pytest.raises(ScenarioError, match="不正"):
+            load_scenario(yaml_p)
+
+    def test_yaml_bare_z_in_set_raises(self, tmp_path):
+        """stimulus/set に "z" を書くと ScenarioError"""
+        from deltasim.tb.scenario import load_scenario, ScenarioError
+        spec = {
+            "version": 1, "top": "mod",
+            "clock": {"signal": "clk", "period_ns": 10},
+            "reset": {"signal": "rst", "active_low": False, "duration_cycles": 1},
+            "sim": {"cycles": 3},
+            "cases": [{"name": "t",
+                       "stimulus": [{"at": 1, "set": {"inp": "z"}}]}],
+        }
+        yaml_p = str(tmp_path / "spec.yaml")
+        with open(yaml_p, "w", encoding="utf-8") as f:
+            yaml.dump(spec, f, allow_unicode=True)
+        with pytest.raises(ScenarioError, match="不正"):
+            load_scenario(yaml_p)
+
+    def test_yaml_valid_4state_str_accepted(self, tmp_path):
+        """expected/check に "4'b1x0z" を書くと ScenarioError にならない"""
+        from deltasim.tb.scenario import load_scenario, ScenarioError
+        spec = {
+            "version": 1, "top": "mod",
+            "clock": {"signal": "clk", "period_ns": 10},
+            "reset": {"signal": "rst", "active_low": False, "duration_cycles": 1},
+            "sim": {"cycles": 3},
+            "cases": [{"name": "t",
+                       "expected": [{"at": 1, "check": {"out": "4'b1x0z"}}]}],
+        }
+        yaml_p = str(tmp_path / "spec.yaml")
+        with open(yaml_p, "w", encoding="utf-8") as f:
+            yaml.dump(spec, f, allow_unicode=True)
+        sc = load_scenario(yaml_p)
+        assert sc.cases[0].expected[0].check["out"] == "4'b1x0z"
+
+    def test_yaml_fill_z_str_accepted(self, tmp_path):
+        """stimulus/set に "'z" を書くと ScenarioError にならない"""
+        from deltasim.tb.scenario import load_scenario, ScenarioError
+        spec = {
+            "version": 1, "top": "mod",
+            "clock": {"signal": "clk", "period_ns": 10},
+            "reset": {"signal": "rst", "active_low": False, "duration_cycles": 1},
+            "sim": {"cycles": 3},
+            "cases": [{"name": "t",
+                       "stimulus": [{"at": 1, "set": {"inp": "'z"}}]}],
+        }
+        yaml_p = str(tmp_path / "spec.yaml")
+        with open(yaml_p, "w", encoding="utf-8") as f:
+            yaml.dump(spec, f, allow_unicode=True)
+        sc = load_scenario(yaml_p)
+        assert sc.cases[0].inputs[0].set_values["inp"] == "'z"
+
+    # --- constraints: bare x は識別子として E_UNKNOWN_PORT ---
+
+    def test_constraint_bare_x_triggers_unknown_port(self, tmp_path):
+        """constraints に bare x を書くと E_UNKNOWN_PORT（x はポートでない）"""
+        sv_p = str(tmp_path / "mod.sv")
+        Path(sv_p).write_text(
+            "module mod(input logic [7:0] a, output logic [7:0] y);\n"
+            "  assign y = a;\nendmodule\n", encoding="utf-8"
+        )
+        spec = {
+            "version": 1, "top": "mod",
+            "clock": {"signal": "clk", "period_ns": 10},
+            "reset": {"signal": "rst", "active_low": False, "duration_cycles": 1},
+            "sim": {"cycles": 3, "seed": 1},
+            "constraints": ["x + a < 200"],
+            "cases": [{"name": "t",
+                       "stimulus": [{"at": [1, 2], "random": {"a": {"range": [0, 10]}}}],
+                       "expected": [{"at": 2, "check": {"y": 5}}]}],
+        }
+        yaml_p = str(tmp_path / "spec.yaml")
+        with open(yaml_p, "w", encoding="utf-8") as f:
+            yaml.dump(spec, f, allow_unicode=True)
+        result = ds.test([sv_p], spec=yaml_p)
+        codes = [e.code for e in result.errors] + [e.code for cr in result.cases for e in cr.errors]
+        assert "E_UNKNOWN_PORT" in codes, f"bare x in constraint should be E_UNKNOWN_PORT: {codes}"

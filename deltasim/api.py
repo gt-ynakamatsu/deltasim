@@ -512,8 +512,8 @@ def _run_one_case(
         for cstr in eff_constraints:
             try:
                 from deltasim.interp.expr import _tokenize as _tok
-                idents = [t[1] for t in _tok(cstr) if t[0] == "ID"
-                          and t[1] not in ("x", "X", "z", "Z")]
+                # §18.7.1: bare x/z は常に識別子なので除外しない
+                idents = [t[1] for t in _tok(cstr) if t[0] == "ID"]
             except Exception:
                 idents = _re.findall(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', cstr)
             for ident in idents:
@@ -629,15 +629,11 @@ def _run_one_case(
     def apply_stimulus(vals: dict):
         changed = []
         for s, v in vals.items():
-            # §18.7: 文字列 set 値を FourState に変換
+            # §18.7.1: 文字列 set 値（YAML 検証済み基数つきリテラル）を変換
             if isinstance(v, str):
                 from deltasim.fourstate import parse_literal as _pl, to_legacy as _tl
-                w = design.signals[s].width if s in design.signals else 1
-                try:
-                    fs = _pl(v)
-                    v = _tl(fs)  # FourState → int/None/Z_VALUE（後方互換）
-                except Exception:
-                    v = 0
+                fs = _pl(v)   # parse 失敗は ScenarioError で弾かれるはずなので伝播
+                v = _tl(fs)   # FourState → int/None/Z_VALUE（後方互換）
             old = engine.signals.get(s, 0)
             engine._write(s, v)
             new = engine.signals.get(s, 0)
@@ -1442,6 +1438,12 @@ def _compare_signal_value(actual, expected_val, width: int) -> bool:
     pattern = None
     if isinstance(expected_val, str):
         pattern = parse_expected_value(expected_val)
+        if pattern is None:
+            # §18.7.1: YAML バリデーション済みのはずだが念のため
+            raise ValueError(
+                f"期待値 {expected_val!r} は不正な SV リテラルです。"
+                "基数つきリテラル（\"4'b1x0z\"、\"'bx\" 等）を使ってください。"
+            )
 
     if pattern is not None:
         # 4値パターン比較

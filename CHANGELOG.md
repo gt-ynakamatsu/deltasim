@@ -10,17 +10,25 @@
 ### 追加（§18.7 4値論理）
 
 - `FourState(aval, bval, width)` 型で 0/1/x/z をビット単位で保持
-- `4'b1x0z`、`2'b1x`、`4'bzzzz`、`8'hxx` 等のリテラルパース
 - IEEE 1800 準拠の演算: `&`（0&x=0, 1&x=x）、`|`（1|x=1, 0|x=x）、`^`、`~`
 - `===`/`!==`（厳密4値比較）、`==?`/`!=?`（ワイルドカード比較）
-- YAML `expected/check` に 4値文字列 `"4'b1x??"` を書ける（`?` はワイルドカード）
-- YAML `stimulus/set` に x/z を書ける（`"1'bz"` 等）
 - VCD の x/z 出力対応
-- **Fix §18.7.6**: `x`/`z` という名前の信号が識別子として使えるよう修正（制約式・RTL 両方）
+
+#### §18.7.1 リテラル形式の確定仕様
+
+- **4値リテラルとして扱うのは基数つき形式のみ**:
+  - sized: `4'b1x0z`、`8'hxx`
+  - unsized base: `'bx`、`'hz`
+  - fill: `'x`、`'z`、`'0`、`'1`
+- **bare `x`/`z`（基数なし）は常に識別子**: 式パーサ・制約式・RTL すべてで
+- YAML `expected/check` に 4値文字列 `"4'b1x??"` を書ける（`?` はワイルドカード）。裸の `"x"` 等は `ScenarioError`
+- YAML `stimulus/set` に基数つきリテラルを書ける（`"'bx"`、`"1'bz"` 等）。裸の `"z"` 等は `ScenarioError`
+- constraints 中の bare `x`/`z` はポート名として扱われ、ポートでなければ `E_UNKNOWN_PORT`
 
 ### 互換性変更
 - `logic`/`reg` の初期値は現在も `0`（将来的に `x` に変更予定）
 - YAML の整数 expected に対して、actual が x/z なら FAIL
+- **破壊的変更**: YAML で `check: {sig: "x"}` や `set: {inp: "z"}` は `ScenarioError`（以前は黙って整数 0 扱い）
 
 ### 追加（§18.6 constraints: 制約付き乱数生成）
 

@@ -72,7 +72,12 @@ class TestExprParser:
         assert eval_expr("3'd7")    == 7
 
     def test_x_literal_returns_none(self):
-        assert self._e("x") is None
+        # §18.7.1: bare x は識別子。基数つき形式が4値リテラル。
+        from deltasim.interp.expr import ExprError
+        with pytest.raises(ExprError):
+            self._e("x")
+        # 基数つき形式は正しく x を返す
+        assert self._e("'bx") is None
 
     def test_sv_x_literal(self):
         from deltasim.interp.expr import eval_expr
@@ -92,9 +97,9 @@ class TestExprParser:
         assert self._e("count + 1", {"count": 9}) == 10
 
     def test_x_propagation(self):
-        """x が含まれると結果は None (x)"""
-        assert self._e("x + 5") is None
-        assert self._e("5 + x") is None
+        """x が含まれると結果は None (x)（基数つきリテラルで確認）"""
+        assert self._e("'bx + 5") is None
+        assert self._e("5 + 'bx") is None
 
     def test_strict_equal(self):
         """=== / !== は x/z を含む厳密比較"""

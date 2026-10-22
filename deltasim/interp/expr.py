@@ -27,7 +27,12 @@ class ExprError(Exception):
 
 _TOK_PATTERNS = [
     ("WS",      r"[ \t\r\n]+"),
-    ("SV_NUM",  r"[0-9]+'[sS]?[bBoOdDhH][0-9a-fA-FxXzZwW_?]+"),
+    # §18.7.1: 基数つきリテラルのみ4値として扱う。
+    # 優先順位: sized → unsized base → fill。bare x/z は常に識別子 (ID)。
+    # sized:        4'b1010  8'hFF  4'b1x0z
+    # unsized base: 'b1010  'bx  'hz
+    # fill:         'x  'z  '0  '1
+    ("SV_NUM",  r"[0-9]*'[sS]?[bBoOdDhH][0-9a-fA-FxXzZwW_?]+|'[01xXzZ]"),
     ("HEX",     r"0[xX][0-9a-fA-F]+"),        # C-style 0xFF hex literal
     ("DEC",     r"[0-9]+(?:_[0-9]+)*"),
     ("ID",      r"[a-zA-Z_][a-zA-Z0-9_$]*"),
@@ -58,22 +63,45 @@ def _tokenize(src: str):
 # ---------------------------------------------------------------------------
 
 def _parse_sv_number(tok: str):
-    """4'b1010 や 8'hFF などの SV 数値リテラルを (value, width) に変換。
-    x/z を含む場合は value=None を返す。"""
+    """SV 数値リテラル (sized/unsized base/fill) を (value, width) に変換。
+
+    §18.7.1: 基数つき形式のみ4値として扱う。
+    - x ビットを含む → value=None (x)
+    - z のみ（x なし）→ value=Z_VALUE (z)
+    - 純2値 → value=int
+    """
+    # Fill: '0 '1 'x 'z
+    m_fill = re.fullmatch(r"'([01xXzZ])", tok)
+    if m_fill:
+        ch = m_fill.group(1).lower()
+        if ch == "x":
+            return (None, 1)
+        if ch == "z":
+            return (_z(), 1)
+        return (int(ch), 1)
+
+    # Sized (4'b...) または unsized ('b...)
     m = re.fullmatch(
-        r"([0-9]+)'([sS]?)([bBoOdDhH])([0-9a-fA-FxXzZwW_?]+)", tok)
+        r"([0-9]*)'([sS]?)([bBoOdDhH])([0-9a-fA-FxXzZwW_?]+)", tok)
     if not m:
         return (int(tok), None)
-    width = int(m.group(1))
+    width_str = m.group(1)
+    width = int(width_str) if width_str else None
     signed = bool(m.group(2))
     base_ch = m.group(3).lower()
     digits = m.group(4).replace("_", "").replace("?", "z")
     base = {"b": 2, "o": 8, "d": 10, "h": 16}[base_ch]
-    if any(c in digits.lower() for c in "xzw"):
-        return (None, width)
-    val = int(digits, base) & ((1 << width) - 1)
-    if signed and (val >> (width - 1)):
-        val -= (1 << width)
+    has_x = any(c in digits.lower() for c in "xw")
+    has_z = any(c == "z" for c in digits.lower())
+    if has_x:
+        return (None, width)   # x ビットあり → x
+    if has_z:
+        return (_z(), width)   # 純 z → z
+    val = int(digits, base)
+    if width is not None:
+        val = val & ((1 << width) - 1)
+        if signed and (val >> (width - 1)):
+            val -= (1 << width)
     return (val, width)
 
 
@@ -190,21 +218,13 @@ class _Parser:
             return int(val)
         if kind == "ID":
             self._consume()
-            # §18.7 Fix: 'x'/'X'/'z'/'Z' are 4-state literals ONLY if not in env
-            # (SV semantics: bare 'x' is an identifier when it names a signal)
+            # §18.7.1: bare x/z は常に識別子。4値リテラルは基数つき形式のみ。
             if val in self._env:
                 return self._env[val]
-            if val in ("x", "X"):
-                return None
-            if val in ("z", "Z"):
-                return _z()
             if val == "1":
                 return 1
             if val == "0":
                 return 0
-            # 環境（信号値）から参照
-            if val in self._env:
-                return self._env[val]
             raise ExprError(f"未定義のシンボル: {val!r}")
         if val == "(":
             self._consume()
