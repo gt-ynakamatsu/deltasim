@@ -1404,7 +1404,8 @@ async def llm_suggest_cancel(job_id: str):
 
 
 class LLMRunRequest(BaseModel):
-    suggestion_id: str  # サーバーが発行した提案 ID のみ受け付ける
+    suggestion_id: str           # サーバーが発行した提案 ID のみ受け付ける
+    project_dir: Optional[str] = None  # §18.5.1: SV ファイルのあるプロジェクトフォルダ（cwd に使用）
 
 
 @app.post("/api/llm/run/start")
@@ -1413,6 +1414,10 @@ async def llm_run_start(req: LLMRunRequest):
 
     セキュリティ: suggestion_id はサーバーが UUID で発行したもののみ有効。
     任意のコマンド文字列を受け取って実行する API は存在しない。
+
+    §18.5.1: project_dir を cwd に設定して実行する。
+    deltasim.log はプロジェクトフォルダに書かれ、CLI を直接使った場合と同じ動作になる。
+    コマンドに余分な引数は追加しない（表示コマンドと実行が一致する）。
     """
     from deltasim.gui.llm_session import get_suggestion
     from deltasim.gui.jobs import create_job, run_llm_run_job
@@ -1424,7 +1429,7 @@ async def llm_run_start(req: LLMRunRequest):
         raise HTTPException(status_code=400, detail=f"安全でないコマンドです（E_LLM_UNSAFE_CMD）: {sug.reason}")
 
     job = create_job()
-    job.task = asyncio.create_task(run_llm_run_job(job, req.suggestion_id))
+    job.task = asyncio.create_task(run_llm_run_job(job, req.suggestion_id, project_dir=req.project_dir))
     return {"job_id": job.job_id}
 
 

@@ -737,3 +737,142 @@ class TestLLM1830Spec:
 
         assert cancel_res.status_code == 200
         assert elapsed < 2.0, f"キャンセルが {elapsed:.1f}s かかった"
+
+
+# ============================================================================
+# §18.5.1: --log 方針 — 自動付加なし・cwd をプロジェクトフォルダに設定
+# ============================================================================
+
+class TestLogPolicy185:
+    """§18.5.1: run_suggestion の subprocess 実行方針テスト"""
+
+    @pytest.fixture
+    def client(self):
+        with TestClient(app, base_url="http://127.0.0.1") as c:
+            yield c
+
+    def test_no_extra_args_added_to_argv(self, client, mock_llm_config):
+        """§18.5.1: コマンドに余分な引数（--log 等）が追加されないこと"""
+        from deltasim.gui.llm_session import store_suggestion
+        import deltasim.llm as _llm
+        import subprocess
+
+        sug = _llm.Suggestion(
+            raw_output="deltasim --version",
+            command_line="deltasim --version",
+            args=["--version"],
+            safe=True, reason="", write_paths=[],
+        )
+        sid = store_suggestion(sug)
+
+        captured_argv = []
+
+        def _capture(argv, **kwargs):
+            captured_argv.append(list(argv))
+            proc = subprocess.CompletedProcess(argv, 0, "", "")
+            return proc
+
+        import unittest.mock as _mock
+        with _mock.patch("subprocess.run", side_effect=_capture):
+            res = client.post("/api/llm/run/start", json={
+                "suggestion_id": sid,
+                "project_dir": str(Path(__file__).parent),
+            })
+            assert res.status_code == 200
+            job_id = res.json()["job_id"]
+            import json as _json
+            with client.stream("GET", f"/api/llm/run/{job_id}/events") as stream:
+                for line in stream.iter_lines():
+                    if line.startswith("data:"):
+                        ev = _json.loads(line[5:].strip())
+                        if ev.get("event") in ("finish", "error"):
+                            break
+
+        assert len(captured_argv) == 1, "subprocess.run が1回呼ばれること"
+        argv = captured_argv[0]
+        # --log / /dev/null / NUL 等が追加されていないこと
+        argv_str = " ".join(str(a) for a in argv)
+        assert "--log" not in argv_str, f"--log が追加されていないこと: {argv_str}"
+        assert "/dev/null" not in argv_str, f"/dev/null が追加されていないこと: {argv_str}"
+        assert "NUL" not in argv_str.upper() or "deltasim" in argv_str, f"NUL が追加されていないこと: {argv_str}"
+        # --version が含まれること（元のコマンドが保持されていること）
+        assert "--version" in argv_str, f"元の引数が保持されていること: {argv_str}"
+
+    def test_cwd_is_project_dir(self, client, mock_llm_config, tmp_path):
+        """§18.5.1: subprocess が project_dir を cwd に設定して実行すること"""
+        from deltasim.gui.llm_session import store_suggestion
+        import deltasim.llm as _llm
+        import subprocess
+
+        sug = _llm.Suggestion(
+            raw_output="deltasim --version",
+            command_line="deltasim --version",
+            args=["--version"],
+            safe=True, reason="", write_paths=[],
+        )
+        sid = store_suggestion(sug)
+
+        captured_kwargs = []
+
+        def _capture(argv, **kwargs):
+            captured_kwargs.append(kwargs)
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        import unittest.mock as _mock
+        import json as _json
+        with _mock.patch("subprocess.run", side_effect=_capture):
+            res = client.post("/api/llm/run/start", json={
+                "suggestion_id": sid,
+                "project_dir": str(tmp_path),
+            })
+            assert res.status_code == 200
+            job_id = res.json()["job_id"]
+            with client.stream("GET", f"/api/llm/run/{job_id}/events") as stream:
+                for line in stream.iter_lines():
+                    if line.startswith("data:"):
+                        ev = _json.loads(line[5:].strip())
+                        if ev.get("event") in ("finish", "error"):
+                            break
+
+        assert len(captured_kwargs) == 1
+        cwd_used = captured_kwargs[0].get("cwd")
+        assert cwd_used == str(tmp_path), (
+            f"cwd がプロジェクトフォルダであること: {cwd_used!r} vs {str(tmp_path)!r}"
+        )
+
+    def test_project_dir_in_request_body(self, client, mock_llm_config):
+        """§18.5.1: /api/llm/run/start が project_dir フィールドを受け付けること"""
+        from deltasim.gui.llm_session import store_suggestion
+        import deltasim.llm as _llm
+
+        sug = _llm.Suggestion(
+            raw_output="deltasim --version",
+            command_line="deltasim --version",
+            args=["--version"],
+            safe=True, reason="", write_paths=[],
+        )
+        sid = store_suggestion(sug)
+
+        # project_dir あり → 422 にならないこと
+        res = client.post("/api/llm/run/start", json={
+            "suggestion_id": sid,
+            "project_dir": str(Path(__file__).parent),
+        })
+        assert res.status_code == 200, "project_dir フィールドが受け付けられること"
+
+    def test_project_dir_none_still_works(self, client, mock_llm_config):
+        """§18.5.1: project_dir が None/省略でも動作すること"""
+        from deltasim.gui.llm_session import store_suggestion
+        import deltasim.llm as _llm
+
+        sug = _llm.Suggestion(
+            raw_output="deltasim --version",
+            command_line="deltasim --version",
+            args=["--version"],
+            safe=True, reason="", write_paths=[],
+        )
+        sid = store_suggestion(sug)
+
+        # project_dir 省略 → cwd は None（プロセスのデフォルト）
+        res = client.post("/api/llm/run/start", json={"suggestion_id": sid})
+        assert res.status_code == 200, "project_dir 省略でも動作すること"

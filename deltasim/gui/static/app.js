@@ -363,7 +363,7 @@ const api = {
     text, sv_files: svFiles ?? [], spec: spec ?? null, module_info: moduleInfo ?? null,
   }),
   llmSuggestCancel: (jid)          => apiFetch("POST", `/api/llm/suggest/${jid}/cancel`, {}),
-  llmRunStart:  (suggestionId)     => apiFetch("POST", "/api/llm/run/start", { suggestion_id: suggestionId }),
+  llmRunStart:  (suggestionId, projectDir) => apiFetch("POST", "/api/llm/run/start", { suggestion_id: suggestionId, project_dir: projectDir || null }),
   llmDraftStart:(svFiles, top)     => apiFetch("POST", "/api/llm/draft-spec/start", { sv_files: svFiles, top: top ?? null }),
   llmDraftCancel:(jid)             => apiFetch("POST", `/api/llm/draft-spec/${jid}/cancel`, {}),
   llmExplainStart:(result, svFiles, spec) => apiFetch("POST", "/api/llm/explain/start", {
@@ -2696,7 +2696,10 @@ async function llmRunSuggestion() {
 
   const cmd = dom.llmSuggestionCmd?.textContent || "";
   try {
-    const { job_id } = await api.llmRunStart(sid);
+    // §18.5.1: プロジェクトフォルダを cwd に設定（--log 等の引数は変えない）
+    const firstSvPath = state.project.svFiles[0]?.path || "";
+    const projDir = firstSvPath ? firstSvPath.replace(/[\\/][^\\/]+$/, "") : null;
+    const { job_id } = await api.llmRunStart(sid, projDir);
     state.llmCurrentRunJob = job_id;
     const result = await _llmConsumeSSE(`/api/llm/run/${job_id}/events`);
 

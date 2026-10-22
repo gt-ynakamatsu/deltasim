@@ -634,10 +634,15 @@ async def run_llm_suggest_job(
 async def run_llm_run_job(
     job: Job,
     suggestion_id: str,
+    project_dir: Optional[str] = None,
 ) -> None:
     """提案IDを元に deltasim サブコマンドを subprocess で実行するジョブ。
 
     セキュリティ: suggestion_id はサーバーが発行したもので、任意コマンドは受け付けない。
+
+    §18.5.1: 実行時の作業フォルダをプロジェクトフォルダ（SV ファイルのあるフォルダ）に設定する。
+    deltasim.log が CLI を直接使ったときと同じ場所（プロジェクトフォルダ）に書かれる。
+    コマンドには余分な引数を追加しない（表示コマンドと実行が一致する）。
     """
     import subprocess, sys as _sys
     from deltasim.gui.llm_session import get_suggestion
@@ -656,7 +661,10 @@ async def run_llm_run_job(
 
     def _run():
         argv = [_sys.executable, "-m", "deltasim"] + sug.args
-        proc = subprocess.run(argv, shell=False, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        # §18.5.1: cwd をプロジェクトフォルダに設定（引数は変えない）
+        cwd = project_dir if project_dir and Path(project_dir).is_dir() else None
+        proc = subprocess.run(argv, shell=False, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", cwd=cwd)
         return proc.returncode, proc.stdout, proc.stderr
 
     try:

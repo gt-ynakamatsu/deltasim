@@ -834,3 +834,25 @@ POST /api/filelist/load
     "errors": [...]
   }
 ```
+
+---
+
+## 9. `deltasim.log` の生成について（§18.5.1）
+
+PR #25 以降、CLI の `test`/`run`/`gen`/`parse` コマンドは実行時に作業フォルダへ `deltasim.log` を書き出します（既定）。
+
+GUI の LLM 機能でコマンド提案を実行する場合（`/api/llm/run/start`）:
+
+- **作業フォルダ**: プロジェクトの SV ファイルが置かれているフォルダ（`project_dir`）
+- **コマンド引数**: 変更なし（表示コマンドと実際の実行が一致する）
+- **`deltasim.log` の保存先**: プロジェクトフォルダ（CLI を直接使った場合と同じ）
+
+`/api/llm/run/start` のリクエスト:
+```json
+{
+  "suggestion_id": "xxxxxxxx-...",
+  "project_dir": "/path/to/project"
+}
+```
+
+`project_dir` が指定されない場合は実行プロセスの現在ディレクトリで実行されます。
