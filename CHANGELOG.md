@@ -12,6 +12,7 @@
 - YAML スペックに `constraints:` フィールドを追加
   - 信号間の式（例: `a + b < 16`）でランダム刺激を制約
   - リジェクションサンプリングで実装（`max_constraint_attempts` 上限、既定 10000）
+  - **互換性: 同じ seed でも以前と値が変わる場合があります**。RNG 消費順が (cycle, offset) 昇順に変わりました。
   - スペック全体またはケースごとに指定可能
   - 新エラーコード: `E_CONSTRAINT`（上限超過）、`E_CONSTRAINT_EXPR`（式エラー）
   - `random.Random(seed)` で seed 固定 → Windows/Linux 同一値列

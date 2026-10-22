@@ -549,7 +549,14 @@ class StimulusSchedule:
         self._build(inputs, total_cycles)
 
     def _build(self, inputs: List[InputEntry], total_cycles: int) -> None:
-        """§18.6: 2-pass build — group by (cycle, offset), then sample with constraints."""
+        """§18.6: 2-pass build — group by (cycle, offset), then sample with constraints.
+
+        Fix 1: 保持値 (persistent_state) をコンテキストに含める。
+          各サイクルに印加された値は次のサイクルに引き継がれ、制約評価で利用可能。
+
+        Fix 2: sorted(all_keys) で RNG 消費順を (cycle, offset) 昇順に固定。
+          同一キー内の乱数信号のサンプリング順は random_spec の記述順（dict 順）で固定。
+        """
         # Pass 1: collect fixed and random specs per (cycle, offset)
         per_key_fixed: Dict[tuple, Dict[str, int]] = {}
         per_key_random: Dict[tuple, Dict[str, object]] = {}
@@ -564,31 +571,41 @@ class StimulusSchedule:
                 elif entry.random_spec:
                     per_key_random.setdefault(key, {}).update(entry.random_spec)
 
-        # Pass 2: for each key, sample with constraints
+        # Pass 2: process keys in SORTED order (Fix 2: deterministic RNG order)
+        # Maintain persistent_state: last applied value for each input signal
+        # so that constraints can reference signals set in previous cycles (Fix 1)
+        persistent_state: Dict[str, int] = {}  # starts empty (all inputs at reset value 0)
+
         all_keys = set(per_key_fixed) | set(per_key_random)
-        for key in all_keys:
+        for key in sorted(all_keys):  # Fix 2: sorted → deterministic RNG order
             cycle, _ = key
             fixed_vals = per_key_fixed.get(key, {})
             random_specs = per_key_random.get(key, {})
             if not random_specs:
-                self._schedule[key] = dict(fixed_vals)
+                combined = dict(fixed_vals)
             else:
+                # Fix 1: Build base context = persistent_state + fixed_vals of this key
+                base_ctx = dict(persistent_state)
+                base_ctx.update(fixed_vals)
                 sampled = self._sample_cycle_with_constraints(
-                    random_specs, fixed_vals, cycle
+                    random_specs, base_ctx, cycle
                 )
                 combined = dict(fixed_vals)
                 combined.update(sampled)
-                self._schedule[key] = combined
+            # Update persistent_state with confirmed values
+            persistent_state.update(combined)
+            self._schedule[key] = combined
 
     def _sample_cycle_with_constraints(
         self,
         random_specs: Dict[str, object],
-        fixed_vals: Dict[str, int],
+        base_ctx: Dict[str, int],
         cycle: int,
     ) -> Dict[str, int]:
-        """§18.6: サイクル単位でリジェクションサンプリングを行う。
+        """§18.6: サイクル単位でリジェクションサンプリングを行う（Fix 1 保持値込み）。
 
-        - 固定値 (fixed_vals) + 乱数候補 (candidate) を合わせてコンテキストを作る。
+        - base_ctx: 保持値 + このサイクルの固定値（persistent_state + fixed_vals）
+        - base_ctx + 乱数候補 (candidate) でコンテキストを作る。
         - 「その乱数信号名を少なくとも1つ含む制約」だけを評価する。
         - 乱数信号を含まない制約はそのサイクルでは対象外。
         """
@@ -611,8 +628,8 @@ class StimulusSchedule:
 
         for attempt in range(1, self._max_attempts + 1):
             candidate = {sig: self._sample(spec) for sig, spec in random_specs.items()}
-            # Build eval context: fixed + candidate, with width masking
-            ctx = dict(fixed_vals)
+            # Build eval context: base_ctx (persistent + fixed) + candidate, with width masking
+            ctx = dict(base_ctx)
             ctx.update(candidate)
             ctx = self._mask_context(ctx)
 
