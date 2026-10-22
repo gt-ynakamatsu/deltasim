@@ -161,6 +161,7 @@ class SimSession:
             "signals": self._cmd_signals_compat,
             "reset":   self._cmd_restart,
             "help":    self._cmd_help,
+            "ask":     self._cmd_ask,       # §18.3 LLM
         }.items():
             self._tcl.register_command(name, fn)
 
@@ -612,9 +613,68 @@ class SimSession:
             "foreach VAR LIST BODY   while {COND} {BODY}\n"
             "expr EXPR   puts STRING   proc NAME {PARAMS} {BODY}\n"
             "--- 後方互換 ---\n"
-            "step [N]   until TIME_NS   get SIGNAL   signals"
+            "step [N]   until TIME_NS   get SIGNAL   signals\n"
+            "--- LLM ---\n"
+            "ask \"<文>\"   — 自然言語で対話コマンドを提案する（simconfig.yaml 要）"
         )
         self._out(msg)
+        return ""
+
+    def _cmd_ask(self, args: List[str]) -> str:
+        """§18.3 ask コマンド: 対話セッション内で LLM にコマンドを提案させる。"""
+        if not args:
+            self._out("使い方: ask \"<指示文>\"")
+            return ""
+        text = " ".join(args)
+        try:
+            from deltasim.llm.config import load_llm_config
+            from deltasim.llm.client import call_llm, LLMConnectError
+            from deltasim.llm.safety import check_session_command, UnsafeCommandError
+
+            cfg = load_llm_config()
+            if cfg is None:
+                self._out(
+                    "ERROR (E_LLM_NOT_CONFIGURED): LLM が未設定です。"
+                    "simconfig.yaml の llm を設定してください。"
+                )
+                return ""
+
+            # 対話セッションで許可するコマンド
+            SESSION_CMDS = frozenset({
+                "run", "examine", "force", "noforce", "restart", "bp",
+                "when", "step", "until", "get", "signals",
+            })
+
+            prompt = (
+                f"deltasim 対話セッションのコマンドを1行だけ提案してください。\n"
+                f"使えるコマンド: {sorted(SESSION_CMDS)}\n"
+                f"シェル記号は使わないこと。\n"
+                f"指示: {text}"
+            )
+            raw = call_llm(prompt, cfg)
+            try:
+                cmd, rest = check_session_command(raw, SESSION_CMDS)
+            except UnsafeCommandError as exc:
+                self._out(f"ERROR (E_LLM_UNSAFE_CMD): {exc}")
+                return ""
+
+            proposal = f"{cmd} {rest}".strip()
+            self._out(f"提案: {proposal}")
+            import sys
+            if sys.stdin.isatty():
+                try:
+                    ans = input("実行しますか？ [y/N] ").strip().lower()
+                except EOFError:
+                    ans = "n"
+            else:
+                ans = "y"  # non-interactive: auto-accept
+
+            if ans in ("y", "yes"):
+                self._tcl.eval(proposal)
+            else:
+                self._out("実行しませんでした")
+        except Exception as exc:
+            self._out(f"ERROR: {exc}")
         return ""
 
     # ----------------------------------------------------------------

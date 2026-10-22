@@ -7,6 +7,14 @@
 
 ## [0.3.0+] — 開発中（§18.2 -f ファイルリスト + §18 対話デバッグ）
 
+### 追加（§18.3 ローカル LLM 最小実装）
+
+- **`deltasim ask "<文>"`**: 自然言語コマンド提案 + 確認実行
+- **`deltasim llm draft-spec`**: RTL → YAML スペック下書き生成
+- **`deltasim llm explain`**: テスト失敗の LLM 解析
+- 設定: `simconfig.yaml` の `llm` 節（未設定なら通信なし）
+- 新エラーコード: `E_LLM_NOT_CONFIGURED`, `E_LLM_CONNECT`, `E_LLM_UNSAFE_CMD`
+
 ### 確定事項（§18.1.1）
 
 - **行ブレークポイントの停止タイミング**: deferred 方式（その時刻の処理をすべて終えてから停止）。  

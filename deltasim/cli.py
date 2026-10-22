@@ -647,3 +647,173 @@ def _resolve_gui_paths(paths) -> dict:
             click.echo(f"[deltasim gui] プロジェクト読み込みエラー: {e}", err=True)
 
     return {"sv_files": sv_files, "spec": spec, "top": None, "params": {}}
+
+
+# ---------------------------------------------------------------------------
+# `ask` subcommand — §18.3 LLM 自然言語コマンド提案
+# ---------------------------------------------------------------------------
+
+@main.command("ask")
+@click.argument("text")
+@click.option("--yes", "-y", is_flag=True, default=False,
+              help="確認なしで実行する")
+@click.option("--config", "config_path", default=None, metavar="PATH",
+              help="simconfig.yaml のパスを直接指定（テスト用）")
+def ask_cmd(text: str, yes: bool, config_path: str):
+    """自然言語で指示して deltasim コマンドを実行する（§18.3）。
+
+    LLM がコマンドを提案し、y/N で確認してから実行します。
+    --yes で確認を省けます。
+
+    Examples:\\n
+      deltasim ask "counter.sv をテストして"\\n
+      deltasim ask "カウンタの spec を作って" --yes
+    """
+    from deltasim.llm import suggest_command, run_suggestion
+    from deltasim.llm.config import load_llm_config
+    from deltasim.llm.client import LLMConnectError, LLMResponseError
+
+    cfg = load_llm_config(config_path)
+    if cfg is None:
+        click.echo(
+            "ERROR (E_LLM_NOT_CONFIGURED): LLM が未設定です。"
+            "simconfig.yaml の llm を設定してください。",
+            err=True,
+        )
+        sys.exit(3)
+
+    try:
+        sug = suggest_command(text, cfg=cfg)
+    except LLMConnectError as exc:
+        click.echo(f"ERROR ({exc.code}): {exc}", err=True)
+        sys.exit(4)
+    except LLMResponseError as exc:
+        click.echo(f"ERROR ({exc.code}): {exc}", err=True)
+        sys.exit(4)
+    except Exception as exc:
+        click.echo(f"ERROR: {exc}", err=True)
+        sys.exit(1)
+
+    rc = run_suggestion(sug, yes=yes)
+    sys.exit(rc)
+
+
+# ---------------------------------------------------------------------------
+# `llm` subcommand group — §18.3 LLM サブコマンド群
+# ---------------------------------------------------------------------------
+
+@main.group("llm")
+def llm_group():
+    """LLM 連携コマンド（§18.3）。simconfig.yaml の設定が必要です。"""
+
+
+@llm_group.command("draft-spec")
+@click.argument("sv_files", nargs=-1, required=False, metavar="FILE [FILE …]")
+@_FILELIST_OPT
+@click.option("--top", "-t", default=None)
+@click.option("-o", "--output", "output_path", default=None, metavar="PATH",
+              help="出力先 YAML ファイル")
+@click.option("--force", is_flag=True, default=False,
+              help="既存ファイルを上書き")
+@click.option("--config", "config_path", default=None, metavar="PATH")
+def draft_spec_cmd(sv_files, filelist, top, output_path, force, config_path):
+    """RTL から YAML テストスペックの下書きを生成する（§18.3）。
+
+    Examples:\\n
+      deltasim llm draft-spec counter.sv -o counter_spec_draft.yaml\\n
+      deltasim llm draft-spec -f files.f --top counter -o spec.yaml --force
+    """
+    from deltasim.llm import draft_spec
+    from deltasim.llm.config import load_llm_config
+    from deltasim.llm.client import LLMConnectError
+
+    sv_files, _ = _expand_files(sv_files, filelist)
+
+    cfg = load_llm_config(config_path)
+    if cfg is None:
+        click.echo(
+            "ERROR (E_LLM_NOT_CONFIGURED): LLM が未設定です。"
+            "simconfig.yaml の llm を設定してください。",
+            err=True,
+        )
+        sys.exit(3)
+
+    try:
+        result = draft_spec(
+            list(sv_files), top=top, cfg=cfg,
+            output_path=output_path, force=force,
+        )
+    except FileExistsError as exc:
+        click.echo(f"ERROR: {exc}", err=True)
+        sys.exit(5)
+    except LLMConnectError as exc:
+        click.echo(f"ERROR ({exc.code}): {exc}", err=True)
+        sys.exit(4)
+    except Exception as exc:
+        click.echo(f"ERROR: {exc}", err=True)
+        sys.exit(1)
+
+    if output_path:
+        if result.valid:
+            click.echo(f"[deltasim llm draft-spec] 保存: {output_path}")
+        else:
+            click.echo(
+                f"[deltasim llm draft-spec] 保存（検証エラーあり）: {output_path}",
+                err=True,
+            )
+            for e in result.errors:
+                click.echo(f"  WARNING: {e}", err=True)
+            sys.exit(6)
+    else:
+        click.echo(result.yaml_text)
+    sys.exit(0)
+
+
+@llm_group.command("explain")
+@click.argument("result_json")
+@click.option("--rtl", "rtl_files", multiple=True, metavar="FILE")
+@_FILELIST_OPT
+@click.option("--spec", "spec_file", default=None, metavar="YAML")
+@click.option("--config", "config_path", default=None, metavar="PATH")
+def explain_cmd(result_json, rtl_files, filelist, spec_file, config_path):
+    """テスト失敗を LLM に解析させる（§18.3）。
+
+    Examples:\\n
+      deltasim llm explain result.json --rtl counter.sv --spec counter_spec.yaml\\n
+      deltasim llm explain result.json -f files.f
+    """
+    from deltasim.llm import explain_result
+    from deltasim.llm.config import load_llm_config
+    from deltasim.llm.client import LLMConnectError
+
+    all_rtl = list(rtl_files)
+    if filelist:
+        from deltasim.filelist import expand_filelist_args
+        files_from_f, _ = expand_filelist_args([], filelist)
+        all_rtl.extend(files_from_f)
+
+    cfg = load_llm_config(config_path)
+    if cfg is None:
+        click.echo(
+            "ERROR (E_LLM_NOT_CONFIGURED): LLM が未設定です。"
+            "simconfig.yaml の llm を設定してください。",
+            err=True,
+        )
+        sys.exit(3)
+
+    try:
+        text = explain_result(
+            result_json,
+            rtl_files=all_rtl or None,
+            spec_file=spec_file,
+            cfg=cfg,
+        )
+    except LLMConnectError as exc:
+        click.echo(f"ERROR ({exc.code}): {exc}", err=True)
+        sys.exit(4)
+    except Exception as exc:
+        click.echo(f"ERROR: {exc}", err=True)
+        sys.exit(1)
+
+    click.echo(text)
+    sys.exit(0)
