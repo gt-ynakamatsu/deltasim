@@ -2869,3 +2869,231 @@ class TestWaveset:
             "sv_files": [_COUNTER_SV], "spec": None, "name": "nonexistent_xyz",
         })
         assert res.status_code == 404
+
+
+# ============================================================================
+# §18.4.2 確定仕様のテスト
+# ============================================================================
+
+# ---------------------------------------------------------------------------
+# 1. エッジ検索の多ビット仕様（§18.4.2）
+# ---------------------------------------------------------------------------
+
+class TestEdgeSearchMultibit:
+    """§18.4.2: 多ビット信号で rising/falling を指定しても値の変化を検索すること"""
+
+    def test_multibit_rising_returns_any_change(self):
+        """多ビット信号に rising を指定しても値の変化（any）として扱う"""
+        from deltasim.gui.waveutil import find_edge
+        # 8 ビット信号: カウントアップ
+        changes = [(0, "00000000"), (10, "00000001"), (20, "00000010"), (30, "00000011")]
+        # rising を指定しても値の変化を返す
+        result = find_edge(changes, 0, "next", "rising", width=8)
+        assert result == 10, f"多ビット rising は最初の値変化を返すこと: {result}"
+
+    def test_multibit_falling_returns_any_change(self):
+        """多ビット信号に falling を指定しても値の変化（any）として扱う"""
+        from deltasim.gui.waveutil import find_edge
+        changes = [(0, "1111"), (10, "1110"), (20, "1101")]
+        result = find_edge(changes, 0, "next", "falling", width=4)
+        assert result == 10, f"多ビット falling は最初の値変化を返すこと: {result}"
+
+    def test_1bit_rising_only_lh(self):
+        """1ビット: rising は L→H の変化のみ"""
+        from deltasim.gui.waveutil import find_edge
+        changes = [(0, "0"), (5, "1"), (10, "0"), (15, "1")]
+        result_rising = find_edge(changes, 0, "next", "rising", width=1)
+        result_falling = find_edge(changes, 0, "next", "falling", width=1)
+        assert result_rising == 5
+        assert result_falling == 10
+
+    def test_vcd_missing_signal_edge_returns_none(self):
+        """VCDにない信号（変化なし）のエッジ検索は None を返すこと"""
+        from deltasim.gui.waveutil import find_edge
+        # VCDに無い信号 = changes が空
+        assert find_edge([], 0, "next", "any") is None
+        assert find_edge([], 0, "prev", "rising") is None
+        assert find_edge([], 100, "next", "falling") is None
+
+
+# ---------------------------------------------------------------------------
+# 2. 波形セット読込ダイアログ（§18.4.2: window.prompt 廃止 → 一覧表示）
+# ---------------------------------------------------------------------------
+
+class TestWavesetLoadDialog:
+    """§18.4.2: 波形セット読込に必要なサーバー API が一覧を返すこと（ダイアログ表示に使用）"""
+
+    @pytest.fixture(autouse=True)
+    def patch_config_dir(self, tmp_path, monkeypatch):
+        from deltasim.gui import waveset as _ws_mod
+        monkeypatch.setattr(_ws_mod, "_wavesets_dir", lambda config_dir=None: tmp_path)
+
+    @pytest.fixture
+    def client(self):
+        with TestClient(app, base_url="http://127.0.0.1") as c:
+            yield c
+
+    def test_get_returns_list_for_dialog(self, client):
+        """GET /api/waveset が一覧を返し、ダイアログに必要なフィールドを持つこと"""
+        _COUNTER_SV_L = str(Path(__file__).parent.parent / "examples" / "counter.sv")
+        # セットを事前に保存
+        client.post("/api/waveset", json={
+            "sv_files": [_COUNTER_SV_L], "spec": None,
+            "name": "セットA", "signals": ["clk", "count"], "radix": {"count": "signed"},
+        })
+        client.post("/api/waveset", json={
+            "sv_files": [_COUNTER_SV_L], "spec": None,
+            "name": "セットB", "signals": ["rst_n"], "radix": {},
+        })
+        res = client.get(f"/api/waveset?sv_files={_COUNTER_SV_L}")
+        assert res.status_code == 200
+        sets = res.json()["sets"]
+        assert len(sets) == 2
+        for s in sets:
+            assert "name" in s, "ダイアログに表示する name フィールドが必要"
+            assert "signals" in s, "信号数表示に signals が必要"
+            assert "radix" in s, "radix 設定が必要"
+
+    def test_delete_via_api_removes_entry(self, client):
+        """削除ボタンが呼ぶ DELETE API でエントリが消えること"""
+        _COUNTER_SV_L = str(Path(__file__).parent.parent / "examples" / "counter.sv")
+        client.post("/api/waveset", json={
+            "sv_files": [_COUNTER_SV_L], "spec": None,
+            "name": "to_delete", "signals": ["clk"], "radix": {},
+        })
+        # 削除
+        res = client.request("DELETE", "/api/waveset", json={
+            "sv_files": [_COUNTER_SV_L], "spec": None, "name": "to_delete",
+        })
+        assert res.status_code == 200
+        # 一覧から消えたことを確認
+        res2 = client.get(f"/api/waveset?sv_files={_COUNTER_SV_L}")
+        names = [s["name"] for s in res2.json()["sets"]]
+        assert "to_delete" not in names
+
+    def test_delete_nonexistent_returns_404(self, client):
+        """存在しないセットの削除は 404 を返すこと（ダイアログの削除確認後のエラーハンドリング用）"""
+        _COUNTER_SV_L = str(Path(__file__).parent.parent / "examples" / "counter.sv")
+        res = client.request("DELETE", "/api/waveset", json={
+            "sv_files": [_COUNTER_SV_L], "spec": None, "name": "nonexistent",
+        })
+        assert res.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# 3. 保存先フォルダブラウザ（§18.4.2: /api/browse でフォルダを列挙できること）
+# ---------------------------------------------------------------------------
+
+class TestFolderBrowse:
+    """§18.4.2: フォルダ選択に使う /api/browse がディレクトリを列挙すること"""
+
+    @pytest.fixture
+    def client(self):
+        with TestClient(app, base_url="http://127.0.0.1") as c:
+            yield c
+
+    def test_browse_returns_dirs_for_folder_mode(self, client, tmp_path):
+        """ブラウズ結果にディレクトリが含まれること（フォルダ選択 UI 用）"""
+        from deltasim.gui.filesec import add_extra_root
+        add_extra_root(tmp_path)
+        (tmp_path / "subdir1").mkdir()
+        (tmp_path / "subdir2").mkdir()
+        (tmp_path / "file.sv").write_text("module m; endmodule")
+
+        res = client.get(f"/api/browse?path={tmp_path}")
+        assert res.status_code == 200
+        entries = res.json()["entries"]
+        dirs = [e for e in entries if e["type"] == "dir"]
+        files = [e for e in entries if e["type"] == "file"]
+        assert len(dirs) >= 2, "サブディレクトリがリストに含まれること"
+        assert len(files) >= 1, "ファイルもリストに含まれること"
+
+    def test_browse_entry_has_path(self, client, tmp_path):
+        """ブラウズ結果の各エントリに path フィールドがあること（フォルダ選択後の値設定用）"""
+        from deltasim.gui.filesec import add_extra_root
+        add_extra_root(tmp_path)
+        (tmp_path / "sub").mkdir()
+
+        res = client.get(f"/api/browse?path={tmp_path}")
+        assert res.status_code == 200
+        for entry in res.json()["entries"]:
+            assert "path" in entry, "path フィールドが必要（フォルダ選択後の入力欄設定用）"
+            assert "type" in entry
+
+    def test_browse_roots_for_initial_position(self, client):
+        """許可ルート一覧が取得できること（ブラウザの初期位置設定用）"""
+        res = client.get("/api/browse/roots")
+        assert res.status_code == 200
+        data = res.json()
+        assert "roots" in data
+        assert len(data["roots"]) >= 1
+
+
+# ---------------------------------------------------------------------------
+# 4. VCDに無い信号（§18.4.2: VCD不在 = 空変化リスト = 波形なし）
+# ---------------------------------------------------------------------------
+
+class TestVcdMissingSignal:
+    """§18.4.2: VCDに無い信号の扱い"""
+
+    def test_edge_search_empty_changes_returns_none(self):
+        """VCDに無い信号（変化リスト空）のエッジ検索は None を返すこと"""
+        from deltasim.gui.waveutil import find_edge
+        for direction in ("next", "prev"):
+            for edge in ("any", "rising", "falling"):
+                result = find_edge([], 0, direction, edge)
+                assert result is None, f"空リストでのエッジ検索は None: direction={direction} edge={edge}"
+
+    def test_waveform_range_missing_signal_not_in_response(self, tmp_path):
+        """存在しない信号名を指定しても他の信号データが返ること（フィルタの動作確認）"""
+        import tempfile, os
+        from deltasim.gui.vcd_reader import read_vcd_range
+
+        # 最小限の VCD を作成
+        vcd_content = "$timescale 1ns $end\n$var wire 1 ! clk $end\n$enddefinitions $end\n"
+        vcd_content += "$dumpvars\n0!\n$end\n#5\n1!\n#10\n0!\n"
+        vcd_path = str(tmp_path / "minimal.vcd")
+        with open(vcd_path, "w") as f:
+            f.write(vcd_content)
+
+        # 存在する信号 + 存在しない信号を指定
+        data = read_vcd_range(vcd_path, signal_names=["clk", "nonexistent_xyz"])
+        assert "clk" in data["signals"], "存在する信号は含まれること"
+        assert "nonexistent_xyz" not in data["signals"], "存在しない信号は含まれないこと"
+
+    def test_waveform_api_missing_signal_not_in_range_response(self):
+        """GET /api/waveform/range で存在しない信号は結果に含まれないこと"""
+        import tempfile, os
+        from deltasim.gui.vcd_reader import read_vcd_range
+        with tempfile.TemporaryDirectory() as tmpdir:
+            vcd_path = os.path.join(tmpdir, "t.vcd")
+            with open(vcd_path, "w") as f:
+                f.write("$timescale 1ns $end\n$var wire 1 ! clk $end\n$enddefinitions $end\n")
+                f.write("$dumpvars\n0!\n$end\n#5\n1!\n")
+            data = read_vcd_range(vcd_path, signal_names=["clk", "no_such"])
+            assert "no_such" not in data["signals"]
+
+    def test_fail_signal_not_in_vcd_empty_changes(self):
+        """FAIL信号がVCDに無い場合、変化リストが空であること（VCDにありません表示の根拠）"""
+        from deltasim.gui.waveutil import find_edge
+        # VCD に無い信号は changes=[] → エッジ検索は None
+        assert find_edge([], 50, "next", "any", width=1) is None
+        assert find_edge([], 50, "prev", "any", width=1) is None
+
+    @pytest.fixture
+    def client(self):
+        with TestClient(app, base_url="http://127.0.0.1") as c:
+            yield c
+
+    def test_waveform_edge_api_missing_signal_returns_404(self, client, tmp_path):
+        """存在しない信号を指定した /api/waveform/edge は 404 を返すこと"""
+        import tempfile, os
+        from deltasim.gui.filesec import add_extra_root
+        add_extra_root(tmp_path)
+        vcd_path = str(tmp_path / "edge_test.vcd")
+        with open(vcd_path, "w") as f:
+            f.write("$timescale 1ns $end\n$var wire 1 ! clk $end\n$enddefinitions $end\n")
+            f.write("$dumpvars\n0!\n$end\n#5\n1!\n")
+
+        res = client.get(f"/api/waveform/edge?path={vcd_path}&signal=not_in_vcd&from_ns=0&direction=next&edge=any")
+        assert res.status_code == 404, "VCDに無い信号は 404"
