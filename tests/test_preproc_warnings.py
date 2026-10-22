@@ -30,10 +30,13 @@ def _write(tmp: Path, name: str, content: str) -> str:
 
 def _cli_json(sv_p: str, spec_p: str, tmp: Path) -> dict:
     json_p = str(tmp / "out.json")
+    import os as _os
+    env = {**_os.environ, "PYTHONUTF8": "1"}
     r = subprocess.run(
         [sys.executable, "-m", "deltasim", "test",
          sv_p, "--spec", spec_p, "--json", json_p],
         capture_output=True, text=True, encoding="utf-8", timeout=30,
+        env=env,
     )
     return json.loads(Path(json_p).read_text(encoding="utf-8")), r.stderr
 

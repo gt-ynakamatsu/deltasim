@@ -28,6 +28,15 @@ import click
 @click.version_option(package_name="deltasim")
 def main():
     """deltasim — SystemVerilog フルスクラッチシミュレータ"""
+    # §18.9.1: Windows で日本語メッセージを含む警告を stdout/stderr に出力するとき
+    # UnicodeEncodeError を防ぐため、可能なら UTF-8 に再設定する。
+    import sys as _sys
+    for _stream in (_sys.stdout, _sys.stderr):
+        try:
+            if hasattr(_stream, "reconfigure"):
+                _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
