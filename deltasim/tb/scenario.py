@@ -102,6 +102,10 @@ class CaseSpec:
     inputs: List[InputEntry] = field(default_factory=list)
     expected: List[ExpectedEntry] = field(default_factory=list)
     model: Optional[ModelSpec] = None  # overrides top-level model
+    # §18.6: 乱数刺激の制約式リスト（SV 式サブセット）
+    constraints: List[str] = field(default_factory=list)
+    # §18.6: リジェクションサンプリング上限（None はデフォルト値を使用）
+    max_constraint_attempts: Optional[int] = None
 
 
 @dataclass
@@ -122,6 +126,9 @@ class Scenario:
     _base_dir: str = field(default="", compare=False)
     _stem: str = field(default="scenario", compare=False)   # filename stem
     _warnings: list = field(default_factory=list, compare=False)  # §15.12 WarningInfo
+    # §18.6: top-level constraints (applies to all cases)
+    constraints: List[str] = field(default_factory=list)
+    max_constraint_attempts: Optional[int] = None
 
 
 # ---------------------------------------------------------------------------
@@ -193,6 +200,15 @@ def load_scenario(path: str) -> Scenario:
             params=dict(m.get("params") or {}),
         )
 
+    # §18.6: top-level constraints
+    if data.get("constraints"):
+        s.constraints = [str(c) for c in data["constraints"]]
+    if data.get("max_constraint_attempts") is not None:
+        mca = int(data["max_constraint_attempts"])
+        if mca < 1:
+            raise ScenarioError(f"max_constraint_attempts は 1 以上の整数が必要です: {mca}")
+        s.max_constraint_attempts = mca
+
     # §13.2: Parse cases: list
     raw_cases = data.get("cases")
     if raw_cases is not None:
@@ -251,6 +267,14 @@ def load_scenario(path: str) -> Scenario:
                     class_name=str(m.get("class", m.get("class_name", "Model"))),
                     params=dict(m.get("params") or {}),
                 )
+            # §18.6: case-level constraints
+            if rc.get("constraints"):
+                case.constraints = [str(c) for c in rc["constraints"]]
+            if rc.get("max_constraint_attempts") is not None:
+                mca = int(rc["max_constraint_attempts"])
+                if mca < 1:
+                    raise ScenarioError(f"max_constraint_attempts は 1 以上の整数が必要です: {mca}")
+                case.max_constraint_attempts = mca
             s.cases.append(case)
     # else: no cases: key → legacy single-case (s.cases stays empty)
 
@@ -296,6 +320,7 @@ _KNOWN_TOP_KEYS = frozenset({
     "model",
     "skip", "skip_reason",
     "cases",
+    "constraints", "max_constraint_attempts",  # §18.6
 })
 
 # clock/reset/sim の既知キー
@@ -311,6 +336,7 @@ _KNOWN_CASE_KEYS = frozenset({
     "inputs", "stimulus",   # aliases
     "expected", "expect",   # aliases
     "model",
+    "constraints", "max_constraint_attempts",  # §18.6
 })
 
 
@@ -473,11 +499,32 @@ def validate_offset_ns(scenario: "Scenario", spec_path: str = "") -> list:
 # Stimulus schedule
 # ---------------------------------------------------------------------------
 
+# §18.6: デフォルトのリジェクションサンプリング上限
+DEFAULT_MAX_CONSTRAINT_ATTEMPTS = 10_000
+
+
+class ConstraintError(Exception):
+    """§18.6: 制約を満たす値が上限回数内に見つからなかった。"""
+    code = "E_CONSTRAINT"
+
+
+class ConstraintExprError(Exception):
+    """§18.6: 制約式の構文エラーまたは未知の信号名。"""
+    code = "E_CONSTRAINT_EXPR"
+
+
 class StimulusSchedule:
     """Pre-computes the input values to apply at each (cycle, offset_ns).
 
     §15.2: keyed by (cycle, offset_ns) to support sub-cycle stimuli.
+    §18.6: supports constraints: (rejection sampling, per-cycle scope).
     Backward-compatible: get(cycle) is equivalent to get(cycle, 0).
+
+    §18.6 constraint scope:
+    - Per (cycle, offset), collect ALL confirmed values (set + random).
+    - Only evaluate constraints that mention >= 1 random signal for that cycle.
+    - Re-sample all random signals for that cycle together until constraints pass.
+    - Signal widths from signal_widths dict are used to mask values (SV semantics).
     """
 
     def __init__(
@@ -485,24 +532,146 @@ class StimulusSchedule:
         inputs: List[InputEntry],
         total_cycles: int,
         seed: int = 0,
+        constraints: Optional[List[str]] = None,
+        max_constraint_attempts: Optional[int] = None,
+        signal_widths: Optional[Dict[str, int]] = None,
+        signal_signed: Optional[Dict[str, bool]] = None,
     ):
         self._rng = _random_mod.Random(seed)
+        self._constraints = constraints or []
+        self._max_attempts = (max_constraint_attempts
+                              if max_constraint_attempts is not None
+                              else DEFAULT_MAX_CONSTRAINT_ATTEMPTS)
+        self._signal_widths = signal_widths or {}
+        self._signal_signed = signal_signed or {}
+        # §18.6 Fix 1: initial values for all known input ports = 0
+        # This matches the engine initial state (SimEngine initialises all signals to 0).
+        # Without this, constraints that reference a port not yet set would raise ExprError.
+        self._initial_port_vals: Dict[str, int] = {name: 0 for name in self._signal_widths}
         # (cycle, offset_ns) -> {signal: value}
         self._schedule: Dict[tuple, Dict[str, int]] = {}
         self._build(inputs, total_cycles)
 
     def _build(self, inputs: List[InputEntry], total_cycles: int) -> None:
+        """§18.6: 2-pass build — group by (cycle, offset), then sample with constraints.
+
+        Fix 1: 保持値 (persistent_state) をコンテキストに含める。
+          各サイクルに印加された値は次のサイクルに引き継がれ、制約評価で利用可能。
+
+        Fix 2: sorted(all_keys) で RNG 消費順を (cycle, offset) 昇順に固定。
+          同一キー内の乱数信号のサンプリング順は random_spec の記述順（dict 順）で固定。
+        """
+        # Pass 1: collect fixed and random specs per (cycle, offset)
+        per_key_fixed: Dict[tuple, Dict[str, int]] = {}
+        per_key_random: Dict[tuple, Dict[str, object]] = {}
+
         for entry in inputs:
             cycles = sorted(_expand_at(entry.at, total_cycles))
-            offset = entry.offset_ns  # §15.2
+            offset = entry.offset_ns
             for cycle in cycles:
-                vals: Dict[str, int] = {}
+                key = (cycle, offset)
                 if entry.set_values:
-                    vals.update(entry.set_values)
+                    per_key_fixed.setdefault(key, {}).update(entry.set_values)
                 elif entry.random_spec:
-                    for sig, spec in entry.random_spec.items():
-                        vals[sig] = self._sample(spec)
-                self._schedule.setdefault((cycle, offset), {}).update(vals)
+                    per_key_random.setdefault(key, {}).update(entry.random_spec)
+
+        # Pass 2: process keys in SORTED order (Fix 2: deterministic RNG order)
+        # Maintain persistent_state: last applied value for each input signal
+        # so that constraints can reference signals set in previous cycles (Fix 1)
+        # §18.6 Fix 1: start from known initial values (all input ports = 0)
+        persistent_state: Dict[str, int] = dict(self._initial_port_vals)
+
+        all_keys = set(per_key_fixed) | set(per_key_random)
+        for key in sorted(all_keys):  # Fix 2: sorted → deterministic RNG order
+            cycle, _ = key
+            fixed_vals = per_key_fixed.get(key, {})
+            random_specs = per_key_random.get(key, {})
+            if not random_specs:
+                combined = dict(fixed_vals)
+            else:
+                # Fix 1: Build base context = persistent_state + fixed_vals of this key
+                base_ctx = dict(persistent_state)
+                base_ctx.update(fixed_vals)
+                sampled = self._sample_cycle_with_constraints(
+                    random_specs, base_ctx, cycle
+                )
+                combined = dict(fixed_vals)
+                combined.update(sampled)
+            # Update persistent_state with confirmed values
+            persistent_state.update(combined)
+            self._schedule[key] = combined
+
+    def _sample_cycle_with_constraints(
+        self,
+        random_specs: Dict[str, object],
+        base_ctx: Dict[str, int],
+        cycle: int,
+    ) -> Dict[str, int]:
+        """§18.6: サイクル単位でリジェクションサンプリングを行う（Fix 1 保持値込み）。
+
+        - base_ctx: 保持値 + このサイクルの固定値（persistent_state + fixed_vals）
+        - base_ctx + 乱数候補 (candidate) でコンテキストを作る。
+        - 「その乱数信号名を少なくとも1つ含む制約」だけを評価する。
+        - 乱数信号を含まない制約はそのサイクルでは対象外。
+        """
+        from deltasim.interp.expr import eval_bool, ExprError
+        import re
+
+        random_signal_names = set(random_specs.keys())
+
+        if not self._constraints:
+            return {sig: self._sample(spec) for sig, spec in random_specs.items()}
+
+        # Determine active constraints (mention at least one random signal)
+        def _mentions(cstr: str, sigs: set) -> bool:
+            return any(bool(re.search(r'\b' + re.escape(s) + r'\b', cstr)) for s in sigs)
+
+        active = [c for c in self._constraints if _mentions(c, random_signal_names)]
+        if not active:
+            # No constraint applies to this cycle's random signals
+            return {sig: self._sample(spec) for sig, spec in random_specs.items()}
+
+        for attempt in range(1, self._max_attempts + 1):
+            candidate = {sig: self._sample(spec) for sig, spec in random_specs.items()}
+            # Build eval context: base_ctx (persistent + fixed) + candidate, with width masking
+            ctx = dict(base_ctx)
+            ctx.update(candidate)
+            ctx = self._mask_context(ctx)
+
+            all_ok = True
+            for cstr in active:
+                try:
+                    ok = eval_bool(cstr, ctx)
+                except ExprError as exc:
+                    raise ConstraintExprError(
+                        f"制約式 '{cstr}' の評価に失敗しました: {exc}"
+                    ) from exc
+                if not ok:
+                    all_ok = False
+                    break
+            if all_ok:
+                return candidate
+
+        raise ConstraintError(
+            f"E_CONSTRAINT: サイクル {cycle} で制約 {active} を満たす値が "
+            f"{self._max_attempts} 回以内に見つかりませんでした。"
+        )
+
+    def _mask_context(self, ctx: Dict[str, int]) -> Dict[str, int]:
+        """§18.6: 信号幅に応じてビットマスクを適用する（SV semantics）。"""
+        if not self._signal_widths:
+            return ctx
+        result = {}
+        for sig, val in ctx.items():
+            w = self._signal_widths.get(sig)
+            if w and w > 0:
+                masked = val & ((1 << w) - 1)
+                if self._signal_signed.get(sig) and (masked >> (w - 1)):
+                    masked -= (1 << w)
+                result[sig] = masked
+            else:
+                result[sig] = val
+        return result
 
     def get(self, cycle: int, offset_ns: int = 0) -> Dict[str, int]:
         """Input values to apply at (cycle, offset_ns). offset_ns=0 → posedge."""

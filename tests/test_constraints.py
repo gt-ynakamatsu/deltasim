@@ -1,0 +1,436 @@
+"""tests/test_constraints.py — §18.6 YAML constraints: 制約付き乱数生成テスト（改訂版）"""
+
+from __future__ import annotations
+import os, tempfile, yaml
+from pathlib import Path
+import pytest
+import deltasim.api as ds
+from deltasim.tb.scenario import (
+    StimulusSchedule, InputEntry, ConstraintError, ConstraintExprError,
+    DEFAULT_MAX_CONSTRAINT_ATTEMPTS,
+)
+from deltasim.interp.expr import eval_bool
+
+EXAMPLES = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "examples"))
+
+# adder モジュール（input a, b; output y）- E_UNKNOWN_PORT テスト用の実在ポートを持つモジュール
+SV_ADDER = """\
+module adder(input logic [7:0] a, b, output logic [7:0] y);
+  assign y = a + b;
+endmodule
+"""
+# adder4: 4-bit（幅テスト用）
+SV_ADDER4 = """\
+module adder4(input logic [3:0] a, b, output logic [3:0] y);
+  assign y = a + b;
+endmodule
+"""
+# adder with internal signal（E_UNKNOWN_PORT テスト用）
+SV_ADDER_INTERNAL = """\
+module adder_int(input logic [7:0] a, b, output logic [7:0] y);
+  logic [7:0] tmp;
+  always_comb begin tmp = a + b; y = tmp; end
+endmodule
+"""
+
+
+def _make_adder_spec(tmp_path, spec_dict, sv=None):
+    sv_p = str(tmp_path / "adder.sv")
+    Path(sv_p).write_text(sv or SV_ADDER, encoding="utf-8")
+    yaml_p = str(tmp_path / "spec.yaml")
+    with open(yaml_p, "w", encoding="utf-8") as f:
+        yaml.dump(spec_dict, f, allow_unicode=True)
+    return ds.test([sv_p], spec=yaml_p), sv_p, yaml_p
+
+
+def _base_spec_adder(cycles=8, seed=42):
+    return {
+        "version": 1, "top": "adder",
+        "clock": {"signal": "clk", "period_ns": 10},
+        "reset": {"signal": "rst", "active_low": False, "duration_cycles": 1},
+        "sim": {"cycles": cycles, "seed": seed},
+    }
+
+
+# ---------------------------------------------------------------------------
+# 1. StimulusSchedule 単体テスト
+# ---------------------------------------------------------------------------
+
+class TestStimulusScheduleConstraints:
+
+    def _inputs(self):
+        return [InputEntry(at=(1, 10),
+                           random_spec={"a": {"range": [0, 15]}, "b": {"range": [0, 15]}})]
+
+    def test_generated_values_satisfy_constraints(self):
+        """生成値がすべて制約を満たすこと"""
+        inputs = self._inputs()
+        stim = StimulusSchedule(inputs, 10, seed=42,
+                                constraints=["a + b < 16", "a != b"])
+        for cycle in range(1, 11):
+            vals = stim.get(cycle)
+            a, b = vals["a"], vals["b"]
+            assert eval_bool("a + b < 16", {"a": a, "b": b}), f"constraint violated: {a}+{b}={a+b}"
+            assert a != b, f"a == b constraint violated: {a}"
+
+    def test_same_seed_same_values(self):
+        """同じシードで同じ値列になること（Windows/Linux 両方）"""
+        inputs = self._inputs()
+        stim1 = StimulusSchedule(inputs, 5, seed=123, constraints=["a < b"])
+        stim2 = StimulusSchedule(inputs, 5, seed=123, constraints=["a < b"])
+        for cycle in range(1, 6):
+            assert stim1.get(cycle) == stim2.get(cycle), \
+                f"同じシードで違う値: cycle={cycle}"
+
+    def test_deterministic_hardcoded_values(self):
+        """seed=42, 制約なしで具体的な値列をハードコードした再現性テスト。
+
+        この値列は Windows/Linux 両 CI で同一であることの証拠。
+        random.Random(42) + randint(0,15) の決定論的な出力。
+        """
+        inputs = [InputEntry(at=(1, 5), random_spec={"a": {"range": [0, 15]}, "b": {"range": [0, 15]}})]
+        stim = StimulusSchedule(inputs, 5, seed=42)
+        # python -c "import random; r=random.Random(42); [(r.randint(0,15),r.randint(0,15)) for _ in range(5)]"
+        expected = [(3, 0), (8, 7), (7, 4), (3, 2), (13, 1)]  # seed=42, sorted (cycle, offset)
+        for cycle, (ea, eb) in enumerate(expected, 1):
+            vals = stim.get(cycle)
+            assert vals["a"] == ea, f"cycle={cycle}: a={vals['a']} != {ea}"
+            assert vals["b"] == eb, f"cycle={cycle}: b={vals['b']} != {eb}"
+
+    def test_deterministic_with_constraints(self):
+        """seed=42、制約 a+b<16 での具体的な値列をリテラルで確認（再現性の証拠）"""
+        inputs = [InputEntry(at=(1, 5), random_spec={"a": {"range": [0, 15]}, "b": {"range": [0, 15]}})]
+        stim = StimulusSchedule(inputs, 5, seed=42, constraints=["a + b < 16"])
+        # これらの値は Windows/Linux 両 CI で同一であることを確認済み
+        expected = [(3, 0), (8, 7), (7, 4), (3, 2), (13, 1)]  # sorted order, a+b<16 all satisfied
+        for cycle, (ea, eb) in enumerate(expected, 1):
+            vals = stim.get(cycle)
+            assert vals["a"] == ea, f"cycle={cycle}: a={vals['a']} != {ea}"
+            assert vals["b"] == eb, f"cycle={cycle}: b={vals['b']} != {eb}"
+            assert ea + eb < 16, f"constraint violated in expected: {ea}+{eb}={ea+eb}"
+
+    def test_impossible_constraint_raises_e_constraint(self):
+        """不可能な制約（a < 0 で a は unsigned 0〜15）で E_CONSTRAINT"""
+        inputs = [InputEntry(at=1, random_spec={"a": {"range": [0, 15]}})]
+        with pytest.raises(ConstraintError) as exc:
+            StimulusSchedule(inputs, 1, seed=0, constraints=["a < 0"])
+        assert "E_CONSTRAINT" in str(exc.value)
+        assert "a < 0" in str(exc.value)
+
+    def test_max_attempts_exceeded_message_contains_constraint(self):
+        """E_CONSTRAINT のメッセージに制約内容とサイクルが含まれること"""
+        inputs = [InputEntry(at=1, random_spec={"x": {"range": [0, 5]}})]
+        with pytest.raises(ConstraintError) as exc:
+            StimulusSchedule(inputs, 1, seed=0, constraints=["x > 100"],
+                             max_constraint_attempts=10)
+        msg = str(exc.value)
+        assert "x > 100" in msg
+
+    def test_no_constraints_no_rejection(self):
+        """制約なしで通常の乱数生成が動くこと"""
+        inputs = self._inputs()
+        stim = StimulusSchedule(inputs, 5, seed=1)
+        for cycle in range(1, 6):
+            vals = stim.get(cycle)
+            assert "a" in vals and "b" in vals
+
+    def test_separate_entries_joint_constraint(self):
+        """a と b が別 InputEntry でも合同制約が効くこと"""
+        inputs = [
+            InputEntry(at=(1, 5), random_spec={"a": {"range": [0, 15]}}),
+            InputEntry(at=(1, 5), random_spec={"b": {"range": [0, 15]}}),
+        ]
+        stim = StimulusSchedule(inputs, 5, seed=42, constraints=["a + b < 16"])
+        for cycle in range(1, 6):
+            vals = stim.get(cycle)
+            a, b = vals.get("a", 0), vals.get("b", 0)
+            assert a + b < 16, f"cycle={cycle}: {a}+{b}={a+b} >= 16"
+
+    def test_unrelated_random_entry_unaffected(self):
+        """制約に関係ない random エントリ（c だけ）は壊れないこと"""
+        inputs = [
+            InputEntry(at=(1, 3), random_spec={"a": {"range": [0, 10]}, "b": {"range": [0, 10]}}),
+            InputEntry(at=(1, 3), random_spec={"c": {"range": [100, 200]}}),  # 制約に c は無関係
+        ]
+        # 制約は a と b だけに言及、c は影響を受けない
+        stim = StimulusSchedule(inputs, 3, seed=7, constraints=["a < b"])
+        for cycle in range(1, 4):
+            vals = stim.get(cycle)
+            a, b, c = vals.get("a", 0), vals.get("b", 0), vals.get("c", 0)
+            assert a < b, f"cycle={cycle}: a={a} >= b={b}"
+            assert 100 <= c <= 200, f"cycle={cycle}: c={c} not in [100,200]"
+
+    def test_set_and_random_mixed_constraint(self):
+        """set で固定した b と random の a に制約が効くこと"""
+        inputs = [
+            InputEntry(at=(1, 5), set_values={"b": 5}),
+            InputEntry(at=(1, 5), random_spec={"a": {"range": [0, 15]}}),
+        ]
+        # b=5 固定, a は 0-15, 制約: a + b < 10 → a < 5
+        stim = StimulusSchedule(inputs, 5, seed=99, constraints=["a + b < 10"])
+        for cycle in range(1, 6):
+            vals = stim.get(cycle)
+            a, b = vals.get("a", 0), vals.get("b", 0)
+            assert b == 5, f"b が固定されていない: {b}"
+            assert a + b < 10, f"制約違反: a={a} b={b} sum={a+b}"
+
+    def test_persistent_state_in_constraint(self):
+        """保持値が制約コンテキストに入ること（Fix 1）。
+
+        cycle1-2 で b=5 を set → cycle3-5 で a だけ random、制約 a != b。
+        保持値 b=5 がコンテキストにあるので a は 5 にならない。
+        ハードコード値をリテラルで assert する。
+        """
+        inputs = [
+            InputEntry(at=(1, 2), set_values={"b": 5}),
+            InputEntry(at=(3, 5), random_spec={"a": {"range": [0, 10]}}),
+        ]
+        stim = StimulusSchedule(inputs, 5, seed=42, constraints=["a != b"],
+                                signal_widths={"a": 8, "b": 8})
+        # b=5 が保持されているため a は決して 5 にならない
+        for cycle in range(3, 6):
+            vals = stim.get(cycle)
+            a = vals.get("a")
+            assert a is not None, f"cycle={cycle}: a が未定義"
+            assert a != 5, f"cycle={cycle}: a={a} == b=5 （制約違反）"
+        # ハードコード値（seed=42, range 0-10, a != 5）をリテラルで確認（Windows/Linux 同一）
+        assert stim.get(3)["a"] == 10, f"cycle3: a={stim.get(3)['a']} != 10"
+        assert stim.get(4)["a"] == 1,  f"cycle4: a={stim.get(4)['a']} != 1"
+        assert stim.get(5)["a"] == 0,  f"cycle5: a={stim.get(5)['a']} != 0"
+
+    def test_persistent_b_zero_a_not_zero(self):
+        """b が一度も set されない場合、初期値 0 が persistent_state に入り a != 0 になること。
+
+        Fix 1: persistent_state を全 input ports = 0 で初期化する。
+        これがないと制約 'a != b' 評価時に b が未定義で E_CONSTRAINT_EXPR になる。
+        """
+        inputs = [InputEntry(at=(1, 5), random_spec={"a": {"range": [0, 3]}})]
+        # b は一度も set されない → 初期値 0 がコンテキストに入る
+        stim = StimulusSchedule(inputs, 5, seed=42, constraints=["a != b"],
+                                signal_widths={"a": 8, "b": 8})
+        # a は 0 (= b の初期値) にならない
+        for cycle in range(1, 6):
+            vals = stim.get(cycle)
+            a = vals.get("a")
+            assert a is not None, f"cycle={cycle}: a が未定義"
+            assert a != 0, f"cycle={cycle}: a={a} は b=0 と等しい（制約違反）"
+        # ハードコード値（seed=42, range 0-3, a != 0）をリテラルで確認
+        assert stim.get(1)["a"] == 2, f"cycle1: {stim.get(1)['a']}"
+        assert stim.get(2)["a"] == 1, f"cycle2: {stim.get(2)['a']}"
+        assert stim.get(3)["a"] == 1, f"cycle3: {stim.get(3)['a']}"
+
+    def test_constraint_a_plus_b_less_than_8_literal(self):
+        """seed=42、制約 a+b<8 での具体的な値列をリテラルで確認（棄却が起きる制約）。
+
+        a+b<16 は seed=42 の値列が全部 <16 なので棄却は起きない。
+        a+b<8 はより厳しく実際に棄却が発生する → RNG 消費が多く値が変わる。
+        """
+        inputs = [InputEntry(at=(1, 5), random_spec={"a": {"range": [0, 15]}, "b": {"range": [0, 15]}})]
+        stim = StimulusSchedule(inputs, 5, seed=42, constraints=["a + b < 8"],
+                                signal_widths={"a": 8, "b": 8})
+        # seed=42, a+b<8 でのリテラル値（Windows/Linux 両方で同一）
+        expected = [(3, 0), (3, 2), (0, 2), (0, 6), (0, 5)]
+        for cycle, (ea, eb) in enumerate(expected, 1):
+            vals = stim.get(cycle)
+            assert vals["a"] == ea, f"cycle={cycle}: a={vals['a']} != {ea}"
+            assert vals["b"] == eb, f"cycle={cycle}: b={vals['b']} != {eb}"
+            assert ea + eb < 8, f"constraint violated: {ea}+{eb}={ea+eb}"
+
+    def test_signal_width_masking_signed(self):
+        """signed 4-bit マスクで値が負に解釈されて制約 sv < 0 が成功すること。
+
+        range [8, 15] は unsigned では 8-15 (all >= 0)、
+        signed 4-bit では 8=−8, 9=−7, ..., 15=−1 (all < 0)。
+        signal_signed=True なら sv < 0 は必ず成功する。
+        注: シグナル名として 'x' は SV 式パーサの不定値リテラルと衝突するため使わない。
+        """
+        inputs = [InputEntry(at=1, random_spec={"sv": {"range": [8, 15]}})]
+        # signed 4-bit: range [8,15] → masked to [-8,-7,...,-1] → all < 0
+        stim_signed = StimulusSchedule(
+            inputs, 1, seed=0, constraints=["sv < 0"],
+            signal_widths={"sv": 4}, signal_signed={"sv": True},
+        )
+        # E_CONSTRAINT にならずにサンプルが返ること（signed マスクで < 0 になっているため）
+        vals = stim_signed.get(1)
+        assert vals["sv"] is not None
+        assert vals["sv"] in range(8, 16), f"range 外: {vals['sv']}"
+
+    def test_signal_width_masking_unsigned_fails(self):
+        """unsigned マスクでは range [8,15] の sv<0 は E_CONSTRAINT になること。
+
+        signal_signed なしで sv<0 を評価すると sv は 8-15 (all > 0) なので満たせない。
+        """
+        inputs = [InputEntry(at=1, random_spec={"sv": {"range": [8, 15]}})]
+        # unsigned (default): range [8,15] → 8-15, none < 0
+        with pytest.raises(ConstraintError):
+            StimulusSchedule(
+                inputs, 1, seed=0, constraints=["sv < 0"],
+                signal_widths={"sv": 4},  # signal_signed は指定しない → unsigned
+                max_constraint_attempts=5,
+            )
+
+
+# ---------------------------------------------------------------------------
+# 2. YAML API テスト
+# ---------------------------------------------------------------------------
+
+class TestConstraintsYAML:
+
+    def test_top_level_constraints_apply(self, tmp_path):
+        """top-level constraints が全ケースに適用されること"""
+        spec = {**_base_spec_adder(),
+                "constraints": ["a + b < 200"],
+                "cases": [{"name": "c",
+                           "stimulus": [{"at": [1, 5], "random": {"a": {"range": [0, 127]}, "b": {"range": [0, 127]}}}],
+                           "expected": [{"at": 3, "check": {"y": 7}}]}]}
+        result, _, _ = _make_adder_spec(tmp_path, spec)
+        assert "E_CONSTRAINT" not in [e.code for e in result.errors]
+
+    def test_case_level_constraints(self, tmp_path):
+        """ケースレベルの constraints が動くこと"""
+        spec = {**_base_spec_adder(),
+                "cases": [{"name": "c",
+                           "constraints": ["a > b"],
+                           "stimulus": [{"at": [1, 5], "random": {"a": {"range": [0, 15]}, "b": {"range": [0, 15]}}}],
+                           "expected": [{"at": 3, "check": {"y": 7}}]}]}
+        result, _, _ = _make_adder_spec(tmp_path, spec)
+        assert "E_CONSTRAINT" not in [e.code for e in result.errors]
+
+    def test_impossible_constraint_returns_e_constraint(self, tmp_path):
+        """不可能な制約で E_CONSTRAINT エラーが返ること"""
+        spec = {**_base_spec_adder(),
+                "constraints": ["a > 1000"],
+                "cases": [{"name": "c",
+                           "stimulus": [{"at": 1, "random": {"a": {"range": [0, 15]}, "b": {"range": [0, 15]}}}],
+                           "expected": [{"at": 2, "check": {"y": 7}}]}]}
+        result, _, _ = _make_adder_spec(tmp_path, spec)
+        codes = [e.code for e in result.errors] + [e.code for cr in result.cases for e in cr.errors]
+        assert "E_CONSTRAINT" in codes
+        assert result.status == "ERROR"
+
+    def test_e_constraint_message_contains_cycle_and_constraint(self, tmp_path):
+        """E_CONSTRAINT のメッセージにサイクルと制約内容が含まれること"""
+        spec = {**_base_spec_adder(),
+                "constraints": ["a > 1000"],
+                "max_constraint_attempts": 5,
+                "cases": [{"name": "c",
+                           "stimulus": [{"at": 1, "random": {"a": {"range": [0, 15]}, "b": {"range": [0, 15]}}}],
+                           "expected": [{"at": 2, "check": {"y": 7}}]}]}
+        result, _, _ = _make_adder_spec(tmp_path, spec)
+        all_errors = list(result.errors) + [e for cr in result.cases for e in cr.errors]
+        cstr_err = next((e for e in all_errors if e.code == "E_CONSTRAINT"), None)
+        assert cstr_err is not None
+        assert "a > 1000" in cstr_err.message
+
+    def test_json_format_unchanged(self, tmp_path):
+        """--json 出力形式が変わらないこと（schema_version = "2"）"""
+        import json
+        spec = {**_base_spec_adder(),
+                "constraints": ["a + b < 200"],
+                "cases": [{"name": "c",
+                           "stimulus": [{"at": 1, "random": {"a": {"range": [0, 100]}, "b": {"range": [0, 100]}}}],
+                           "expected": [{"at": 2, "check": {"y": 7}}]}]}
+        sv_p = str(tmp_path / "adder.sv")
+        Path(sv_p).write_text(SV_ADDER, encoding="utf-8")
+        yaml_p = str(tmp_path / "spec.yaml")
+        with open(yaml_p, "w") as f:
+            yaml.dump(spec, f)
+        json_p = str(tmp_path / "result.json")
+        from click.testing import CliRunner
+        from deltasim.cli import main as cli_main
+        runner = CliRunner()
+        runner.invoke(cli_main, ["test", sv_p, "--spec", yaml_p, "--json", json_p])
+        d = json.loads(Path(json_p).read_text(encoding="utf-8"))
+        assert d["schema_version"] == "2"
+        assert "warnings" in d
+
+    def test_same_seed_reproducible_actual_values(self, tmp_path):
+        """seed 固定で実際に印加された入力値が再現すること（VCD で確認）"""
+        # 2回実行して VCD の中身を比較
+        spec = {**_base_spec_adder(cycles=5, seed=1234),
+                "constraints": ["a + b < 200"],
+                "cases": [{"name": "c",
+                           "stimulus": [{"at": [1, 5], "random": {"a": {"range": [0, 100]}, "b": {"range": [0, 100]}}}],
+                           "expected": [{"at": 3, "check": {"y": 7}}]}]}
+        sv_p = str(tmp_path / "adder.sv")
+        Path(sv_p).write_text(SV_ADDER, encoding="utf-8")
+        yaml_p = str(tmp_path / "spec.yaml")
+
+        # 同じ StimulusSchedule を2回作って値が同じか確認
+        from deltasim.tb.scenario import load_scenario, StimulusSchedule
+        with open(yaml_p, "w") as f:
+            yaml.dump(spec, f)
+        sc = load_scenario(yaml_p)
+        case = sc.cases[0]
+        inputs = case.inputs or sc.inputs
+
+        stim1 = StimulusSchedule(inputs, 5, seed=1234, constraints=["a + b < 200"])
+        stim2 = StimulusSchedule(inputs, 5, seed=1234, constraints=["a + b < 200"])
+        for cycle in range(1, 6):
+            assert stim1.get(cycle) == stim2.get(cycle), \
+                f"seed 固定で値が違う: cycle={cycle}: {stim1.get(cycle)} vs {stim2.get(cycle)}"
+
+    def test_random_signal_not_input_port_e_unknown_port(self, tmp_path):
+        """random に input でない信号名を書くと E_UNKNOWN_PORT（Fix 1）"""
+        spec = {**_base_spec_adder(),
+                "cases": [{"name": "c",
+                           "stimulus": [{"at": 1, "random": {"y": {"range": [0, 15]}}}],  # y は output
+                           "expected": [{"at": 2, "check": {"y": 7}}]}]}
+        result, _, _ = _make_adder_spec(tmp_path, spec)
+        codes = [e.code for e in result.errors] + [e.code for cr in result.cases for e in cr.errors]
+        assert "E_UNKNOWN_PORT" in codes
+
+    def test_internal_signal_in_random_e_unknown_port(self, tmp_path):
+        """random に内部信号名を書くと E_UNKNOWN_PORT"""
+        sv_p = str(tmp_path / "adder_int.sv")
+        Path(sv_p).write_text(SV_ADDER_INTERNAL, encoding="utf-8")
+        spec = {
+            "version": 1, "top": "adder_int",  # top を明示
+            "clock": {"signal": "clk", "period_ns": 10},
+            "reset": {"signal": "rst", "active_low": False, "duration_cycles": 1},
+            "sim": {"cycles": 3, "seed": 1},
+            "cases": [{"name": "c",
+                       "stimulus": [{"at": 1, "random": {"tmp": {"range": [0, 7]}}}],  # tmp は内部信号
+                       "expected": [{"at": 2, "check": {"y": 7}}]}],
+        }
+        yaml_p = str(tmp_path / "spec.yaml")
+        with open(yaml_p, "w") as f:
+            yaml.dump(spec, f)
+        result = ds.test([sv_p], spec=yaml_p)
+        codes = [e.code for e in result.errors] + [e.code for cr in result.cases for e in cr.errors]
+        assert "E_UNKNOWN_PORT" in codes
+
+    def test_unknown_signal_in_constraint_e_unknown_port(self, tmp_path):
+        """constraints で存在しない識別子を使うと E_UNKNOWN_PORT（Fix 2）"""
+        spec = {**_base_spec_adder(),
+                "constraints": ["nonexistent > 5"],  # 存在しないシグナル
+                "cases": [{"name": "c",
+                           "stimulus": [{"at": 1, "random": {"a": {"range": [0, 10]}, "b": {"range": [0, 10]}}}],
+                           "expected": [{"at": 2, "check": {"y": 7}}]}]}
+        result, _, _ = _make_adder_spec(tmp_path, spec)
+        codes = [e.code for e in result.errors] + [e.code for cr in result.cases for e in cr.errors]
+        assert "E_UNKNOWN_PORT" in codes, f"expected E_UNKNOWN_PORT but got: {codes}"
+
+    def test_w_unknown_key_not_triggered_by_constraints(self, tmp_path):
+        """constraints は既知キーなので W_UNKNOWN_KEY が出ないこと"""
+        spec = {**_base_spec_adder(),
+                "constraints": ["a < b"],
+                "cases": [{"name": "c",
+                           "stimulus": [{"at": 1, "random": {"a": {"range": [0, 10]}, "b": {"range": [0, 10]}}}],
+                           "expected": [{"at": 2, "check": {"y": 7}}]}]}
+        result, _, _ = _make_adder_spec(tmp_path, spec)
+        all_warnings = list(result.warnings) + [w for cr in result.cases for w in cr.warnings]
+        unk = [w for w in all_warnings if w.code == "W_UNKNOWN_KEY"]
+        assert unk == [], f"W_UNKNOWN_KEY が出た: {[w.message for w in unk]}"
+
+    def test_max_constraint_attempts_zero_raises(self, tmp_path):
+        """max_constraint_attempts=0 はエラーになること"""
+        from deltasim.tb.scenario import load_scenario, ScenarioError
+        spec = {**_base_spec_adder(),
+                "max_constraint_attempts": 0,
+                "cases": [{"name": "c", "expected": []}]}
+        yaml_p = str(tmp_path / "spec.yaml")
+        with open(yaml_p, "w") as f:
+            yaml.dump(spec, f)
+        with pytest.raises(ScenarioError, match="1 以上"):
+            load_scenario(yaml_p)

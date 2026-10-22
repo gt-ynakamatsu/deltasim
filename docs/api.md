@@ -1037,3 +1037,50 @@ result = ds.test(fl.files, spec="spec.yaml")
 
 CLI コマンドから呼ばれる内部ヘルパー。`sv_files` と `-f` ファイルを結合します。
 
+
+---
+
+## §18.5 新規 API
+
+### `find_top_candidates(mods, catalog=None) → List[str]`
+
+どこからもインスタンスされていないモジュール名のリストを返します（GUI から使用可能）。
+
+```python
+from deltasim.api import find_top_candidates, _parse_files
+mods, cat = _parse_files(["counter.sv", "tb.sv"])
+candidates = find_top_candidates(mods, cat)
+# → ["counter"]  (tb からインスタンスされている counter は除外)
+```
+
+`catalog` 引数は将来の拡張用（現在は未使用）。generate ブロック内のインスタンスも検索します。
+
+**関連エラーコード**: `E_AMBIGUOUS_TOP` — `--top` 省略時に候補が複数ある場合
+
+---
+
+## §18.5 `--log` オプション
+
+`run`・`test`・`gen`・`parse` に `--log PATH` を追加しました（既定: `deltasim.log`）。実行ログ（`$display` 出力等）を UTF-8・LF 改行で書き出します。
+
+---
+
+## §18.6 `constraints:` 制約付き乱数生成
+
+YAML スペックの `constraints:` に信号間の式を書くことで、乱数刺激の値を制約できます。
+
+```yaml
+constraints:
+  - "a + b < 16"
+  - "a != b"
+max_constraint_attempts: 10000  # 既定値、省略可
+```
+
+- リジェクションサンプリングで実装。制約を満たす値が `max_constraint_attempts` 回以内に見つからない場合は `E_CONSTRAINT` エラー。
+- `constraints:` はスペック全体（全ケースに適用）またはケースごとに指定できます。
+- 式は既存の SV 式パーサ（Python `eval` 不使用）で評価します。
+- 同じ `seed` なら Windows/Linux で同じ値列になります（`random.Random(seed)` を使用）。
+
+**関連エラーコード**:
+- `E_CONSTRAINT` — 制約を満たす値が見つからなかった
+- `E_CONSTRAINT_EXPR` — 制約式の構文エラーまたは未知の信号名

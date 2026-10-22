@@ -839,7 +839,7 @@ def _exec_initial_gen(stmt, engine: "SimEngine"):
                 vcd_path = getattr(engine, "_dumpfile_path", None)
                 if not vcd_path:
                     import os as _os
-                    vcd_path = _os.path.join(_os.getcwd(), "dumpvars.vcd")
+                    vcd_path = _os.path.join(_os.getcwd(), "dump.vcd")
                 try:
                     from deltasim.vcd.writer import VCDWriter
                     engine.vcd_writer = VCDWriter(vcd_path, engine.design)
