@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 import pytest
 
-EXAMPLES = os.path.join(os.path.dirname(__file__), "..", "examples")
+EXAMPLES = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "examples"))
 
 
 # ---------------------------------------------------------------------------
