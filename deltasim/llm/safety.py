@@ -51,16 +51,36 @@ _WRITE_OPTS_LONG: Tuple[str, ...] = (
 # 読み取りオプション（パスを取るが書き込みでないもの）
 # テストで click のコマンド定義と照合する
 _READ_OPTS_LONG: Tuple[str, ...] = (
-    "--spec",       # test: スペック YAML 読み取り（-s も）
     "--config",     # llm ask/draft-spec/explain: simconfig.yaml
 )
 _READ_OPTS_SHORT: Tuple[str, ...] = (
-    "-s",           # test: スペックファイル（--spec の短形式）
     "-f",           # すべて: ファイルリスト .f（読み取り）
 )
+
+# パスを取るが書き込みでも読み取りでもないオプション（フラグや非パス引数）
+# このリストに入れることで分類テストをパスできる
+_NON_PATH_OPTS: frozenset = frozenset({
+    # フラグ（bool、パスでない）
+    "--verbose", "-v", "--yes", "-y", "--force", "--no-browser",
+    "--no-tb", "--no-spec", "--strings",
+    "--json-events", "--record-all", "--no-color",
+    "--rst-active-high", "-i", "--interactive",
+    "--reload",
+    # 非パス文字列引数（名前、数値、コマンド等）
+    "--top", "-t", "--param", "-p", "--clk", "--rst",
+    "--cycles", "-n", "--reset-cycles", "--half-period",
+    "--seed", "--wave-mem", "--record",
+    "--case", "--filter-cases",
+    "--max-delta", "--max-loop",
+    "--host", "--port",
+    # LLM コマンド固有
+    "--rtl",
+    # gen --spec は書き込み側 (--spec/-s) に含む
+})
 _WRITE_OPTS_SHORT: Tuple[str, ...] = (
     "-o",   # run: VCD 出力 (--vcd 相当)
     "-s",   # gen/test: スペックファイル（test では読み取りだが safe 側に入れる）
+    "-d",   # gen: --out-dir の短形式
 )
 # すべての書き込みオプションの集合（長形式 + 短形式）
 _ALL_WRITE_OPTS: frozenset = frozenset(_WRITE_OPTS_LONG + _WRITE_OPTS_SHORT)

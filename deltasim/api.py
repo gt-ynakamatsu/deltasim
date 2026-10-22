@@ -465,14 +465,20 @@ def _run_one_case(
     cr.seed = eff_seed
 
     # §18.5 E_UNKNOWN_PORT: YAML に書かれた信号名がポートに存在するか検査
-    known_ports = set(design.signals.keys())
+    # stimulus の set: input ポートのみ許可
+    # expected の check: ポート（input/output）のみ許可（内部信号は不可）
+    input_ports = {n for n, info in design.signals.items() if info.direction == "input"}
+    all_ports    = {n for n, info in design.signals.items() if info.direction is not None}
+
     for entry in eff_inputs:
         for sig in (entry.set_values or {}):
-            if sig not in known_ports:
+            if sig not in input_ports:
+                in_all = sig in all_ports
+                hint = "output/inout ポートは stimulus で設定できません（force を使ってください）" \
+                    if in_all else f"既知の input ポート: {sorted(input_ports)}"
                 err = ErrorInfo(
                     code="E_UNKNOWN_PORT",
-                    message=f"ポート '{sig}' はモジュールに存在しません。"
-                            f"既知のポート: {sorted(known_ports)}",
+                    message=f"stimulus/set の '{sig}' は input ポートではありません。{hint}",
                     severity="error",
                 )
                 cr.status = "ERROR"
@@ -482,11 +488,11 @@ def _run_one_case(
                 return cr
     for entry in eff_expected:
         for sig in (entry.check or {}):
-            if sig not in known_ports:
+            if sig not in all_ports:
                 err = ErrorInfo(
                     code="E_UNKNOWN_PORT",
-                    message=f"ポート '{sig}' はモジュールに存在しません。"
-                            f"既知のポート: {sorted(known_ports)}",
+                    message=f"expected/check の '{sig}' はポートではありません。"
+                            f"既知のポート: {sorted(all_ports)}",
                     severity="error",
                 )
                 cr.status = "ERROR"
@@ -693,6 +699,9 @@ def _run_one_case(
                     drive_clock(1)    # posedge
                 elif off == hp and engine._clk:
                     drive_clock(0)    # negedge
+                    # §18.5: $monitor check after negedge (full time step done)
+                    from deltasim.sim.engine import _engine_check_monitor as _ecm
+                    _ecm(engine)
 
                 # §15.8: Record VCD and signal-change DB at this time
                 record_vcd_and_db(engine._time)
@@ -1397,23 +1406,32 @@ def _parse_files(files):
 def find_top_candidates(mods: list, catalog: dict = None) -> list:
     """§18.5: どこからもインスタンスされていないモジュール名のリストを返す。
 
-    GUI から使う公開 API。catalog が None なら mods 同士で判定する。
+    GUI から使う公開 API。catalog は将来の拡張用（現在は未使用）。
+    generate ブロック内のインスタンスも含めて検索する。
 
     Returns:
         インスタンスされていないモジュール名のリスト（候補）
     """
-    from deltasim.parser.ast_nodes import InstDecl
+    from deltasim.parser.ast_nodes import InstDecl, GenerateBlock
 
     all_names = {m.name for m in mods}
     if not all_names:
         return []
 
-    # instanced_by: どのモジュールからインスタンスされているか
-    instanced: set = set()
-    for m in mods:
-        for item in m.items:
+    def _collect(items, found):
+        for item in items:
             if isinstance(item, InstDecl):
-                instanced.add(item.module_name)
+                found.add(item.module_name)
+            elif isinstance(item, GenerateBlock):
+                _collect(item.items, found)
+            for attr in ("then_items", "else_items", "body_items"):
+                sub = getattr(item, attr, None)
+                if isinstance(sub, list):
+                    _collect(sub, found)
+
+    instanced = set()
+    for m in mods:
+        _collect(m.items, instanced)
     return sorted(all_names - instanced)
 
 

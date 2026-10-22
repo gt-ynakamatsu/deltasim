@@ -80,13 +80,13 @@ _LOG_OPT = click.option(
 
 
 def _write_log(log_path: str, lines: list) -> None:
-    """ログ行を log_path に書き出す（UTF-8・LF 改行）。"""
-    if not lines:
-        return
+    """ログ行を log_path に書き出す（UTF-8・LF 改行）。
+    lines が空でもファイルを作成する（実行の記録として）。
+    """
     try:
         from pathlib import Path
         Path(log_path).write_text(
-            "\n".join(lines) + "\n", encoding="utf-8", newline="\n"
+            "\n".join(lines) + ("\n" if lines else ""), encoding="utf-8", newline="\n"
         )
     except Exception as exc:
         click.echo(f"WARNING: ログ書き込み失敗 {log_path!r}: {exc}", err=True)
@@ -473,6 +473,7 @@ def parse_cmd(sv_files, filelist, log_path):
     for p in di.ports:
         click.echo(f"    {p.direction} {p.name} [{p.width}]")
     click.echo(f"  signals: {len(di.signals)}")
+    _write_log(log_path, [f"deltasim parse {di.module}: {di.status}"])
 
 
 # ---------------------------------------------------------------------------
