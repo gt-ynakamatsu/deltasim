@@ -1128,7 +1128,9 @@ def parse_string(
         parser._consume()
     if parser._at("EOF"):
         raise ParseError("No module declaration found")
-    return parser.parse_module()
+    mod = parser.parse_module()
+    mod.preproc_warnings = list(pp.warnings)  # §18.9: W_TIMESCALE 等
+    return mod
 
 
 def parse_file(path: str, defines=None, incdirs=None) -> Module:
@@ -1145,6 +1147,7 @@ def parse_file(path: str, defines=None, incdirs=None) -> Module:
     mod_filename = str(p)
     tokens = tokenize(source, mod_filename, source_map=source_map)
     parser = Parser(tokens, mod_filename)
+    _pp_warnings = list(pp.warnings)  # §18.9: W_TIMESCALE 等
     # Skip to 'module' keyword
     while not parser._at("module", "EOF"):
         parser._consume()
@@ -1152,4 +1155,5 @@ def parse_file(path: str, defines=None, incdirs=None) -> Module:
         raise ParseError("No module declaration found")
     mod = parser.parse_module()
     mod.source_file = mod_filename
+    mod.preproc_warnings = _pp_warnings  # §18.9: W_TIMESCALE 等
     return mod

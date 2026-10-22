@@ -635,11 +635,11 @@ class TestAmbiguousTop:
                       "module mod_b(input logic clk);\nendmodule\n")
         result = subprocess.run(
             [sys.executable, "-m", "deltasim", "parse", sv_a, sv_b],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True, text=True, encoding="utf-8", timeout=15,
         )
         # parse コマンドはエラー時に非ゼロ終了し stderr に E_AMBIGUOUS_TOP を出す
         assert result.returncode != 0, "should fail with ambiguous top"
-        assert "E_AMBIGUOUS_TOP" in result.stderr, \
+        assert "E_AMBIGUOUS_TOP" in (result.stderr or ""), \
             f"E_AMBIGUOUS_TOP expected in stderr: {result.stderr!r}"
 
     def test_api(self, tmp_path):
@@ -792,7 +792,7 @@ class TestE001:
         result = subprocess.run(
             [sys.executable, "-m", "deltasim", "parse",
              str(tmp_path / "ghost.sv")],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True, text=True, encoding="utf-8", timeout=15,
         )
         assert result.returncode != 0
         assert "E001" in result.stderr, \

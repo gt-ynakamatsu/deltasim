@@ -94,7 +94,7 @@ def load(
     result = DesignInfo(schema_version=SCHEMA_VERSION)
 
     try:
-        mods, cat = _parse_files(files, defines=defines, incdirs=incdirs)
+        mods, cat, _pp_warnings = _parse_files(files, defines=defines, incdirs=incdirs)
     except Exception as e:
         result.status = "ERROR"
         # §18.9: PreprocError には固有コードを保持する
@@ -131,6 +131,9 @@ def load(
     result.status = "PASS"
     result.module = design.module_name
     result.params = dict(design.params)
+    # §18.9: プリプロセッサ警告を DesignInfo.warnings に追加
+    if _pp_warnings:
+        result.warnings = list(result.warnings) + _pp_warnings
     result.ports = [
         PortInfo(
             name=name, direction=info.direction or "input",
@@ -319,6 +322,10 @@ def test(
 
     result.module = di.module
     design = di._design
+
+    # §18.9: プリプロセッサ警告を TestResult.warnings に追加
+    if di.warnings:
+        result.warnings = list(result.warnings) + di.warnings
 
     if vcd:
         scenario.sim.vcd = str(vcd)
@@ -1554,13 +1561,21 @@ def _build_record_set(design, scenario=None):
 
 def _parse_files(files, defines=None, incdirs=None):
     from deltasim.parser.parser import parse_file
+    from deltasim.result import WarningInfo
     mods = []
     cat = {}
+    pp_warnings: list = []
     for f in files:
         mod = parse_file(str(f), defines=defines, incdirs=incdirs)
         mods.append(mod)
         cat[mod.name] = mod
-    return mods, cat
+        # §18.9: プリプロセッサ警告を WarningInfo に変換して収集
+        for w in getattr(mod, "preproc_warnings", []):
+            pp_warnings.append(WarningInfo(
+                message=w.message, code=w.code,
+                file=w.file, line=w.line,
+            ))
+    return mods, cat, pp_warnings
 
 
 def find_top_candidates(mods: list, catalog: dict = None) -> list:

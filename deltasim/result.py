@@ -209,6 +209,7 @@ class DesignInfo:
     signals: List[SignalSpec] = field(default_factory=list)
     hierarchy: Optional[HierarchyNode] = None
     errors: List[ErrorInfo] = field(default_factory=list)
+    warnings: List[WarningInfo] = field(default_factory=list)  # §18.9: preproc
     # Private: internal ElabDesign (not serialised)
     _design: Any = field(default=None, repr=False, compare=False)
     _catalog: Any = field(default=None, repr=False, compare=False)

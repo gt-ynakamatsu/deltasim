@@ -7,6 +7,14 @@
 
 ## [0.3.0+] — 開発中（§18.2 -f ファイルリスト + §18 対話デバッグ）
 
+### 追加（§18.9.1 プリプロセッサ警告 → JSON warnings[]）
+
+- `W_TIMESCALE`（`` `timescale `` 指令）と `W_UNKNOWN_DIRECTIVE``（非対応指令）が
+  `deltasim test --json` の `warnings[]` に出力されるようになった（§18.9.1）。
+  - 要素の形式は既存の `W_FILELIST_OPT`/`W_UNKNOWN_KEY` と同じ (`code`/`message`/`file`/`line`)
+  - Python API の `TestResult.warnings` にも同じ内容が入る
+  - JSON のトップレベルキー集合は変わらない
+
 ### 追加（§18.9 プリプロセッサ）
 
 - **`deltasim/preproc.py`: SystemVerilog プリプロセッサを実装**

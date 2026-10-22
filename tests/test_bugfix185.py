@@ -21,7 +21,7 @@ class TestFindTopCandidates:
     def test_counter_is_candidate(self):
         """counter.sv の counter が top 候補になること"""
         from deltasim.api import _parse_files
-        mods, cat = _parse_files([COUNTER_SV])
+        mods, cat, _ = _parse_files([COUNTER_SV])
         candidates = find_top_candidates(mods, cat)
         assert "counter" in candidates
 
@@ -544,7 +544,7 @@ class TestFindTopCandidatesGenerate:
         )
         Path(sv_b).write_text("module mod_b(input logic y); endmodule\n")
         from deltasim.api import _parse_files, find_top_candidates
-        mods, cat = _parse_files([sv_a, sv_b])
+        mods, cat, _ = _parse_files([sv_a, sv_b])
         candidates = find_top_candidates(mods, cat)
         # mod_b は generate 内でインスタンスされているので top 候補外
         assert "mod_a" in candidates
