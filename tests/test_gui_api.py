@@ -1592,21 +1592,25 @@ class TestAutoTempVcd:
 
     def test_spec_with_sim_vcd_takes_priority(self, client, tmp_path):
         """spec に sim.vcd がある場合はそのパスが優先されること"""
+        import yaml as _yaml
         from deltasim.gui.filesec import add_extra_root
         add_extra_root(tmp_path)
 
         explicit_vcd = str(tmp_path / "explicit.vcd")
-        yaml_content = f"""version: 1
-top: counter
-clock: {{signal: clk, period_ns: 10}}
-reset: {{signal: rst_n, active_low: true, duration_cycles: 10}}
-sim: {{cycles: 5, seed: 0, vcd: "{explicit_vcd}"}}
-expected:
-  - at: 1
-    check: {{count: 0}}
-"""
+        # yaml.dump() でパスを正しくエスケープして書き出す（Windows バックスラッシュ対応）
+        spec_data = {
+            "version": 1,
+            "top": "counter",
+            "clock": {"signal": "clk", "period_ns": 10},
+            "reset": {"signal": "rst_n", "active_low": True, "duration_cycles": 10},
+            "sim": {"cycles": 5, "seed": 0, "vcd": explicit_vcd},
+            "expected": [{"at": 1, "check": {"count": 0}}],
+        }
         spec_path = str(tmp_path / "sim_vcd_spec.yaml")
-        Path(spec_path).write_text(yaml_content)
+        Path(spec_path).write_text(
+            _yaml.dump(spec_data, allow_unicode=True, default_flow_style=False),
+            encoding="utf-8",
+        )
 
         res = client.post("/api/test", json={
             "sv_files": [COUNTER_SV],
@@ -1614,9 +1618,11 @@ expected:
         })
         assert res.status_code == 200
         data = res.json()
-        # spec の sim.vcd が優先されること
-        assert data.get("vcd_path") == explicit_vcd, (
-            f"spec の sim.vcd が優先されるべき。実際: {data.get('vcd_path')}"
+        # spec の sim.vcd が優先されること（パスを正規化して比較）
+        import os
+        actual = data.get("vcd_path") or ""
+        assert os.path.normcase(actual) == os.path.normcase(explicit_vcd), (
+            f"spec の sim.vcd が優先されるべき。実際: {actual!r}, 期待: {explicit_vcd!r}"
         )
 
     def test_explicit_vcd_out_overrides_spec(self, client, tmp_path):
