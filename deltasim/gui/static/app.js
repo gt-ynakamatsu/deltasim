@@ -43,6 +43,7 @@ const state = {
   errorLines: [],
   browserPath: null,
   browserSelected: null,
+  browserMode: "file",  // §18.4.2: "file"（通常）または "folder"（フォルダ選択）
   sigPickerSelected: new Set(),  // 信号ピッカーで選択中
   // デバッグパネル
   debugSession: null,
@@ -86,6 +87,11 @@ const dom = {
   btnWavesetSaveClose: $("btn-waveset-save-close"),
   btnWavesetSaveCancel: $("btn-waveset-save-cancel"),
   btnWavesetSaveOk: $("btn-waveset-save-ok"),
+  // 波形セット読込ダイアログ（§18.4.2）
+  wavesetLoadOverlay: $("waveset-load-overlay"),
+  wavesetLoadList: $("waveset-load-list"),
+  btnWavesetLoadClose: $("btn-waveset-load-close"),
+  btnWavesetLoadCancel: $("btn-waveset-load-cancel"),
   // 生成保存ダイアログ
   genSaveOverlay: $("gen-save-overlay"),
   genSaveDir: $("gen-save-dir"),
@@ -95,6 +101,9 @@ const dom = {
   btnGenSaveClose: $("btn-gen-save-close"),
   btnGenSaveCancel: $("btn-gen-save-cancel"),
   btnGenSaveOk: $("btn-gen-save-ok"),
+  btnGenDirBrowse: $("btn-gen-dir-browse"),
+  // ファイルブラウザのフォルダ選択ボタン（§18.4.2）
+  btnBrowserSelectFolder: $("btn-browser-select-folder"),
   btnZoomIn: $("btn-zoom-in"),
   btnZoomOut: $("btn-zoom-out"),
   btnZoomFit: $("btn-zoom-fit"),
@@ -1290,6 +1299,9 @@ function renderSignalNames() {
 
     const radix = state.signalRadix[name] || state.radix;
     const isActive = state.activeSignal === name;
+    // §18.4.2: VCD に無い信号は灰色表示
+    const inVcd = !state.vcdIndex?.signals || name in (state.vcdIndex?.signals ?? {});
+    if (!inVcd) row.classList.add("sig-vcd-missing");
 
     row.innerHTML = `
       <button class="sig-btn sig-btn-up" title="上へ" ${idx === 0 ? "disabled" : ""}>▴</button>
@@ -1412,6 +1424,11 @@ async function searchEdge(direction) {
     log("VCD と検索対象信号を選択してください", "log-warn");
     return;
   }
+  // §18.4.2: VCD に無い信号はスキップ
+  if (state.vcdIndex?.signals && !(state.activeSignal in (state.vcdIndex?.signals ?? {}))) {
+    log(`${state.activeSignal} は VCD に含まれていません（エッジ検索をスキップ）`, "log-warn");
+    return;
+  }
   const edgeType = dom.edgeTypeSelect?.value ?? "any";
   const fromNs = state.cursorA >= 0 ? state.cursorA : 0;
   try {
@@ -1460,28 +1477,79 @@ async function execWavesetSave() {
   }
 }
 
+// =========================================================================
+// 波形セット読込ダイアログ（§18.4.2: window.prompt を廃止してダイアログ一覧に）
+// =========================================================================
+
 async function openWavesetLoadMenu() {
   const svPaths = state.project.svFiles.map(f => f.path);
   const spec = state.project.specFile?.path ?? null;
   if (!svPaths.length) { log("プロジェクトが未選択です", "log-warn"); return; }
   try {
     const data = await api.wavesetGet(svPaths, spec);
-    const sets = data.sets ?? [];
-    if (!sets.length) { log("保存済みのセットがありません", "log-warn"); return; }
-    // シンプルな選択: window.prompt で名前を入力
-    const names = sets.map(s => s.name).join(", ");
-    const chosen = window.prompt(`読み込むセット名:\n${names}`, sets[0].name);
-    if (!chosen) return;
-    const found = sets.find(s => s.name === chosen);
-    if (!found) { log(`セットが見つかりません: ${chosen}`, "log-warn"); return; }
-    state.selectedSignals = [...(found.signals ?? [])];
-    state.signalRadix = { ...(found.radix ?? {}) };
-    renderSignalNames();
-    if (state.vcdPath) await fetchWaveRange();
-    log(`✓ 波形セット「${chosen}」を読み込みました`, "log-info");
+    _renderWavesetLoadList(data.sets ?? []);
+    if (dom.wavesetLoadOverlay) dom.wavesetLoadOverlay.style.display = "flex";
   } catch (e) {
     log(`セット読込エラー: ${e.message}`, "log-error");
   }
+}
+
+function _renderWavesetLoadList(sets) {
+  if (!dom.wavesetLoadList) return;
+  if (!sets.length) {
+    dom.wavesetLoadList.innerHTML = `
+      <div style="padding:20px;text-align:center;color:#8888aa;">
+        保存済みのセットがありません。<br>
+        <span style="font-size:10px;">💾 ボタンで現在の信号リストを保存できます。</span>
+      </div>`;
+    return;
+  }
+  dom.wavesetLoadList.innerHTML = "";
+  sets.forEach(s => {
+    const row = document.createElement("div");
+    row.className = "waveset-item";
+    const sigCount = (s.signals ?? []).length;
+    const radixCount = Object.keys(s.radix ?? {}).length;
+    row.innerHTML = `
+      <div class="waveset-item-info">
+        <div class="waveset-item-name">${escHtml(s.name)}</div>
+        <div class="waveset-item-meta">
+          ${sigCount} 信号${radixCount > 0 ? ` · radix設定 ${radixCount} 件` : ""}
+        </div>
+      </div>
+      <div class="waveset-item-actions">
+        <button class="btn btn-primary ws-load-btn" style="padding:3px 12px;font-size:11px;">読込</button>
+        <button class="btn btn-danger ws-del-btn" style="padding:3px 10px;font-size:11px;" title="削除">🗑</button>
+      </div>
+    `;
+    row.querySelector(".ws-load-btn").addEventListener("click", () => {
+      _applyWaveset(s);
+      if (dom.wavesetLoadOverlay) dom.wavesetLoadOverlay.style.display = "none";
+    });
+    row.querySelector(".ws-del-btn").addEventListener("click", async () => {
+      if (!window.confirm(`「${s.name}」を削除しますか？`)) return;
+      try {
+        const svPaths = state.project.svFiles.map(f => f.path);
+        const spec = state.project.specFile?.path ?? null;
+        await api.wavesetDel(svPaths, spec, s.name);
+        log(`セット「${s.name}」を削除しました`, "log-info");
+        // リストを再読込
+        const data = await api.wavesetGet(svPaths, spec);
+        _renderWavesetLoadList(data.sets ?? []);
+      } catch (e) {
+        log(`削除エラー: ${e.message}`, "log-error");
+      }
+    });
+    dom.wavesetLoadList.appendChild(row);
+  });
+}
+
+function _applyWaveset(s) {
+  state.selectedSignals = [...(s.signals ?? [])];
+  state.signalRadix = { ...(s.radix ?? {}) };
+  renderSignalNames();
+  if (state.vcdPath) fetchWaveRange().catch(() => {});
+  log(`✓ 波形セット「${s.name}」を読み込みました`, "log-info");
 }
 
 // =========================================================================
@@ -1550,9 +1618,27 @@ function drawWaveform() {
   }
 
   sigs.forEach((name, si) => {
+    const y0 = WAVE_RULER_H + si * WAVE_ROW_H;
     const sigData = state.waveformData.signals[name];
-    if (!sigData) return;
-    _drawSignal(ctx, sigData, WAVE_RULER_H + si * WAVE_ROW_H, WAVE_ROW_H, totalW, endTime, pxPerNs, name);
+    if (!sigData) {
+      // §18.4.2: VCD にない信号: 灰色行に「VCDにありません」テキスト
+      ctx.fillStyle = "rgba(80, 80, 100, 0.18)";
+      ctx.fillRect(0, y0, totalW, WAVE_ROW_H - 1);
+      ctx.fillStyle = "#55556a";
+      ctx.strokeStyle = "#3d3d5c";
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      ctx.moveTo(0, y0 + (WAVE_ROW_H - 1) / 2);
+      ctx.lineTo(totalW, y0 + (WAVE_ROW_H - 1) / 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.font = "9px monospace"; ctx.textAlign = "center";
+      ctx.fillText("VCDにありません", Math.min(totalW / 2, 200), y0 + WAVE_ROW_H / 2 + 3.5);
+      ctx.textAlign = "left";
+      return;
+    }
+    _drawSignal(ctx, sigData, y0, WAVE_ROW_H, totalW, endTime, pxPerNs, name);
   });
 
   _drawCursor(ctx, state.cursorA, "#f9c74f", totalH);
@@ -1702,13 +1788,30 @@ function setRadix(r) {
 // ファイルブラウザ
 // =========================================================================
 
-async function openFileBrowser() {
+// =========================================================================
+// ファイルブラウザ（§18.4.2: フォルダ選択モードを追加）
+// =========================================================================
+
+async function openFileBrowser(mode = "file", initialPath = null) {
+  state.browserMode = mode;
+  // フォルダ選択モード: ボタン表示を切替
+  if (dom.btnBrowserOpen) dom.btnBrowserOpen.style.display = mode === "file" ? "" : "none";
+  if (dom.btnBrowserSelectFolder) dom.btnBrowserSelectFolder.style.display = mode === "folder" ? "" : "none";
+
   dom.fileBrowserOverlay.style.display = "flex";
-  if (!state.browserPath) {
-    const roots = await api.browseRoots();
-    if (roots.roots.length > 0) state.browserPath = roots.roots[0];
+
+  // 開始パス: initialPath > プロジェクトフォルダ > browserPath > roots[0]
+  let startPath = initialPath;
+  if (!startPath && mode === "folder") {
+    const firstSv = state.project.svFiles[0]?.path;
+    if (firstSv) startPath = firstSv.replace(/[\\/][^\\/]+$/, "");
   }
-  await browseTo(state.browserPath);
+  if (!startPath) startPath = state.browserPath;
+  if (!startPath) {
+    const roots = await api.browseRoots();
+    if (roots.roots.length > 0) startPath = roots.roots[0];
+  }
+  await browseTo(startPath);
 }
 
 async function browseTo(path) {
@@ -1737,6 +1840,11 @@ function renderBrowser(currentPath, entries) {
     up.addEventListener("click", () => browseTo(parentPath));
     dom.browserBody.appendChild(up);
   }
+  // フォルダ選択モード: 現在フォルダのパスを表示
+  if (state.browserMode === "folder") {
+    dom.browserSelectedPath.textContent = `📁 ${currentPath}`;
+  }
+
   entries.forEach(entry => {
     const el = document.createElement("div");
     const ext = entry.ext ?? "";
@@ -1745,18 +1853,44 @@ function renderBrowser(currentPath, entries) {
     el.innerHTML = `<span class="fb-icon"></span><span class="fb-name">${escHtml(entry.name)}</span>`;
     el.title = entry.path;
     el.addEventListener("click", e => {
-      if (entry.type === "dir") { browseTo(entry.path); return; }
+      if (entry.type === "dir") {
+        browseTo(entry.path);
+        return;
+      }
+      if (state.browserMode === "folder") return;  // フォルダモードではファイル選択不可
       document.querySelectorAll("#browser-body .fb-entry").forEach(el2 => el2.classList.remove("selected"));
       el.classList.add("selected");
       state.browserSelected = entry;
       dom.browserSelectedPath.textContent = entry.path;
     });
-    el.addEventListener("dblclick", () => { if (entry.type === "dir") return; state.browserSelected = entry; confirmBrowserOpen(); });
+    el.addEventListener("dblclick", () => {
+      if (entry.type === "dir") return;
+      if (state.browserMode === "folder") return;
+      state.browserSelected = entry;
+      confirmBrowserOpen();
+    });
     dom.browserBody.appendChild(el);
   });
 }
 
-function closeBrowser() { dom.fileBrowserOverlay.style.display = "none"; }
+function closeBrowser() {
+  dom.fileBrowserOverlay.style.display = "none";
+  // ボタン表示を通常モードに戻す
+  if (dom.btnBrowserOpen) dom.btnBrowserOpen.style.display = "";
+  if (dom.btnBrowserSelectFolder) dom.btnBrowserSelectFolder.style.display = "none";
+  state.browserMode = "file";
+}
+
+function confirmFolderSelect() {
+  // §18.4.2: フォルダ選択モードで「このフォルダを選択」
+  const folder = state.browserPath;
+  closeBrowser();
+  if (dom.genSaveDir) {
+    dom.genSaveDir.value = folder;
+    _updateGenSavePreview();
+  }
+  log(`フォルダを選択: ${folder}`, "log-info");
+}
 
 async function confirmBrowserOpen() {
   const entry = state.browserSelected;
@@ -2123,6 +2257,11 @@ if (dom.btnWavesetSaveClose) dom.btnWavesetSaveClose.addEventListener("click", (
 if (dom.btnWavesetSaveCancel) dom.btnWavesetSaveCancel.addEventListener("click", () => { dom.wavesetSaveOverlay.style.display = "none"; });
 if (dom.btnWavesetSaveOk) dom.btnWavesetSaveOk.addEventListener("click", execWavesetSave);
 
+// 波形セット読込ダイアログ（§18.4.2）
+if (dom.btnWavesetLoadClose) dom.btnWavesetLoadClose.addEventListener("click", () => { dom.wavesetLoadOverlay.style.display = "none"; });
+if (dom.btnWavesetLoadCancel) dom.btnWavesetLoadCancel.addEventListener("click", () => { dom.wavesetLoadOverlay.style.display = "none"; });
+if (dom.wavesetLoadOverlay) dom.wavesetLoadOverlay.addEventListener("click", e => { if (e.target === dom.wavesetLoadOverlay) dom.wavesetLoadOverlay.style.display = "none"; });
+
 // 生成保存ダイアログ
 if (dom.btnGenSaveClose) dom.btnGenSaveClose.addEventListener("click", () => { dom.genSaveOverlay.style.display = "none"; });
 if (dom.btnGenSaveCancel) dom.btnGenSaveCancel.addEventListener("click", () => { dom.genSaveOverlay.style.display = "none"; });
@@ -2130,6 +2269,9 @@ if (dom.btnGenSaveOk) dom.btnGenSaveOk.addEventListener("click", handleGenSaveOk
 if (dom.genSaveDir) dom.genSaveDir.addEventListener("input", _updateGenSavePreview);
 if (dom.genSaveTb) dom.genSaveTb.addEventListener("change", _updateGenSavePreview);
 if (dom.genSaveSpec) dom.genSaveSpec.addEventListener("change", _updateGenSavePreview);
+// §18.4.2: 保存先フォルダブラウザ
+if (dom.btnGenDirBrowse) dom.btnGenDirBrowse.addEventListener("click", () => openFileBrowser("folder"));
+if (dom.btnBrowserSelectFolder) dom.btnBrowserSelectFolder.addEventListener("click", confirmFolderSelect);
 
 dom.btnBrowserClose.addEventListener("click", closeBrowser);
 dom.btnBrowserCancel.addEventListener("click", closeBrowser);
