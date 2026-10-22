@@ -437,30 +437,20 @@ class TestE2ECli:
     """CLI 経由で stdin からスクリプトを流す E2E テスト"""
 
     def _run_cli_script(self, sv_path: str, script: str):
-        """CLI を通じてスクリプトを実行し (exit_code, stdout, stderr) を返す。"""
-        import subprocess, sys, shutil
-        # deltasim コマンドを探す（PATH から、または pip インストール済み）
-        cmd = shutil.which("deltasim")
-        if cmd is None:
-            # フォールバック: CliRunner を使う（サブプロセス不使用）
-            return self._run_cli_runner(sv_path, script)
+        """CLI を通じてスクリプトを実行し (exit_code, stdout, stderr) を返す。
+
+        PATH に deltasim が入っているかに依存しないよう、常に
+        ``sys.executable -m deltasim`` で起動する。
+        """
+        import subprocess, sys
         proc = subprocess.run(
-            [cmd, "sim", sv_path],
+            [sys.executable, "-m", "deltasim", "sim", sv_path],
             input=script,
             capture_output=True,
             text=True,
             timeout=15,
         )
         return proc.returncode, proc.stdout, proc.stderr
-
-    def _run_cli_runner(self, sv_path: str, script: str):
-        """CliRunner 経由（deltasim コマンドが PATH にない場合のフォールバック）。"""
-        from click.testing import CliRunner
-        from deltasim.cli import main as cli_main
-        import io
-        runner = CliRunner(mix_stderr=False)
-        result = runner.invoke(cli_main, ["sim", sv_path], input=script)
-        return result.exit_code, result.output, result.stderr if hasattr(result, "stderr") else ""
 
     def test_run_and_examine(self):
         """run + examine が stdout に出力されること"""
@@ -505,22 +495,15 @@ class TestE2ECli:
 
     def test_run_i_flag(self):
         """`deltasim run -i` も同じように動作すること"""
-        import subprocess, shutil
+        import subprocess, sys
         script = "run 20ns\nexamine count\nquit\n"
-        cmd = shutil.which("deltasim")
-        if cmd is None:
-            from click.testing import CliRunner
-            from deltasim.cli import main as cli_main
-            runner = CliRunner(mix_stderr=False)
-            result = runner.invoke(cli_main, ["run", "-i", COUNTER_SV], input=script)
-            assert result.exit_code == 0, f"exit_code={result.exit_code}\n{result.output}"
-            assert "count" in result.output
-            return
         proc = subprocess.run(
-            [cmd, "run", "-i", COUNTER_SV],
+            [sys.executable, "-m", "deltasim", "run", "-i", COUNTER_SV],
             input=script, capture_output=True, text=True, timeout=15,
         )
-        assert proc.returncode == 0
+        assert proc.returncode == 0, (
+            f"exit_code={proc.returncode}\nstdout={proc.stdout}\nstderr={proc.stderr}"
+        )
         assert "count" in proc.stdout
 
     def test_when_in_script(self):
