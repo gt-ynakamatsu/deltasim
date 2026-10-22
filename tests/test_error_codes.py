@@ -50,9 +50,11 @@ def _cli_test(sv_p: str, spec_p: str, tmp: Path, extra_args=()) -> dict:
     subprocess.run(
         [sys.executable, "-m", "deltasim", "test",
          str(sv_p), "--spec", str(spec_p), "--json", json_p, *extra_args],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, encoding="utf-8", timeout=30,
     )
-    return json.loads(Path(json_p).read_text())
+    # Windows では open() のデフォルトエンコーディングが cp932/cp1252 になるため
+    # 明示的に utf-8 を指定する
+    return json.loads(Path(json_p).read_text(encoding="utf-8"))
 
 
 def _api_test(sv_p: str, spec_p: str, **kw) -> ds.TestResult:
