@@ -962,6 +962,7 @@ class GenRequest(BaseModel):
     out_dir: Optional[str] = None
     tb_path: Optional[str] = None
     spec_path: Optional[str] = None
+    force: bool = False  # 既存ファイルを上書きする場合 True
 
     @field_validator("sv_files")
     @classmethod
@@ -974,11 +975,35 @@ class GenRequest(BaseModel):
 
 @app.post("/api/gen")
 async def api_gen(req: GenRequest):
-    """テストベンチ SV と YAML スペックのスケルトンを生成する（§18.4 生成ボタン）。
+    """テストベンチ SV と YAML スペックのスケルトンを生成する（§18.4 A: 生成ボタン）。
 
-    out_dir / tb_path / spec_path を省略するとファイルを書き出さず文字列で返す。
+    ファイルモード（out_dir / tb_path / spec_path のいずれかを指定）:
+      - force=False（既定）: 既存ファイルがあれば 409 を返す。
+        レスポンス: {"conflict": ["path1", "path2"], "detail": "..."}
+      - force=True: 既存ファイルを上書きする。
+
+    文字列モード（すべて省略）: ファイルを書き出さず tb_sv / spec_yaml 文字列を返す。
     """
     from deltasim.gui.adapter import gen
+    from deltasim.gui.filesec import PathSecurityError, safe_path
+
+    is_file_mode = any([req.out_dir, req.tb_path, req.spec_path])
+
+    if is_file_mode and not req.force:
+        # 書き出し先を事前に確認して 409 を返す
+        import deltasim.api as _ds
+        di = _ds.load([str(f) for f in req.sv_files], top=req.top, params=req.params)
+        if di.status == "PASS":
+            top_name = di.module
+            out = Path(req.out_dir) if req.out_dir else Path(".")
+            tb_out = Path(req.tb_path) if req.tb_path else out / f"{top_name}_tb.sv"
+            spec_out = Path(req.spec_path) if req.spec_path else out / f"{top_name}_spec.yaml"
+            conflicts = [str(p) for p in [tb_out, spec_out] if p.exists()]
+            if conflicts:
+                return JSONResponse(
+                    status_code=409,
+                    content={"conflict": conflicts, "detail": "ファイルが既に存在します。上書きするには force=true を指定してください。"},
+                )
 
     try:
         result = await asyncio.to_thread(
@@ -1101,3 +1126,111 @@ async def add_recent_project(req: RecentProjectEntry):
     }
     await asyncio.to_thread(add_recent, entry)
     return {"ok": True}
+
+# ---------------------------------------------------------------------------
+# /api/waveform/edge — エッジ検索（§18.4 B2）
+# ---------------------------------------------------------------------------
+
+@app.get("/api/waveform/edge")
+async def waveform_edge(
+    path: str = Query(..., description="VCD ファイルパス"),
+    signal: str = Query(..., description="検索対象の信号名"),
+    from_ns: int = Query(0, description="検索の基準時刻 (ns)"),
+    direction: str = Query("next", description="'next' または 'prev'"),
+    edge: str = Query("any", description="'any' / 'rising' / 'falling'"),
+):
+    """指定信号の次/前のエッジ時刻を返す（§18.4 B2 エッジ検索）。
+
+    Returns: {"signal": "...", "time_ns": N, "found": true/false}
+    """
+    from deltasim.gui.vcd_reader import read_vcd_range, VCDReadError
+    from deltasim.gui.waveutil import find_edge
+
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail=f"VCD ファイルが見つかりません: {path!r}")
+
+    try:
+        data = await asyncio.to_thread(read_vcd_range, path, signal_names=[signal])
+    except VCDReadError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    sig_data = data.get("signals", {}).get(signal)
+    if sig_data is None:
+        raise HTTPException(status_code=404, detail=f"信号が見つかりません: {signal!r}")
+
+    changes = sig_data.get("changes", [])  # [[t, v], ...]
+    width = sig_data.get("width", 1)
+    result_ns = find_edge(changes, from_ns, direction, edge, width)
+
+    return {"signal": signal, "time_ns": result_ns, "found": result_ns is not None}
+
+
+# ---------------------------------------------------------------------------
+# /api/waveform/decode — 値デコード（§18.4 B3: 符号付き変換のサーバー側）
+# ---------------------------------------------------------------------------
+
+@app.get("/api/waveform/decode")
+async def waveform_decode(
+    value: str = Query(..., description="バイナリ文字列"),
+    width: int = Query(..., description="ビット幅"),
+    radix: str = Query("hex", description="'bin'/'hex'/'unsigned'/'signed'"),
+):
+    """バイナリ文字列を指定基数の表示文字列に変換する（テスト用・符号付き変換）。"""
+    from deltasim.gui.waveutil import fmt_value
+    if radix not in ("bin", "hex", "unsigned", "signed"):
+        raise HTTPException(status_code=422, detail=f"不正な radix: {radix!r}")
+    result = fmt_value(value, width, radix)
+    return {"value": value, "width": width, "radix": radix, "result": result}
+
+
+# ---------------------------------------------------------------------------
+# /api/waveset — 波形表示セット保存・読込（§18.4 B4）
+# ---------------------------------------------------------------------------
+
+class WavesetEntry(BaseModel):
+    sv_files: List[str]
+    spec: Optional[str] = None
+    name: str
+    signals: List[str]
+    radix: Dict[str, str] = {}
+
+
+class WavesetDeleteRequest(BaseModel):
+    sv_files: List[str]
+    spec: Optional[str] = None
+    name: str
+
+
+@app.get("/api/waveset")
+async def get_waveset(
+    sv_files: str = Query(..., description="SV ファイルパスのカンマ区切り"),
+    spec: Optional[str] = Query(None, description="スペックファイルパス"),
+):
+    """プロジェクトの波形表示セット一覧を返す（§18.4 B4）。"""
+    from deltasim.gui.waveset import load_wavesets
+    files = [f.strip() for f in sv_files.split(",") if f.strip()]
+    sets = await asyncio.to_thread(load_wavesets, files, spec)
+    return {"sets": sets}
+
+
+@app.post("/api/waveset")
+async def save_waveset_endpoint(req: WavesetEntry):
+    """波形表示セットを保存する（同名上書き）（§18.4 B4）。"""
+    from deltasim.gui.waveset import save_waveset
+    await asyncio.to_thread(
+        save_waveset,
+        req.sv_files, req.spec, req.name, req.signals, req.radix,
+    )
+    return {"ok": True, "name": req.name}
+
+
+@app.delete("/api/waveset")
+async def delete_waveset_endpoint(req: WavesetDeleteRequest):
+    """波形表示セットを名前で削除する（§18.4 B4）。"""
+    from deltasim.gui.waveset import delete_waveset
+    deleted = await asyncio.to_thread(
+        delete_waveset, req.sv_files, req.spec, req.name,
+    )
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"セットが見つかりません: {req.name!r}")
+    return {"ok": True, "name": req.name}

@@ -327,3 +327,66 @@ select.module-select { width: 100%; padding: 4px 6px; background: var(--surface2
 .dbg-log-line { color: var(--text-muted); }
 .dbg-log-hit  { color: var(--error); font-weight: bold; }
 .dbg-log-info { color: #60a5fa; }
+
+/* ===== §18.4 B1: 信号管理（並べ替え・削除・radix） ===== */
+.sig-name-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 2px;
+  border-bottom: 1px solid #2a2a40;
+  font-size: 11px;
+  cursor: default;
+}
+.sig-btn {
+  background: transparent;
+  border: none;
+  color: #6060a0;
+  cursor: pointer;
+  font-size: 9px;
+  padding: 1px 3px;
+  border-radius: 3px;
+  flex-shrink: 0;
+  line-height: 1;
+}
+.sig-btn:hover { background: #2a2a40; color: #e2e2f0; }
+.sig-btn:disabled { opacity: 0.3; cursor: default; }
+.sig-radix-btn {
+  font-size: 8px;
+  color: #7c6af7;
+  border: 1px solid #3d3d5c;
+  border-radius: 3px;
+  padding: 0px 3px;
+}
+.sig-radix-btn:hover { background: #2a2a40; }
+.sig-name-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  cursor: pointer;
+  padding: 0 2px;
+}
+.sig-active .sig-name-label,
+.sig-name-row .sig-name-label.sig-active {
+  color: #f9c74f;
+  font-weight: 700;
+}
+.sig-active { background: rgba(249, 199, 79, 0.08); }
+.sig-fail-highlight { background: rgba(248, 113, 113, 0.12); }
+.sig-btn-rm { color: #f87171; }
+.sig-btn-rm:hover { background: rgba(248,113,113,0.2); }
+
+/* ===== 信号追加ピッカー ===== */
+.sig-picker-row {
+  padding: 4px 8px;
+  cursor: pointer;
+  font-size: 11px;
+  color: var(--text);
+  border-radius: 4px;
+  font-family: var(--font-mono);
+}
+.sig-picker-row:hover { background: #2a2a40; }
+.sig-picker-row.selected { background: rgba(124,106,247,0.2); color: #c4b5fd; }
+.sig-picker-row.already-added { opacity: 0.5; }

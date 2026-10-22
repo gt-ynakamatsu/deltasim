@@ -78,7 +78,13 @@ RTL 読み込み後、「トップモジュール」セレクトに候補が表�
 
 ### 3.3 生成（⚙ 生成ボタン）
 
-RTL を読み込んだ状態で `⚙ 生成` をクリックすると、テストベンチ SV と YAML スペックのスケルトンを生成してエディタに表示します（ファイルには書き出しません）。
+RTL を読み込んだ状態で `⚙ 生成` をクリックすると、テストベンチ SV と YAML スペックのスケルトンを生成してエディタに表示します。
+
+生成後に「保存」ダイアログが開きます:
+- **保存ディレクトリ**: 既定はプロジェクトのフォルダ（SV ファイルのある場所）
+- **TB SV / スペック YAML**: 個別に保存するか選択可能
+- **既存ファイルがある場合**: 確認ダイアログが出ます。了承した場合のみ上書きします
+- 保存後は最近使ったプロジェクトに自動追加されます
 
 ### 3.4 テスト実行（▶ テスト実行）
 
@@ -112,11 +118,47 @@ RTL を読み込んだ状態で `⚙ 生成` をクリックすると、テス�
 |------|------|
 | クリック | カーソル A を配置 |
 | Shift+クリック | カーソル B を配置 |
-| ＋/－ | ズームイン/アウト |
-| ⊡ 全体 | 全体を表示 |
-| HEX/BIN/DEC | 表示基数を切替 |
+| ＋/－/⊡ | ズームイン/アウト/全体表示 |
+| HEX/BIN/DEC | 全体の表示基数を切替 |
 
 信号の値変化は遅延取得で描画します（最大 200 信号まで同時表示）。
+
+#### 信号の追加・削除・並べ替え
+
+- **＋信号** ボタン → 信号追加ピッカーが開く。VCD の信号一覧から選択して追加
+- 各信号行の **▴/▾** ボタン → 上下に移動
+- **✕** ボタン → 表示から削除
+- 信号名をクリック → その信号をエッジ検索のアクティブ信号として選択（黄色でハイライト）
+
+#### エッジ検索
+
+ツールバーの「エッジ:」セレクトで種別（任意/立上り/立下り）を選び、**◀/▶** ボタンで前後のエッジを探してカーソル A を移動します。
+
+アクティブ信号（信号名をクリックして選択）に対して検索を行います。
+
+#### 符号付き表示
+
+各信号行の基数ボタン（**HEX/BIN/U/S**）をクリックするたびに切り替わります:
+- **HEX**: 16進数（`0xFF`）
+- **BIN**: 2進数（`b11111111`）
+- **U**: 符号なし10進数
+- **S**: 符号付き10進数（2の補数。x/z を含む値はそのまま表示）
+
+#### 波形表示セットの保存・読込
+
+- **💾** ボタン → 現在の信号リストと各信号の基数設定を名前をつけて保存
+- **📂** ボタン → 保存済みのセットを読み込む
+
+保存先はユーザー設定ディレクトリ内のプロジェクトごとのファイルです:
+- Windows: `%APPDATA%\deltasim\wavesets\<project_hash>.json`
+- Linux: `~/.config/deltasim/wavesets/<project_hash>.json`
+
+#### FAIL 時の信号ハイライト
+
+テスト結果でケースを選択したとき:
+1. 失敗した check の対象信号（`checks[].signal`）が波形に未表示なら自動追加
+2. その信号行を赤くハイライト
+3. カーソル A を最初の失敗の `time_ns` にジャンプ
 
 ### 3.9 対話デバッグ（🔬 デバッグ）
 
@@ -193,11 +235,13 @@ POST /api/gen
 ```json
 {
   "sv_files": ["/path/to/counter.sv"],
-  "top": "counter"
+  "top": "counter",
+  "out_dir": null,
+  "force": false
 }
 ```
 
-**レスポンス（ファイル不要モード）**:
+**レスポンス（ファイル不要モード: `out_dir`/`tb_path`/`spec_path` を省略）**:
 ```json
 {
   "status": "PASS",
@@ -208,7 +252,86 @@ POST /api/gen
 }
 ```
 
-`out_dir`/`tb_path`/`spec_path` を指定するとファイルを書き出します。
+**ファイルモード（`out_dir` を指定）**:
+- `force=false`（既定）: 既存ファイルがある場合 **409** を返す
+  ```json
+  { "conflict": ["/path/counter_tb.sv"], "detail": "ファイルが既に存在します..." }
+  ```
+- `force=true`: 既存ファイルを上書きして書き出す
+  ```json
+  { "status": "PASS", "tb_path": "/path/counter_tb.sv", "spec_path": "/path/counter_spec.yaml" }
+  ```
+
+---
+
+### 4.10 エッジ検索
+
+```
+GET /api/waveform/edge?path=...&signal=clk&from_ns=100&direction=next&edge=rising
+```
+
+| パラメータ | 説明 |
+|-----------|------|
+| `path` | VCD ファイルパス |
+| `signal` | 対象信号名 |
+| `from_ns` | 基準時刻 (ns) |
+| `direction` | `next`（後方検索）または `prev`（前方検索） |
+| `edge` | `any`（任意変化）/ `rising`（L→H）/ `falling`（H→L） |
+
+**レスポンス**:
+```json
+{"signal": "clk", "time_ns": 110, "found": true}
+```
+
+---
+
+### 4.11 値デコード（符号付き変換）
+
+```
+GET /api/waveform/decode?value=1111&width=4&radix=signed
+```
+
+**レスポンス**:
+```json
+{"value": "1111", "width": 4, "radix": "signed", "result": "-1"}
+```
+
+`radix`: `bin` / `hex` / `unsigned` / `signed`
+
+---
+
+### 4.12 波形表示セット
+
+```
+GET /api/waveset?sv_files=/path/counter.sv&spec=/path/spec.yaml
+POST /api/waveset
+DELETE /api/waveset
+```
+
+**GET レスポンス**:
+```json
+{
+  "sets": [
+    {"name": "デフォルト", "signals": ["clk", "count"], "radix": {"count": "signed"}}
+  ]
+}
+```
+
+**POST リクエスト**:
+```json
+{
+  "sv_files": ["/path/counter.sv"],
+  "spec": "/path/spec.yaml",
+  "name": "デフォルト",
+  "signals": ["clk", "count"],
+  "radix": {"count": "signed"}
+}
+```
+
+**DELETE リクエスト**（ボディに JSON）:
+```json
+{"sv_files": [...], "spec": "...", "name": "デフォルト"}
+```
 
 ---
 
