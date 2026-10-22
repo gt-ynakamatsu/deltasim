@@ -31,6 +31,49 @@ def main():
 
 
 # ---------------------------------------------------------------------------
+# §18.2: -f/--filelist ヘルパー
+# ---------------------------------------------------------------------------
+
+def _expand_files(sv_files: tuple, filelist: tuple):
+    """sv_files と -f ファイルを結合して (all_files, FileList) を返す。
+    警告は stderr に出力する。エラーがあれば sys.exit(1) する。
+    """
+    from deltasim.filelist import expand_filelist_args
+    all_files, fl = expand_filelist_args(sv_files, filelist)
+    for w in fl.warnings:
+        click.echo(f"W ({w.code}): {w.file}:{w.line}: {w.message}", err=True)
+    for e in fl.errors:
+        click.echo(f"ERROR ({e.code}): {e.file}:{e.line}: {e.message}", err=True)
+    if fl.errors:
+        sys.exit(1)
+    if not all_files:
+        click.echo("ERROR: SV ファイルが指定されていません（-f またはファイル引数を指定してください）",
+                   err=True)
+        sys.exit(1)
+    return all_files, fl
+
+
+def _filelist_to_result_warnings(fl) -> list:
+    """FileList の警告を WarningInfo リストに変換する（test --json 出力用）。"""
+    from deltasim.result import WarningInfo
+    return [
+        WarningInfo(
+            code=w.code,
+            message=w.message,
+            file=w.file,
+            line=w.line,
+        )
+        for w in fl.warnings
+    ]
+
+
+_FILELIST_OPT = click.option(
+    "-f", "--filelist", "filelist", multiple=True, metavar="FILE.f",
+    help="§18.2: ファイルリスト (.f) を指定（複数回指定可）",
+)
+
+
+# ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
 
@@ -60,7 +103,8 @@ def _emit_json_event(event: dict, json_events: bool) -> None:
 # ---------------------------------------------------------------------------
 
 @main.command("run")
-@click.argument("sv_files", nargs=-1, required=True, metavar="FILE [FILE …]")
+@click.argument("sv_files", nargs=-1, required=False, metavar="FILE [FILE …]")
+@_FILELIST_OPT
 @click.option("--top", "-t", default=None)
 @click.option("--cycles", "-n", default=100, show_default=True, type=int)
 @click.option("--vcd", "-o", default=None, metavar="PATH")
@@ -80,14 +124,17 @@ def _emit_json_event(event: dict, json_events: bool) -> None:
               help="デルタサイクル上限（既定10000）。超えると E_DELTA_LIMIT。")
 @click.option("--max-loop", "max_loop", default=None, type=int, metavar="N",
               help="ループ反復上限（既定1000000）。超えると E_LOOP_LIMIT。")
-def run_cmd(sv_files, top, cycles, vcd, reset_cycles, half_period,
+def run_cmd(sv_files, filelist, top, cycles, vcd, reset_cycles, half_period,
             clk, rst, rst_active_high, params, verbose, json_out, json_events,
             max_delta, max_loop, interactive):
     """SystemVerilog ファイルをシミュレートして VCD を出力する。
 
     -i / --interactive を指定すると対話モードで起動します（deltasim sim と同じ）。
+    -f FILE.f でファイルリストを指定できます（複数回指定可）。
     """
     import deltasim.api as ds
+
+    sv_files, _fl = _expand_files(sv_files, filelist)
 
     if interactive:
         # 対話モード: deltasim sim と同じ処理に委譲
@@ -180,7 +227,8 @@ def run_cmd(sv_files, top, cycles, vcd, reset_cycles, half_period,
 # ---------------------------------------------------------------------------
 
 @main.command("gen")
-@click.argument("sv_files", nargs=-1, required=True, metavar="FILE [FILE …]")
+@click.argument("sv_files", nargs=-1, required=False, metavar="FILE [FILE …]")
+@_FILELIST_OPT
 @click.option("--top", "-t", default=None)
 @click.option("--param", "-p", "params", multiple=True, metavar="NAME=VALUE")
 @click.option("--out-dir", "-d", default=".", show_default=True)
@@ -190,13 +238,15 @@ def run_cmd(sv_files, top, cycles, vcd, reset_cycles, half_period,
 @click.option("--no-spec", is_flag=True, default=False)
 @click.option("--strings", is_flag=True, default=False,
               help="ファイル書き込みの代わりに文字列として stdout に出力")
-def gen_cmd(sv_files, top, params, out_dir, spec_path, tb_path, no_tb, no_spec, strings):
+def gen_cmd(sv_files, filelist, top, params, out_dir, spec_path, tb_path, no_tb, no_spec, strings):
     """テストベンチ SV と YAML スペックスケルトンを生成する。
 
     --strings: ファイルに書き込まず TB SV / YAML 文字列を stdout に出力する。
+    -f FILE.f でファイルリストを指定できます。
     """
     import deltasim.api as ds
 
+    sv_files, _fl = _expand_files(sv_files, filelist)
     param_overrides = _parse_params(params)
 
     if strings:
@@ -233,7 +283,8 @@ def gen_cmd(sv_files, top, params, out_dir, spec_path, tb_path, no_tb, no_spec, 
 # ---------------------------------------------------------------------------
 
 @main.command("test")
-@click.argument("sv_files", nargs=-1, required=True, metavar="FILE [FILE …]")
+@click.argument("sv_files", nargs=-1, required=False, metavar="FILE [FILE …]")
+@_FILELIST_OPT
 @click.option("--top", "-t", default=None)
 @click.option("--spec", "-s", required=True, metavar="YAML")
 @click.option("--param", "-p", "params", multiple=True, metavar="NAME=VALUE")
@@ -258,10 +309,11 @@ def gen_cmd(sv_files, top, params, out_dir, spec_path, tb_path, no_tb, no_spec, 
               help="デルタサイクル上限（既定10000）。超えると E_DELTA_LIMIT。")
 @click.option("--max-loop", "max_loop", default=None, type=int, metavar="N",
               help="ループ反復上限（既定1000000）。超えると E_LOOP_LIMIT。")
-def test_cmd(sv_files, top, spec, params, junit, json_out, vcd, seed,
+def test_cmd(sv_files, filelist, top, spec, params, junit, json_out, vcd, seed,
              verbose, no_color, json_events, record_mode, record_all_deprecated,
              wave_mem_mb, filter_cases, max_delta, max_loop):
     """YAML スペックに従ってテストを実行し PASS/FAIL を判定する。
+    -f FILE.f でファイルリストを指定できます。
 
     Examples:\n
       deltasim test counter.sv --spec counter_spec.yaml\n
@@ -273,6 +325,16 @@ def test_cmd(sv_files, top, spec, params, junit, json_out, vcd, seed,
     """
     import deltasim.api as ds
     from deltasim.report.terminal import print_results_v2
+
+    sv_files, _fl = _expand_files(sv_files, filelist)
+    # §18.2: -f ファイルの W_FILELIST_OPT を warn イベントとして emit
+    _fl_warnings = _filelist_to_result_warnings(_fl)
+    for w in _fl_warnings:
+        _emit_json_event(
+            {"type": "warning", "code": w.code, "message": w.message,
+             "file": w.file, "line": w.line},
+            json_events,
+        )
 
     # --record-all 非推奨エイリアス（stderr のみ、stdout JSON は汚さない）
     if record_all_deprecated:
@@ -305,6 +367,9 @@ def test_cmd(sv_files, top, spec, params, junit, json_out, vcd, seed,
             max_delta=max_delta,
             max_loop=max_loop,
         )
+        # §18.2: W_FILELIST_OPT を TestResult.warnings に追加（JSON 出力用）
+        if _fl_warnings:
+            result.warnings = list(result.warnings) + _fl_warnings
     except Exception as _unexpected:
         # §0.2.1: --json 付きのとき想定外例外でも JSON を出力する（E_INTERNAL）
         import traceback as _tb
@@ -356,12 +421,16 @@ def test_cmd(sv_files, top, spec, params, junit, json_out, vcd, seed,
 # ---------------------------------------------------------------------------
 
 @main.command("parse")
-@click.argument("sv_file")
-def parse_cmd(sv_file: str):
-    """SV ファイルをパースして AST を表示する（デバッグ用）。"""
+@click.argument("sv_files", nargs=-1, required=False, metavar="FILE [FILE …]")
+@_FILELIST_OPT
+def parse_cmd(sv_files, filelist):
+    """SV ファイルをパースして AST を表示する（デバッグ用）。
+    -f FILE.f でファイルリストを指定できます。
+    """
     import deltasim.api as ds
 
-    di = ds.load([sv_file])
+    sv_files_list, _fl = _expand_files(sv_files, filelist)
+    di = ds.load(sv_files_list)
     if di.status != "PASS":
         for e in di.errors:
             click.echo(f"ERROR ({e.code}): {e.file}:{e.line}: {e.message}", err=True)

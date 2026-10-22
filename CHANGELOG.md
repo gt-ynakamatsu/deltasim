@@ -5,6 +5,34 @@
 
 ---
 
+## [0.3.0+] — 開発中（§18.2 -f ファイルリスト + §18 対話デバッグ）
+
+### 確定事項（§18.1.1）
+
+- **行ブレークポイントの停止タイミング**: deferred 方式（その時刻の処理をすべて終えてから停止）。  
+  Questa は文を実行する前に止まるが、deltasim は文の実行後（NBA・negedge・VCD 記録完了後）に止まる。  
+  bp を置いても置かなくても信号値と VCD が一致することを優先した設計。
+
+### 追加（§18.2 -f ファイルリスト）
+
+- `deltasim test`・`run`・`gen`・`parse` に `-f FILE.f` オプションを追加
+- 複数回の `-f` 指定、通常のソース引数との併用が可能
+- **公開関数**: `deltasim.filelist.load_filelist(path) -> FileList`
+  - `FileList(files, incdirs, defines, warnings, errors)` を返す
+  - `files`: 絶対パスに解決された SV ファイルリスト
+  - `incdirs`: `+incdir+` ディレクトリリスト
+  - `defines`: `+define+` マクロ辞書
+  - `warnings`: `W_FILELIST_OPT` 警告リスト（行番号付き）
+  - `errors`: `E_FILE_NOT_FOUND` エラーリスト（行番号付き）
+- `deltasim.filelist.expand_filelist_args(sv_files, filelist_args)` も公開
+- GUI の `resolve_paths_from_f_file` は `load_filelist` に置き換え（共有）
+- 対応書式: `//`・`#` コメント、空行無視、CRLF、UTF-8 BOM
+- 相対パスは `.f` ファイルの場所を基準に解決（CWD 非依存）
+- 入れ子 `-f`、循環検出、未対応オプション → `W_FILELIST_OPT`
+- 存在しないファイル → `E_FILE_NOT_FOUND`（ファイル名・行番号付き）
+
+---
+
 ## [0.3.0+] — 開発中（§18 対話デバッグ）
 
 ### 互換性のない変更（§18.1.1）

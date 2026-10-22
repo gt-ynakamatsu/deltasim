@@ -1005,3 +1005,35 @@ endmodule
 
 `schema_version` は `"2"` のまま変わりません。
 
+
+---
+
+## §18.2 ファイルリスト API
+
+### `load_filelist(path) → FileList`
+
+`.f` ファイルを解析して `FileList` を返します。
+
+```python
+from deltasim.filelist import load_filelist
+
+fl = load_filelist("files.f")
+for w in fl.warnings:
+    print(f"W ({w.code}): {w.file}:{w.line}: {w.message}")
+result = ds.test(fl.files, spec="spec.yaml")
+```
+
+`FileList` フィールド:
+
+| フィールド | 型 | 説明 |
+|-----------|-----|------|
+| `files` | `List[str]` | 絶対パスに解決された SV ファイルリスト |
+| `incdirs` | `List[str]` | `+incdir+` ディレクトリリスト（**保持のみ。まだパーサに渡されません**） |
+| `defines` | `Dict[str, str]` | `+define+NAME[=VAL]` マクロ辞書（**保持のみ。まだパーサに渡されません**） |
+| `warnings` | `List[FileListWarning]` | 未対応オプション警告（`W_FILELIST_OPT`） |
+| `errors` | `List[FileListError]` | 存在しないファイルのエラー |
+
+### `expand_filelist_args(sv_files, filelist_args) → (all_files, combined_filelist)`
+
+CLI コマンドから呼ばれる内部ヘルパー。`sv_files` と `-f` ファイルを結合します。
+
