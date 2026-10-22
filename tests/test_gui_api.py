@@ -2359,3 +2359,112 @@ class TestRecentProjectTriggers:
         # recent は空のまま
         res = client.get("/api/recent-projects")
         assert res.json()["recent"] == [], "個別ファイルオープンでは追加されないこと"
+
+
+# ---------------------------------------------------------------------------
+# os.kill Windows 安全性テスト（§修正: _is_pid_running の Windows 安全化）
+# ---------------------------------------------------------------------------
+
+class TestIsPidRunning:
+    """_is_pid_running が Windows では os.kill を呼ばないことと、
+    実際のプロセスに対して正しく動作することをテストする。
+    """
+
+    def test_windows_does_not_call_os_kill(self, monkeypatch):
+        """(a) Windows では os.kill が呼ばれないこと。
+
+        monkeypatch で os.kill を例外を投げるものに差し替え、
+        _is_pid_running を呼んでも例外が発生しないことで確認する。
+        Windows 以外では os.kill を使うので、このテストは Windows のみ実行。
+        """
+        import os as _os
+        if _os.name != "nt":
+            pytest.skip("このテストは Windows 専用")
+
+        from deltasim.gui import jobs as _jobs_mod
+
+        def _kill_raises(pid, sig):
+            raise RuntimeError(f"os.kill should NOT be called on Windows! pid={pid} sig={sig}")
+
+        monkeypatch.setattr(_os, "kill", _kill_raises)
+
+        # Windows ではこの呼び出しで os.kill が呼ばれてはならない
+        result = _jobs_mod._is_pid_running(_os.getpid())
+        assert result is True, "自プロセスは生存しているはずです"
+
+    def test_posix_uses_os_kill(self, monkeypatch):
+        """POSIX では os.kill が呼ばれること（正常ルートの確認）。"""
+        import os as _os
+        if _os.name == "nt":
+            pytest.skip("このテストは POSIX 専用")
+
+        from deltasim.gui import jobs as _jobs_mod
+
+        called = []
+
+        def _kill_track(pid, sig):
+            called.append((pid, sig))
+            # 本物の os.kill と同じ動作をさせる
+            import signal
+            if sig == 0:
+                try:
+                    _os.kill.__wrapped__(pid, sig)
+                except AttributeError:
+                    pass  # monkeypatch後は呼べない、呼んだ記録だけでOK
+
+        monkeypatch.setattr(_os, "kill", _kill_track)
+
+        _jobs_mod._is_pid_running(_os.getpid())
+        assert len(called) >= 1, "POSIX では os.kill が呼ばれること"
+        assert called[0][1] == 0, "シグナル 0 が渡されること"
+
+    def test_running_process_returns_true(self):
+        """(b) 実行中の子プロセスに対して True を返すこと（両OS）。"""
+        import subprocess
+        import sys
+        from deltasim.gui.jobs import _is_pid_running
+
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            assert _is_pid_running(proc.pid) is True, (
+                f"実行中の PID {proc.pid} は生存扱いになるべき"
+            )
+        finally:
+            proc.kill()
+            proc.wait()
+
+    def test_terminated_process_returns_false(self):
+        """(b) 終了した子プロセスに対して False を返すこと（両OS）。"""
+        import subprocess
+        import sys
+        import time
+        from deltasim.gui.jobs import _is_pid_running
+
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import sys; sys.exit(0)"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        proc.wait()  # 終了を待つ
+        time.sleep(0.1)  # 念のため少し待つ
+
+        assert _is_pid_running(proc.pid) is False, (
+            f"終了済み PID {proc.pid} は死亡扱いになるべき"
+        )
+
+    def test_own_pid_is_running(self):
+        """自プロセス PID は常に True を返すこと（両OS）。"""
+        import os as _os
+        from deltasim.gui.jobs import _is_pid_running
+        assert _is_pid_running(_os.getpid()) is True
+
+    def test_nonexistent_pid_returns_false(self):
+        """存在しない PID は False を返すこと（両OS）。"""
+        from deltasim.gui.jobs import _is_pid_running
+        # 99999999 は実際のシステムでまず使われない PID
+        result = _is_pid_running(99999999)
+        assert result is False, "存在しない PID は False を返すこと"

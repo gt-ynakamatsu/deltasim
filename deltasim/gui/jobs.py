@@ -82,7 +82,22 @@ def _safe_unlink(path: Path, base: Optional[Path] = None) -> None:
 
 
 def _is_pid_running(pid: int) -> bool:
-    """プロセスが生存しているか確認する（Windows/Linux 両対応）。"""
+    """プロセスが生存しているか確認する（Windows/Linux 両対応）。
+
+    警告: Windows では os.kill(pid, 0) は TerminateProcess(pid, 0) になり
+    プロセスを強制終了してしまうため、Windows では ctypes で OpenProcess を
+    使う。POSIX では os.kill(pid, 0) を使う（シグナルは送信されない）。
+    """
+    if os.name == "nt":
+        return _is_pid_running_windows(pid)
+    return _is_pid_running_posix(pid)
+
+
+def _is_pid_running_posix(pid: int) -> bool:
+    """POSIX 用: os.kill(pid, 0) でプロセス存在を確認する。
+    
+    os.kill(pid, 0) は POSIX ではシグナルを送らず存在確認のみ行う。
+    """
     try:
         os.kill(pid, 0)
         return True
@@ -92,6 +107,47 @@ def _is_pid_running(pid: int) -> bool:
         return True   # プロセスは存在するがシグナルを送る権限がない
     except OSError:
         return False
+
+
+def _is_pid_running_windows(pid: int) -> bool:
+    """Windows 用: ctypes の OpenProcess / GetExitCodeProcess でプロセス存在を確認する。
+
+    os.kill(pid, 0) は Windows では TerminateProcess(pid, 0) になり
+    無関係なプロセスを強制終了する危険があるため、使ってはならない。
+
+    手順:
+      1. OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid) でハンドルを取得
+         - ハンドルが取れない場合:
+           - ERROR_ACCESS_DENIED (5): プロセスは存在するが権限なし → 生存扱い
+           - それ以外 (ERROR_INVALID_PARAMETER 等): プロセスは存在しない → 死亡
+      2. ハンドルが取れた場合:
+         - GetExitCodeProcess で終了コードを取得
+         - STILL_ACTIVE (259) なら生存、それ以外は終了済み
+         - CloseHandle でハンドルを閉じる
+    """
+    import ctypes
+    import ctypes.wintypes
+
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    STILL_ACTIVE = 259
+    ERROR_ACCESS_DENIED = 5
+
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        err = kernel32.GetLastError()
+        if err == ERROR_ACCESS_DENIED:
+            return True   # プロセスは存在するが権限がない
+        return False      # プロセスが存在しない（ERROR_INVALID_PARAMETER 等）
+
+    try:
+        exit_code = ctypes.wintypes.DWORD()
+        if kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            return exit_code.value == STILL_ACTIVE
+        return False
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def _get_our_proc_dir(base: Optional[Path] = None) -> Path:
