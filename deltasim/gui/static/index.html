@@ -22,9 +22,17 @@
     <button id="btn-load-examples" class="btn btn-secondary" title="サンプルを読み込む">
       サンプル
     </button>
+    <button id="btn-gen" class="btn btn-secondary" title="テストベンチ・スペックを生成">
+      ⚙ 生成
+    </button>
     <button id="btn-run-test" class="btn btn-primary" title="テスト実行 (SSE)">
       ▶ テスト実行
     </button>
+    <button id="btn-run-sim" class="btn btn-secondary" title="シミュレーション実行（波形取得）">
+      ▶ シミュ実行
+    </button>
+    <label style="font-size:11px; color:#8888aa; margin-left:4px;" title="シミュ終了サイクル数">終了:</label>
+    <input id="sim-cycles-input" type="number" value="100" min="1" style="width:60px;" title="シミュ終了サイクル数">
     <button id="btn-stop" class="btn btn-danger" title="停止">
       ■ 停止
     </button>
@@ -59,6 +67,12 @@
 
   <!-- ===== サイドバー ===== -->
   <aside id="sidebar">
+    <!-- 最近使ったプロジェクト（§18.4） -->
+    <div class="sidebar-section" id="section-recent" style="display:none;">
+      <h2>最近使ったプロジェクト</h2>
+      <div id="recent-list"></div>
+    </div>
+
     <!-- サンプル -->
     <div class="sidebar-section" id="section-examples">
       <h2>サンプル</h2>
@@ -77,10 +91,11 @@
       <ul id="spec-list" class="file-list"></ul>
     </div>
 
-    <!-- トップモジュール -->
+    <!-- トップモジュール（§18.4: トップ候補を先頭に） -->
     <div class="sidebar-section">
       <h2>トップモジュール</h2>
       <select id="module-select" class="module-select"></select>
+      <div id="module-hint" style="font-size:10px;color:#8888aa;margin-top:3px;"></div>
     </div>
   </aside>
 
@@ -104,6 +119,10 @@
       <div id="summary-bar">
         <span class="count-badge badge-pass">0 PASS</span>
         <span class="count-badge badge-fail">0 FAIL</span>
+      </div>
+      <div id="export-buttons" style="display:none; margin-top:4px; display:flex; gap:4px; flex-wrap:wrap;">
+        <button id="btn-export-json" class="btn btn-secondary" style="font-size:10px; padding:2px 8px;" title="結果をJSONでダウンロード">⬇ JSON</button>
+        <button id="btn-export-junit" class="btn btn-secondary" style="font-size:10px; padding:2px 8px;" title="結果をJUnit XMLでダウンロード">⬇ JUnit</button>
       </div>
     </div>
     <!-- §12.3 truncated_at 警告バナー -->

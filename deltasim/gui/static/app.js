@@ -34,6 +34,7 @@ const state = {
   cursorB: -1,
   running: false,
   currentJobId: null,
+  currentExportJobId: null,  // §18.4: エクスポート用ジョブID
   editorPath: null,
   editorLang: "text",
   errorLines: [],
@@ -53,7 +54,10 @@ const $ = id => document.getElementById(id);
 const dom = {
   btnBrowse: $("btn-browse"),
   btnLoadExamples: $("btn-load-examples"),
+  btnGen: $("btn-gen"),
   btnRunTest: $("btn-run-test"),
+  btnRunSim: $("btn-run-sim"),
+  simCyclesInput: $("sim-cycles-input"),
   btnStop: $("btn-stop"),
   btnSaveProject: $("btn-save-project"),
   btnDebug: $("btn-debug"),
@@ -71,7 +75,10 @@ const dom = {
   fileList: $("file-list"),
   specList: $("spec-list"),
   moduleSelect: $("module-select"),
+  moduleHint: $("module-hint"),
   exampleList: $("example-list"),
+  recentList: $("recent-list"),
+  sectionRecent: $("section-recent"),
   editorFilename: $("editor-filename"),
   editorErrorsBadge: $("editor-errors-badge"),
   signalNames: $("signal-names"),
@@ -84,6 +91,9 @@ const dom = {
   truncatedBanner: $("truncated-banner"),
   truncatedMsg: $("truncated-msg"),
   btnOpenVcd: $("btn-open-vcd"),
+  exportButtons: $("export-buttons"),
+  btnExportJson: $("btn-export-json"),
+  btnExportJunit: $("btn-export-junit"),
   logOutput: $("log-output"),
   statusbar: $("statusbar"),
   statusText: $("status-text"),
@@ -210,6 +220,7 @@ const api = {
   browse:       (path)              => apiFetch("GET", `/api/browse?path=${encodeURIComponent(path)}`),
   fileRead:     (path)              => apiFetch("GET", `/api/file/read?path=${encodeURIComponent(path)}`),
   fileWrite:    (path, content)     => apiFetch("POST", "/api/file/write", { path, content }),
+  gen:          (sv, top)           => apiFetch("POST", "/api/gen", { sv_files: sv, top: top ?? null }),
   testStart:    (sv, spec, top, seed, filterCases) => apiFetch("POST", "/api/test/start", {
     sv_files: sv, spec, top: top ?? null,
     seed: seed !== "" && seed != null ? parseInt(seed) : null,
@@ -218,6 +229,7 @@ const api = {
   specCases:    (path)              => apiFetch("GET", `/api/spec/cases?path=${encodeURIComponent(path)}`),
   testCancel:   (jid)               => apiFetch("POST", `/api/test/${jid}/cancel`, {}),
   testResult:   (jid)               => apiFetch("GET",  `/api/test/${jid}/result`),
+  testExport:   (jid, fmt)          => `/api/test/${jid}/export?fmt=${encodeURIComponent(fmt)}`,
   waveIndex:    (path)              => apiFetch("GET", `/api/waveform/index?path=${encodeURIComponent(path)}`),
   waveRange:    (path, sigs, t0, t1) => {
     const p = new URLSearchParams({ path, t_start: t0 ?? 0 });
@@ -226,6 +238,12 @@ const api = {
     return apiFetch("GET", `/api/waveform/range?${p}`);
   },
   projectSave:  (path, data)        => apiFetch("POST", "/api/project", { path, ...data }),
+  recentProjects: ()                => apiFetch("GET", "/api/recent-projects"),
+  recentAdd:    (entry)             => apiFetch("POST", "/api/recent-projects/add", entry),
+  runStart:     (sv, top, cycles)   => apiFetch("POST", "/api/run/start", {
+    sv_files: sv, top: top ?? null, cycles: cycles ?? 100,
+  }),
+  runResult:    (jid)               => apiFetch("GET",  `/api/run/${jid}/result`).catch(() => null),
   // Simulator API (§8)
   simCreate:    (sv, top, params, hp, rc) => apiFetch("POST", "/api/simulator", {
     sv_files: sv, top: top ?? null, params: params ?? {}, half_period: hp ?? 5, reset_cycles: rc ?? 10,
@@ -307,14 +325,57 @@ function renderFileList() {
     li.addEventListener("click", () => openFileInEditor(state.project.specFile.path));
     dom.specList.appendChild(li);
   }
+
+  // §18.4: トップ候補を先頭に表示（all_modules があれば使用、なければ module のみ）
   dom.moduleSelect.innerHTML = "";
-  if (state.module) {
+  if (dom.moduleHint) dom.moduleHint.textContent = "";
+
+  const allMods = state.module?.all_modules ?? [];
+  if (allMods.length > 0) {
+    const topCands = allMods.filter(m => m.is_top_candidate);
+    const others   = allMods.filter(m => !m.is_top_candidate);
+
+    if (topCands.length > 0 && others.length > 0) {
+      const grp1 = document.createElement("optgroup");
+      grp1.label = "トップ候補";
+      topCands.forEach(m => {
+        const opt = document.createElement("option");
+        opt.value = m.name; opt.textContent = m.name;
+        grp1.appendChild(opt);
+      });
+      dom.moduleSelect.appendChild(grp1);
+      const grp2 = document.createElement("optgroup");
+      grp2.label = "その他のモジュール";
+      others.forEach(m => {
+        const opt = document.createElement("option");
+        opt.value = m.name; opt.textContent = m.name;
+        grp2.appendChild(opt);
+      });
+      dom.moduleSelect.appendChild(grp2);
+      if (dom.moduleHint) dom.moduleHint.textContent = `トップ候補 ${topCands.length} 件 / 全 ${allMods.length} 件`;
+    } else {
+      allMods.forEach(m => {
+        const opt = document.createElement("option");
+        opt.value = m.name; opt.textContent = m.name;
+        dom.moduleSelect.appendChild(opt);
+      });
+    }
+
+    // 現在の top または最初のトップ候補に合わせて選択
+    const desired = state.project.top || (topCands[0]?.name ?? allMods[0]?.name);
+    if (desired) dom.moduleSelect.value = desired;
+    state.project.top = dom.moduleSelect.value;
+  } else if (state.module?.module) {
     const opt = document.createElement("option");
     opt.value = state.module.module;
     opt.textContent = state.module.module;
     dom.moduleSelect.appendChild(opt);
     state.project.top = state.module.module;
   }
+
+  dom.moduleSelect.onchange = () => {
+    state.project.top = dom.moduleSelect.value;
+  };
 }
 
 // =========================================================================
@@ -344,6 +405,157 @@ async function saveFile() {
       await loadModule(state.project.svFiles.map(f => f.path), state.project.top);
     }
   } catch (e) { log(`保存エラー: ${e.message}`, "log-error"); }
+}
+
+// =========================================================================
+// 最近使ったプロジェクト（§18.4）
+// =========================================================================
+
+async function loadRecentProjects() {
+  try {
+    const data = await api.recentProjects();
+    const items = data.recent ?? [];
+    if (!items.length) {
+      dom.sectionRecent.style.display = "none";
+      return;
+    }
+    dom.sectionRecent.style.display = "";
+    dom.recentList.innerHTML = items.map((item, i) => {
+      const name = item.name || item.top || (item.sv_files?.[0]?.split(/[\\/]/).pop() ?? "?");
+      const missing = item.missing ? ' style="color:#f87171;"' : "";
+      const missingTitle = item.missing ? ` (存在しないパスあり: ${(item.missing_paths ?? []).join(", ")})` : "";
+      return `<div class="file-item recent-item" data-idx="${i}" title="${escHtml(name + missingTitle)}"${missing}>
+        ${item.missing ? "⚠ " : "📁 "}<span>${escHtml(name)}</span>
+      </div>`;
+    }).join("");
+    dom.recentList.querySelectorAll(".recent-item").forEach(el => {
+      el.addEventListener("click", async () => {
+        const idx = parseInt(el.dataset.idx);
+        const item = items[idx];
+        if (!item) return;
+        state.project.svFiles = (item.sv_files ?? []).map(p => ({ path: p }));
+        state.project.specFile = item.spec ? { path: item.spec } : null;
+        state.project.top = item.top ?? null;
+        renderFileList();
+        if (item.sv_files?.length) {
+          await loadModule(item.sv_files, item.top);
+          await openFileInEditor(item.sv_files[0]);
+        }
+        log(`最近のプロジェクトを開きました: ${item.name || item.top || ""}`, "log-info");
+      });
+    });
+  } catch (e) {
+    dom.sectionRecent.style.display = "none";
+  }
+}
+
+async function addCurrentToRecent() {
+  const svPaths = state.project.svFiles.map(f => f.path);
+  if (!svPaths.length) return;
+  const entry = {
+    sv_files: svPaths,
+    top: state.project.top ?? null,
+    spec: state.project.specFile?.path ?? null,
+    name: state.project.top ?? (svPaths[0].split(/[\\/]/).pop().replace(/\.(sv|v)$/i, "")),
+  };
+  try { await api.recentAdd(entry); } catch (_) {}
+}
+
+// =========================================================================
+// 生成ボタン（§18.4 gen）
+// =========================================================================
+
+async function runGen() {
+  if (!state.project.svFiles.length) {
+    log("SV ファイルを選択してください", "log-error");
+    return;
+  }
+  const svPaths = state.project.svFiles.map(f => f.path);
+  const top = state.project.top;
+  log("⚙ テストベンチ・スペック生成中…", "log-info");
+  setStatus("生成中…", "running");
+  try {
+    const result = await api.gen(svPaths, top);
+    if (result.status === "ERROR") {
+      log(`生成失敗: ${(result.errors ?? []).map(e => e.message).join(", ")}`, "log-error");
+      setStatus("生成失敗", "error");
+      return;
+    }
+    if (result.spec_yaml) {
+      // 文字列モード: エディタに表示
+      setEditorContent(result.spec_yaml, "yaml");
+      log(`✓ スペック YAML を生成しました（${result.module}）`, "log-info");
+      if (result.tb_sv) {
+        log(`TB SV も生成済み（表示はスペックのみ）`, "log-line");
+      }
+    } else if (result.spec_path) {
+      log(`✓ 生成完了: ${result.spec_path}`, "log-info");
+      // 生成したスペックをプロジェクトに追加
+      state.project.specFile = { path: result.spec_path };
+      renderFileList();
+      await openFileInEditor(result.spec_path);
+    }
+    setStatus("生成完了", "idle");
+  } catch (e) {
+    log(`生成エラー: ${e.message}`, "log-error");
+    setStatus("生成エラー", "error");
+  }
+}
+
+// =========================================================================
+// シミュ実行ボタン（§18.4 run with end time）
+// =========================================================================
+
+async function runSim() {
+  if (state.running) return;
+  if (!state.project.svFiles.length) {
+    log("SV ファイルを選択してください", "log-error");
+    return;
+  }
+  state.running = true;
+  dom.btnStop.disabled = false;
+  const svPaths = state.project.svFiles.map(f => f.path);
+  const top = state.project.top;
+  const cycles = parseInt(dom.simCyclesInput?.value || "100", 10) || 100;
+  log(`▶ シミュ実行: top=${top ?? "auto"} cycles=${cycles}`, "log-info");
+  setStatus("シミュ実行中…", "running");
+  setProgress(5);
+  clearWaveform();
+
+  try {
+    const { job_id } = await api.runStart(svPaths, top, cycles);
+    state.currentJobId = job_id;
+    await consumeSSE(`/api/run/${job_id}/events`);
+    // /api/run/{id}/result は未実装のため /api/run/{id}/events の finish イベントに依存
+    // finish イベントで result が来る (run_sim_job が queue に積む)
+    setStatus("シミュ完了", "idle");
+    setProgress(100);
+  } catch (e) {
+    log(`シミュエラー: ${e.message}`, "log-error");
+    setStatus("シミュエラー", "error");
+  } finally {
+    state.running = false;
+    state.currentJobId = null;
+    dom.btnStop.disabled = true;
+  }
+}
+
+// =========================================================================
+// エクスポートボタン（§18.4 JUnit/JSON ダウンロード）
+// =========================================================================
+
+function exportResult(fmt) {
+  if (!state.currentExportJobId) {
+    log("エクスポートするテスト結果がありません", "log-error");
+    return;
+  }
+  const url = api.testExport(state.currentExportJobId, fmt);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `result_${state.currentExportJobId.slice(0, 8)}.${fmt === "junit" ? "xml" : "json"}`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
 }
 
 // =========================================================================
@@ -439,12 +651,16 @@ async function runTest() {
     if (done && result) {
       state.testResult = result;
       state.vcdPath = result.vcd_path;
+      state.currentExportJobId = job_id;  // §18.4: エクスポート用に保存
       renderResults(result);
 
       // §12.3: truncated_at 警告
       if (result.truncated_at != null) {
         showTruncatedBanner(result.truncated_at, result.vcd_path);
       }
+
+      // §18.4: エクスポートボタンを表示
+      if (dom.exportButtons) dom.exportButtons.style.display = "flex";
 
       const s = result.summary;
       const totalMs = s.elapsed_ms ?? result.elapsed_ms ?? 0;
@@ -462,6 +678,10 @@ async function runTest() {
         await loadWaveformIndex(result.vcd_path);
       }
       (result.log ?? []).forEach(l => log(l));
+
+      // §18.4: 最近のプロジェクトに追加
+      await addCurrentToRecent();
+      await loadRecentProjects();
     }
   } catch (e) {
     log(`エラー: ${e.message}`, "log-error");
@@ -510,9 +730,16 @@ function handleSSEEvent(event) {
       log(`ケース完了: ${event.name} → ${event.status}${event.checks?.length ? ` (${event.checks.length} checks)` : ""}`,
           event.status === "PASS" ? "log-pass" : "log-fail");
       break;
-    case "finish":
+    case "finish": {
       setProgress(95);
+      // シミュ実行の finish イベントには result が含まれることがある
+      const finResult = event.result;
+      if (finResult?.vcd_path) {
+        log(`波形読み込み中: ${finResult.vcd_path}`, "log-info");
+        loadWaveformIndex(finResult.vcd_path).catch(() => {});
+      }
       break;
+    }
     case "error":
       log(`エラー: ${event.message}`, "log-error");
       break;
@@ -716,6 +943,14 @@ function _renderCaseDetail(c) {
   if (c.seed != null) html += ` <span style="font-weight:400;">seed=${c.seed}</span>`;
   if (c.elapsed_ms != null) html += ` <span style="font-weight:400;">${(c.elapsed_ms/1000).toFixed(3)}s</span>`;
   html += `</div>`;
+
+  // §18.4: 「このシードで再実行」ボタン
+  if (c.seed != null) {
+    html += `<div style="padding:2px 4px;margin-bottom:4px;">
+      <button class="btn btn-secondary" style="font-size:10px;padding:2px 8px;"
+        onclick="rerunWithSeed(${c.seed})">↺ このシードで再実行 (seed=${c.seed})</button>
+    </div>`;
+  }
 
   // message フィールド（あれば表示、なければ省略）
   if (c.message) {
@@ -1428,7 +1663,9 @@ function escHtml(s) {
 
 dom.btnBrowse.addEventListener("click", openFileBrowser);
 dom.btnLoadExamples.addEventListener("click", loadExamplesList);
+dom.btnGen.addEventListener("click", runGen);
 dom.btnRunTest.addEventListener("click", runTest);
+dom.btnRunSim.addEventListener("click", runSim);
 dom.btnStop.addEventListener("click", stopTest);
 dom.btnSaveProject.addEventListener("click", saveProject);
 dom.btnDebug.addEventListener("click", openDebugPanel);
@@ -1438,6 +1675,8 @@ dom.btnZoomOut.addEventListener("click", zoomOut);
 dom.btnZoomFit.addEventListener("click", zoomFit);
 dom.btnSaveFile.addEventListener("click", saveFile);
 dom.btnClearLog.addEventListener("click", logClear);
+if (dom.btnExportJson) dom.btnExportJson.addEventListener("click", () => exportResult("json"));
+if (dom.btnExportJunit) dom.btnExportJunit.addEventListener("click", () => exportResult("junit"));
 
 dom.btnBrowserClose.addEventListener("click", closeBrowser);
 dom.btnBrowserCancel.addEventListener("click", closeBrowser);
@@ -1471,9 +1710,9 @@ window.addEventListener("resize", () => { if (state.waveformData) drawWaveform()
   initEditor();
   setStatus("ready", "idle");
   dom.btnStop.disabled = true;
-  log("deltasim GUI v3 起動（M5 API + §12 対応）", "log-info");
+  log("deltasim GUI v3 起動（M5 API + §12/§18.4 対応）", "log-info");
   log("サンプルを読み込むか、「📂 開く」でファイルを選択してください。", "log-line");
-  await loadExamplesList();
+  await Promise.all([loadExamplesList(), loadRecentProjects()]);
 
   // CLI 引数からの初期プロジェクト（環境変数経由）
   try {

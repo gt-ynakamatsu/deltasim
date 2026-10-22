@@ -1546,3 +1546,494 @@ class TestGuiResultJsonFields:
             f"  CLI only: {cli_keys - gui_keys}\n"
             f"  GUI only: {gui_keys - cli_keys}"
         )
+
+
+# ---------------------------------------------------------------------------
+# §18.4: 一時 VCD 自動生成テスト（vcd_out 未指定でも波形が出る）
+# ---------------------------------------------------------------------------
+
+class TestAutoTempVcd:
+    """§18.4: vcd_out を指定しなくても波形 API が信号を返すこと"""
+
+    def test_vcd_path_in_result_without_vcd_out(self, client):
+        """vcd_out 未指定のテスト結果に vcd_path が含まれること"""
+        res = client.post("/api/test", json={
+            "sv_files": [COUNTER_SV],
+            "spec": COUNTER_SPEC,
+        })
+        assert res.status_code == 200
+        data = res.json()
+        # vcd_path は None ではなく、ファイルパスが含まれること
+        assert "vcd_path" in data
+        assert data["vcd_path"] is not None, "一時 VCD が生成されているはずです"
+
+    def test_waveform_api_returns_signals_without_vcd_out(self, client):
+        """vcd_out 未指定でテスト後に波形 API が信号を返すこと（§18.4 最重要）"""
+        res = client.post("/api/test", json={
+            "sv_files": [COUNTER_SV],
+            "spec": COUNTER_SPEC,
+        })
+        assert res.status_code == 200
+        data = res.json()
+        vcd_path = data.get("vcd_path")
+        assert vcd_path is not None, "一時 VCD パスが返されること"
+
+        # VCD が実際に存在しデータが読めること
+        import os
+        assert os.path.isfile(vcd_path), f"一時 VCD ファイルが存在すること: {vcd_path}"
+        assert os.path.getsize(vcd_path) > 0, "一時 VCD ファイルが空でないこと"
+
+        # 波形 API が信号を返すこと
+        res2 = client.get(f"/api/waveform/index?path={vcd_path}")
+        assert res2.status_code == 200
+        wave_data = res2.json()
+        assert "signals" in wave_data
+        assert len(wave_data["signals"]) > 0, "波形インデックスに信号が含まれること"
+
+    def test_spec_with_sim_vcd_takes_priority(self, client, tmp_path):
+        """spec に sim.vcd がある場合はそのパスが優先されること"""
+        from deltasim.gui.filesec import add_extra_root
+        add_extra_root(tmp_path)
+
+        explicit_vcd = str(tmp_path / "explicit.vcd")
+        yaml_content = f"""version: 1
+top: counter
+clock: {{signal: clk, period_ns: 10}}
+reset: {{signal: rst_n, active_low: true, duration_cycles: 10}}
+sim: {{cycles: 5, seed: 0, vcd: "{explicit_vcd}"}}
+expected:
+  - at: 1
+    check: {{count: 0}}
+"""
+        spec_path = str(tmp_path / "sim_vcd_spec.yaml")
+        Path(spec_path).write_text(yaml_content)
+
+        res = client.post("/api/test", json={
+            "sv_files": [COUNTER_SV],
+            "spec": spec_path,
+        })
+        assert res.status_code == 200
+        data = res.json()
+        # spec の sim.vcd が優先されること
+        assert data.get("vcd_path") == explicit_vcd, (
+            f"spec の sim.vcd が優先されるべき。実際: {data.get('vcd_path')}"
+        )
+
+    def test_explicit_vcd_out_overrides_spec(self, client, tmp_path):
+        """明示的な vcd_out は spec の sim.vcd より優先されること"""
+        from deltasim.gui.filesec import add_extra_root
+        add_extra_root(tmp_path)
+
+        explicit_vcd = str(tmp_path / "override.vcd")
+        res = client.post("/api/test", json={
+            "sv_files": [COUNTER_SV],
+            "spec": COUNTER_SPEC,
+            "vcd_out": explicit_vcd,
+        })
+        assert res.status_code == 200
+        data = res.json()
+        import os
+        assert os.path.isfile(explicit_vcd), "明示的な vcd_out にファイルが書き出されること"
+        assert data.get("vcd_path") == explicit_vcd
+
+    def test_sse_job_vcd_path_in_result(self, client):
+        """SSE ジョブ経由（/api/test/start）でも vcd_path が結果に含まれること"""
+        res = client.post("/api/test/start", json={
+            "sv_files": [MUX2_SV],
+            "spec": MUX2_SPEC,
+        })
+        assert res.status_code == 200
+        job_id = res.json()["job_id"]
+
+        # SSE を消費
+        import json as _json
+        with client.stream("GET", f"/api/test/{job_id}/events") as stream:
+            for line in stream.iter_lines():
+                if line.startswith("data:"):
+                    ev = _json.loads(line[5:].strip())
+                    if ev.get("event") in ("finish", "error"):
+                        break
+
+        # 結果に vcd_path が含まれること
+        res2 = client.get(f"/api/test/{job_id}/result")
+        assert res2.status_code == 200
+        result_data = res2.json()
+        assert result_data["done"] is True
+        assert "vcd_path" in result_data["result"]
+        vcd_path = result_data["result"].get("vcd_path")
+        assert vcd_path is not None, "SSE ジョブでも一時 VCD が生成されること"
+
+    def test_temp_vcd_is_valid_vcd_file(self, client):
+        """自動生成された一時 VCD が有効な VCD ファイルであること"""
+        res = client.post("/api/test", json={
+            "sv_files": [COUNTER_SV],
+            "spec": COUNTER_SPEC,
+        })
+        assert res.status_code == 200
+        vcd_path = res.json().get("vcd_path")
+        assert vcd_path is not None
+
+        # 波形データを取得して信号変化があること
+        res2 = client.get(f"/api/waveform?path={vcd_path}")
+        assert res2.status_code == 200
+        wdata = res2.json()
+        assert wdata.get("end_time", 0) > 0, "波形に時間が記録されていること"
+        assert len(wdata.get("signals", {})) > 0, "信号が含まれること"
+
+
+# ---------------------------------------------------------------------------
+# §18.4: gen API テスト
+# ---------------------------------------------------------------------------
+
+class TestGenApi:
+    def test_gen_returns_spec_yaml(self, client):
+        """gen API がスペック YAML 文字列を返すこと"""
+        res = client.post("/api/gen", json={
+            "sv_files": [COUNTER_SV],
+            "top": "counter",
+        })
+        assert res.status_code == 200
+        data = res.json()
+        assert data.get("status") == "PASS", f"gen がエラー: {data}"
+        assert "spec_yaml" in data
+        assert "tb_sv" in data
+        assert len(data["spec_yaml"]) > 0
+
+    def test_gen_spec_yaml_has_top(self, client):
+        """生成されたスペックにトップモジュール名が含まれること"""
+        res = client.post("/api/gen", json={
+            "sv_files": [COUNTER_SV],
+            "top": "counter",
+        })
+        assert res.status_code == 200
+        data = res.json()
+        assert "counter" in data.get("spec_yaml", ""), "スペックにモジュール名が含まれること"
+
+    def test_gen_file_not_found(self, client):
+        """存在しないファイルでは 422 を返すこと"""
+        res = client.post("/api/gen", json={
+            "sv_files": ["/nonexistent/file.sv"],
+        })
+        assert res.status_code == 422
+
+    def test_gen_mux2(self, client):
+        """mux2 のスペックが生成できること"""
+        res = client.post("/api/gen", json={
+            "sv_files": [MUX2_SV],
+            "top": "mux2",
+        })
+        assert res.status_code == 200
+        data = res.json()
+        assert data.get("status") == "PASS"
+        assert "mux2" in data.get("spec_yaml", "")
+
+
+# ---------------------------------------------------------------------------
+# §18.4: 最近使ったプロジェクト テスト
+# ---------------------------------------------------------------------------
+
+class TestRecentProjects:
+    """§18.4: 最近使ったプロジェクトの保存・読込"""
+
+    @pytest.fixture(autouse=True)
+    def patch_config_dir(self, tmp_path, monkeypatch):
+        """テスト用に設定ディレクトリを tmp_path に差し替える"""
+        from deltasim.gui import recent as _recent_mod
+        monkeypatch.setattr(_recent_mod, "_config_dir", lambda: tmp_path)
+
+    def test_get_recent_empty(self, client):
+        """初期状態では空リストが返ること"""
+        res = client.get("/api/recent-projects")
+        assert res.status_code == 200
+        data = res.json()
+        assert "recent" in data
+        assert data["recent"] == []
+
+    def test_add_and_get_recent(self, client):
+        """追加したプロジェクトが取得できること"""
+        entry = {
+            "sv_files": [COUNTER_SV],
+            "top": "counter",
+            "spec": COUNTER_SPEC,
+            "name": "テスト用 counter",
+        }
+        res = client.post("/api/recent-projects/add", json=entry)
+        assert res.status_code == 200
+        assert res.json()["ok"] is True
+
+        res2 = client.get("/api/recent-projects")
+        assert res2.status_code == 200
+        data = res2.json()
+        assert len(data["recent"]) == 1
+        assert data["recent"][0]["name"] == "テスト用 counter"
+        assert COUNTER_SV in data["recent"][0]["sv_files"]
+
+    def test_missing_path_marked(self, client):
+        """存在しないパスは missing=True でマークされること"""
+        entry = {
+            "sv_files": ["/nonexistent/file.sv"],
+            "top": "dummy",
+            "spec": None,
+            "name": "missing test",
+        }
+        client.post("/api/recent-projects/add", json=entry)
+
+        res = client.get("/api/recent-projects")
+        assert res.status_code == 200
+        data = res.json()
+        assert len(data["recent"]) >= 1
+        missing_entry = next(e for e in data["recent"] if e["name"] == "missing test")
+        assert missing_entry["missing"] is True
+        assert "/nonexistent/file.sv" in missing_entry["missing_paths"]
+
+    def test_existing_path_not_missing(self, client):
+        """存在するパスは missing=False であること"""
+        entry = {
+            "sv_files": [COUNTER_SV],
+            "top": "counter",
+            "spec": COUNTER_SPEC,
+            "name": "exists",
+        }
+        client.post("/api/recent-projects/add", json=entry)
+
+        res = client.get("/api/recent-projects")
+        data = res.json()
+        exists_entry = next(e for e in data["recent"] if e["name"] == "exists")
+        assert exists_entry["missing"] is False
+
+    def test_max_10_entries(self, client):
+        """最大10件を超えると古いものが削除されること"""
+        for i in range(12):
+            client.post("/api/recent-projects/add", json={
+                "sv_files": [COUNTER_SV],
+                "top": "counter",
+                "spec": f"/dummy/spec_{i}.yaml",
+                "name": f"entry_{i}",
+            })
+
+        res = client.get("/api/recent-projects")
+        data = res.json()
+        assert len(data["recent"]) <= 10, f"最大10件: {len(data['recent'])} 件"
+
+    def test_newest_first(self, client):
+        """新しいプロジェクトが先頭に来ること"""
+        for i in range(3):
+            client.post("/api/recent-projects/add", json={
+                "sv_files": [COUNTER_SV],
+                "spec": f"/dummy/spec_{i}.yaml",
+                "name": f"entry_{i}",
+            })
+
+        res = client.get("/api/recent-projects")
+        data = res.json()
+        assert data["recent"][0]["name"] == "entry_2", "最後に追加したものが先頭"
+
+
+# ---------------------------------------------------------------------------
+# §18.4: トップ候補一覧テスト
+# ---------------------------------------------------------------------------
+
+class TestTopCandidates:
+    """§18.4: load() が all_modules を返し、トップ候補が is_top_candidate=True であること"""
+
+    def test_load_returns_all_modules(self, client):
+        """all_modules フィールドが存在すること"""
+        res = client.post("/api/load", json={
+            "files": [COUNTER_SV],
+            "top": "counter",
+        })
+        assert res.status_code == 200
+        data = res.json()
+        assert "all_modules" in data, "all_modules フィールドが必要"
+        assert isinstance(data["all_modules"], list)
+        assert len(data["all_modules"]) >= 1
+
+    def test_single_module_is_top_candidate(self, client):
+        """単一モジュールは top_candidate=True であること"""
+        res = client.post("/api/load", json={
+            "files": [COUNTER_SV],
+            "top": "counter",
+        })
+        assert res.status_code == 200
+        mods = res.json()["all_modules"]
+        counter_mod = next((m for m in mods if m["name"] == "counter"), None)
+        assert counter_mod is not None
+        assert counter_mod["is_top_candidate"] is True
+
+    def test_all_modules_have_required_fields(self, client):
+        """all_modules の各要素に name と is_top_candidate があること"""
+        res = client.post("/api/load", json={
+            "files": [COUNTER_SV],
+        })
+        assert res.status_code == 200
+        for mod in res.json()["all_modules"]:
+            assert "name" in mod
+            assert "is_top_candidate" in mod
+            assert isinstance(mod["is_top_candidate"], bool)
+
+
+# ---------------------------------------------------------------------------
+# §18.4: JUnit/JSON エクスポートテスト
+# ---------------------------------------------------------------------------
+
+class TestExportApi:
+    """§18.4: テスト結果を JSON / JUnit XML でエクスポートできること"""
+
+    @pytest.fixture(scope="class")
+    def test_job_id(self, client):
+        """テストを実行してジョブIDを返す"""
+        import json as _json
+        res = client.post("/api/test/start", json={
+            "sv_files": [COUNTER_SV],
+            "spec": COUNTER_SPEC,
+        })
+        job_id = res.json()["job_id"]
+        # SSE 消費
+        with client.stream("GET", f"/api/test/{job_id}/events") as stream:
+            for line in stream.iter_lines():
+                if line.startswith("data:"):
+                    ev = _json.loads(line[5:].strip())
+                    if ev.get("event") in ("finish", "error"):
+                        break
+        return job_id
+
+    def test_export_json(self, client, test_job_id):
+        """JSON エクスポートが正しいコンテントタイプで返ること"""
+        res = client.get(f"/api/test/{test_job_id}/export?fmt=json")
+        assert res.status_code == 200
+        assert "application/json" in res.headers["content-type"]
+        # JSON として解析できること
+        import json as _json
+        data = _json.loads(res.content)
+        assert "schema_version" in data or "status" in data
+
+    def test_export_junit(self, client, test_job_id):
+        """JUnit XML エクスポートが正しいコンテントタイプで返ること"""
+        res = client.get(f"/api/test/{test_job_id}/export?fmt=junit")
+        assert res.status_code == 200
+        assert "xml" in res.headers["content-type"]
+        # XML として解析できること
+        import xml.etree.ElementTree as ET
+        root = ET.fromstring(res.content)
+        assert root.tag in ("testsuites", "testsuite")
+
+    def test_export_nonexistent_job(self, client):
+        """存在しないジョブは 404 を返すこと"""
+        res = client.get("/api/test/nonexistent-job/export?fmt=json")
+        assert res.status_code == 404
+
+    def test_export_has_content_disposition(self, client, test_job_id):
+        """ダウンロードヘッダが含まれること"""
+        res = client.get(f"/api/test/{test_job_id}/export?fmt=json")
+        assert res.status_code == 200
+        assert "attachment" in res.headers.get("content-disposition", "")
+
+
+# ---------------------------------------------------------------------------
+# §18.4: 最近使ったプロジェクト（recent.py 単体テスト）
+# ---------------------------------------------------------------------------
+
+class TestRecentModule:
+    """recent.py の単体テスト（config_dir を tmp_path に差し替え）"""
+
+    def test_load_empty(self, tmp_path):
+        from deltasim.gui.recent import load_recent
+        assert load_recent(tmp_path) == []
+
+    def test_add_and_load(self, tmp_path):
+        from deltasim.gui.recent import add_recent, load_recent
+        entry = {"sv_files": ["/a.sv"], "spec": "/a.yaml", "name": "test"}
+        add_recent(entry, tmp_path)
+        items = load_recent(tmp_path)
+        assert len(items) == 1
+        assert items[0]["name"] == "test"
+
+    def test_dedup_same_key(self, tmp_path):
+        """同じ sv_files + spec は重複排除されること"""
+        from deltasim.gui.recent import add_recent, load_recent
+        entry = {"sv_files": ["/a.sv"], "spec": "/a.yaml", "name": "v1"}
+        add_recent(entry, tmp_path)
+        entry2 = {"sv_files": ["/a.sv"], "spec": "/a.yaml", "name": "v2"}
+        add_recent(entry2, tmp_path)
+        items = load_recent(tmp_path)
+        assert len(items) == 1, "重複排除されること"
+        assert items[0]["name"] == "v2", "新しい方が残ること"
+
+    def test_max_recent(self, tmp_path):
+        """最大10件を超えると古いものが削除されること"""
+        from deltasim.gui.recent import add_recent, load_recent, MAX_RECENT
+        for i in range(MAX_RECENT + 3):
+            add_recent({"sv_files": [f"/file_{i}.sv"], "spec": f"/spec_{i}.yaml", "name": f"p{i}"}, tmp_path)
+        items = load_recent(tmp_path)
+        assert len(items) == MAX_RECENT
+
+    def test_newest_first(self, tmp_path):
+        """新しいものが先頭に来ること"""
+        from deltasim.gui.recent import add_recent, load_recent
+        for i in range(3):
+            add_recent({"sv_files": [f"/file_{i}.sv"], "name": f"p{i}"}, tmp_path)
+        items = load_recent(tmp_path)
+        assert items[0]["name"] == "p2"
+
+    def test_config_dir_xdg(self, tmp_path, monkeypatch):
+        """Linux: XDG_CONFIG_HOME が設定されている場合に使われること"""
+        import os
+        if os.name == "nt":
+            pytest.skip("Linux 専用テスト")
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+        from deltasim.gui.recent import _config_dir
+        d = _config_dir()
+        assert "deltasim" in str(d)
+        assert str(tmp_path) in str(d)
+
+    def test_config_dir_appdata(self, tmp_path, monkeypatch):
+        """Windows: APPDATA が設定されている場合に使われること（Windows のみ）"""
+        import os
+        if os.name != "nt":
+            pytest.skip("Windows 専用テスト")
+        monkeypatch.setenv("APPDATA", str(tmp_path))
+        from deltasim.gui.recent import _config_dir
+        d = _config_dir()
+        assert "deltasim" in str(d)
+
+
+# ---------------------------------------------------------------------------
+# §18.4: 一時 VCD クリーンアップ（jobs.py 単体テスト）
+# ---------------------------------------------------------------------------
+
+class TestTempVcdCleanup:
+    """一時 VCD のライフサイクル管理をテストする"""
+
+    def test_make_temp_vcd_creates_file(self):
+        """_make_temp_vcd() がファイルを作成すること"""
+        from deltasim.gui.jobs import _make_temp_vcd, cleanup_all_temp_vcds
+        import os
+        path = _make_temp_vcd()
+        try:
+            assert os.path.isfile(path), "一時 VCD ファイルが作成されること"
+        finally:
+            cleanup_all_temp_vcds()
+
+    def test_cleanup_removes_temp_files(self):
+        """cleanup_all_temp_vcds() が一時ファイルを削除すること（Windows ロック無視）"""
+        from deltasim.gui.jobs import _make_temp_vcd, cleanup_all_temp_vcds
+        import os
+        path = _make_temp_vcd()
+        assert os.path.isfile(path)
+        cleanup_all_temp_vcds()
+        # Windows ファイルロックでも落ちないこと（例外なし）
+        assert not os.path.exists(path), "削除されること（ロックなし環境）"
+
+    def test_peek_spec_vcd_no_sim_vcd(self, tmp_path):
+        """sim.vcd が無い YAML では None を返すこと"""
+        from deltasim.gui.jobs import _peek_spec_vcd
+        spec = tmp_path / "no_vcd.yaml"
+        spec.write_text("version: 1\ntop: test\nsim: {cycles: 5}\n")
+        assert _peek_spec_vcd(str(spec)) is None
+
+    def test_peek_spec_vcd_with_sim_vcd(self, tmp_path):
+        """sim.vcd がある YAML ではそのパスを返すこと"""
+        from deltasim.gui.jobs import _peek_spec_vcd
+        spec = tmp_path / "with_vcd.yaml"
+        spec.write_text("version: 1\ntop: test\nsim: {cycles: 5, vcd: /tmp/out.vcd}\n")
+        assert _peek_spec_vcd(str(spec)) == "/tmp/out.vcd"

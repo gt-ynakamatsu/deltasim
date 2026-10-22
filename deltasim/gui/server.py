@@ -45,13 +45,25 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, field_validator
+
+# ---------------------------------------------------------------------------
+# ライフサイクル: サーバー終了時に一時 VCD をクリーンアップ（§18.4）
+# ---------------------------------------------------------------------------
+
+@asynccontextmanager
+async def _lifespan(application: FastAPI):
+    yield
+    from deltasim.gui.jobs import cleanup_all_temp_vcds
+    cleanup_all_temp_vcds()
+
 
 # ---------------------------------------------------------------------------
 # アプリ初期化
@@ -63,6 +75,7 @@ app = FastAPI(
     title="deltasim GUI",
     description="SystemVerilog シミュレータ GUI",
     version="0.1.0",
+    lifespan=_lifespan,
 )
 
 if _STATIC_DIR.exists():
@@ -466,8 +479,19 @@ class TestRequest(BaseModel):
 
 @app.post("/api/test")
 async def api_test(req: TestRequest):
-    """テストを同期実行して結果 JSON を返す（後方互換）。"""
+    """テストを同期実行して結果 JSON を返す（後方互換）。
+
+    §18.4: vcd_out 未指定かつ spec に sim.vcd も無い場合、一時 VCD を自動生成する。
+    """
     from deltasim.gui.adapter import test
+    from deltasim.gui.jobs import _peek_spec_vcd, _make_temp_vcd, _cleanup_old_temp_vcds
+
+    vcd_out = req.vcd_out
+    if vcd_out is None:
+        spec_vcd = _peek_spec_vcd(req.spec)
+        if spec_vcd is None:
+            _cleanup_old_temp_vcds(keep_last=5)
+            vcd_out = _make_temp_vcd()
 
     try:
         result = await asyncio.to_thread(
@@ -476,7 +500,7 @@ async def api_test(req: TestRequest):
             req.spec,
             top=req.top,
             seed=req.seed,
-            vcd_path=req.vcd_out,
+            vcd_path=vcd_out,
             param_overrides=req.params,
             filter_cases=req.filter_cases,
         )
@@ -918,3 +942,171 @@ async def api_waveform(
         raise HTTPException(status_code=422, detail=str(e))
 
     return data
+
+# ---------------------------------------------------------------------------
+# /api/gen — テストベンチ・スペック生成（§18.4: 生成ボタン）
+# ---------------------------------------------------------------------------
+
+class GenRequest(BaseModel):
+    sv_files: List[str]
+    top: Optional[str] = None
+    params: Dict[str, int] = {}
+    out_dir: Optional[str] = None
+    tb_path: Optional[str] = None
+    spec_path: Optional[str] = None
+
+    @field_validator("sv_files")
+    @classmethod
+    def sv_files_must_exist(cls, v: List[str]) -> List[str]:
+        for f in v:
+            if not os.path.isfile(f):
+                raise ValueError(f"SV ファイルが見つかりません: {f!r}")
+        return v
+
+
+@app.post("/api/gen")
+async def api_gen(req: GenRequest):
+    """テストベンチ SV と YAML スペックのスケルトンを生成する（§18.4 生成ボタン）。
+
+    out_dir / tb_path / spec_path を省略するとファイルを書き出さず文字列で返す。
+    """
+    from deltasim.gui.adapter import gen
+
+    try:
+        result = await asyncio.to_thread(
+            gen,
+            req.sv_files,
+            req.top,
+            param_overrides=req.params,
+            out_dir=req.out_dir,
+            tb_path=req.tb_path,
+            spec_path=req.spec_path,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# /api/test/{job_id}/export — JUnit XML / JSON エクスポート（§18.4）
+# ---------------------------------------------------------------------------
+
+@app.get("/api/test/{job_id}/export")
+async def test_export(
+    job_id: str,
+    fmt: str = Query("json", description="'json' または 'junit'"),
+):
+    """テスト結果を JSON または JUnit XML としてダウンロードする（§18.4）。"""
+    from deltasim.gui.jobs import get_job
+
+    job = get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"ジョブが見つかりません: {job_id}")
+    if not job.done or job.result is None:
+        raise HTTPException(status_code=425, detail="ジョブはまだ完了していません")
+
+    result = job.result
+
+    if fmt == "junit":
+        import json as _json
+        import tempfile as _tempfile
+        from deltasim.result import TestResult, CheckInfo, CaseResult
+        from deltasim.report.junit import write_junit_v2
+
+        with _tempfile.NamedTemporaryFile(
+            suffix=".xml", delete=False, mode="w", encoding="utf-8"
+        ) as tf:
+            tmp_path = tf.name
+
+        try:
+            # result dict を TestResult に近似して write_junit_v2 を呼ぶ
+            tr = TestResult()
+            tr.module = result.get("module", "")
+            tr.status = result.get("status", "PASS")
+            for case_d in result.get("cases", []):
+                from deltasim.result import CaseResult as CR, CheckInfo as CI
+                cr = CR(name=case_d.get("name", ""), status=case_d.get("status", "PASS"))
+                for chk_d in case_d.get("checks", []):
+                    ci = CI(
+                        name=chk_d.get("name", ""),
+                        signal=chk_d.get("signal", ""),
+                        cycle=chk_d.get("cycle", 0),
+                        time_ns=chk_d.get("time_ns", 0),
+                        offset_ns=chk_d.get("offset_ns", 0),
+                        expected=chk_d.get("expected", ""),
+                        actual=chk_d.get("actual", ""),
+                        status=chk_d.get("status", "PASS"),
+                        source=chk_d.get("source", ""),
+                        message=chk_d.get("message") or "",
+                    )
+                    cr.checks.append(ci)
+                    tr.checks.append(ci)
+                tr.cases.append(cr)
+            write_junit_v2(tr, tmp_path)
+            xml_body = Path(tmp_path).read_text(encoding="utf-8")
+        finally:
+            try:
+                Path(tmp_path).unlink(missing_ok=True)
+            except (PermissionError, OSError):
+                pass
+
+        return Response(
+            content=xml_body,
+            media_type="application/xml",
+            headers={"Content-Disposition": f'attachment; filename="result_{job_id[:8]}.xml"'},
+        )
+    else:
+        import json as _json
+        body = _json.dumps(result, ensure_ascii=False, indent=2)
+        return Response(
+            content=body,
+            media_type="application/json",
+            headers={"Content-Disposition": f'attachment; filename="result_{job_id[:8]}.json"'},
+        )
+
+
+# ---------------------------------------------------------------------------
+# /api/recent-projects — 最近使ったプロジェクト（§18.4）
+# ---------------------------------------------------------------------------
+
+class RecentProjectEntry(BaseModel):
+    sv_files: List[str]
+    top: Optional[str] = None
+    spec: Optional[str] = None
+    name: Optional[str] = None
+
+
+@app.get("/api/recent-projects")
+async def get_recent_projects():
+    """最近使ったプロジェクト一覧を返す（§18.4）。
+
+    存在しないパスは missing=true で識別できるよう付加して返す。
+    """
+    from deltasim.gui.recent import load_recent
+
+    entries = load_recent()
+    enriched = []
+    for e in entries:
+        item = dict(e)
+        sv_missing = [f for f in item.get("sv_files", []) if not os.path.exists(f)]
+        spec_missing = item.get("spec") and not os.path.exists(item["spec"])
+        item["missing"] = bool(sv_missing or spec_missing)
+        item["missing_paths"] = sv_missing + ([item["spec"]] if spec_missing else [])
+        enriched.append(item)
+    return {"recent": enriched}
+
+
+@app.post("/api/recent-projects/add")
+async def add_recent_project(req: RecentProjectEntry):
+    """プロジェクトを最近使った一覧に追加する（§18.4）。"""
+    from deltasim.gui.recent import add_recent
+
+    entry = {
+        "sv_files": req.sv_files,
+        "top": req.top,
+        "spec": req.spec,
+        "name": req.name or (req.top or (Path(req.sv_files[0]).stem if req.sv_files else "unknown")),
+    }
+    await asyncio.to_thread(add_recent, entry)
+    return {"ok": True}
