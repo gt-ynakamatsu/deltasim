@@ -28,20 +28,24 @@ const state = {
   vcdPath: null,
   selectedCase: null,
   selectedSignals: [],
+  signalRadix: {},        // §18.4 B3: 信号ごとの radix (name → 'bin'|'hex'|'unsigned'|'signed')
+  activeSignal: null,     // §18.4 B2: エッジ検索対象の信号名
   radix: "hex",
   zoom: 1.0,
   cursorA: -1,
   cursorB: -1,
   running: false,
   currentJobId: null,
-  currentExportJobId: null,  // §18.4: エクスポート用ジョブID
+  currentExportJobId: null,
+  genResult: null,        // §18.4 A: 最後の生成結果（保存用）
   editorPath: null,
   editorLang: "text",
   errorLines: [],
   browserPath: null,
   browserSelected: null,
+  sigPickerSelected: new Set(),  // 信号ピッカーで選択中
   // デバッグパネル
-  debugSession: null,   // {session_id, module, signals:[]}
+  debugSession: null,
   debugWaveData: null,
 };
 
@@ -61,6 +65,36 @@ const dom = {
   btnStop: $("btn-stop"),
   btnSaveProject: $("btn-save-project"),
   btnDebug: $("btn-debug"),
+  // 波形ツールバー
+  edgeTypeSelect: $("edge-type-select"),
+  btnEdgePrev: $("btn-edge-prev"),
+  btnEdgeNext: $("btn-edge-next"),
+  btnWaveAddSig: $("btn-wave-add-sig"),
+  btnWavesetSave: $("btn-waveset-save"),
+  btnWavesetLoad: $("btn-waveset-load"),
+  // 信号追加ピッカー
+  sigPickerOverlay: $("sig-picker-overlay"),
+  sigPickerSearch: $("sig-picker-search"),
+  sigPickerList: $("sig-picker-list"),
+  btnSigPickerClose: $("btn-sig-picker-close"),
+  btnSigPickerCancel: $("btn-sig-picker-cancel"),
+  btnSigPickerAdd: $("btn-sig-picker-add"),
+  // 波形セット保存ダイアログ
+  wavesetSaveOverlay: $("waveset-save-overlay"),
+  wavesetNameInput: $("waveset-name-input"),
+  wavesetSaveInfo: $("waveset-save-info"),
+  btnWavesetSaveClose: $("btn-waveset-save-close"),
+  btnWavesetSaveCancel: $("btn-waveset-save-cancel"),
+  btnWavesetSaveOk: $("btn-waveset-save-ok"),
+  // 生成保存ダイアログ
+  genSaveOverlay: $("gen-save-overlay"),
+  genSaveDir: $("gen-save-dir"),
+  genSaveTb: $("gen-save-tb"),
+  genSaveSpec: $("gen-save-spec"),
+  genSavePreview: $("gen-save-preview"),
+  btnGenSaveClose: $("btn-gen-save-close"),
+  btnGenSaveCancel: $("btn-gen-save-cancel"),
+  btnGenSaveOk: $("btn-gen-save-ok"),
   btnZoomIn: $("btn-zoom-in"),
   btnZoomOut: $("btn-zoom-out"),
   btnZoomFit: $("btn-zoom-fit"),
@@ -221,6 +255,23 @@ const api = {
   fileRead:     (path)              => apiFetch("GET", `/api/file/read?path=${encodeURIComponent(path)}`),
   fileWrite:    (path, content)     => apiFetch("POST", "/api/file/write", { path, content }),
   gen:          (sv, top)           => apiFetch("POST", "/api/gen", { sv_files: sv, top: top ?? null }),
+  genSave:      (sv, top, outDir, tbPath, specPath, force) => apiFetch("POST", "/api/gen", {
+    sv_files: sv, top: top ?? null, out_dir: outDir ?? null,
+    tb_path: tbPath ?? null, spec_path: specPath ?? null, force: !!force,
+  }),
+  waveEdge:     (path, signal, fromNs, dir, edge) => {
+    const p = new URLSearchParams({ path, signal, from_ns: fromNs, direction: dir, edge });
+    return apiFetch("GET", `/api/waveform/edge?${p}`);
+  },
+  wavesetGet:   (svFiles, spec)     => {
+    const p = new URLSearchParams({ sv_files: svFiles.join(",") });
+    if (spec) p.append("spec", spec);
+    return apiFetch("GET", `/api/waveset?${p}`);
+  },
+  wavesetSave:  (svFiles, spec, name, signals, radix) =>
+    apiFetch("POST", "/api/waveset", { sv_files: svFiles, spec: spec ?? null, name, signals, radix }),
+  wavesetDel:   (svFiles, spec, name) =>
+    apiFetch("DELETE", "/api/waveset", { sv_files: svFiles, spec: spec ?? null, name }),
   testStart:    (sv, spec, top, seed, filterCases) => apiFetch("POST", "/api/test/start", {
     sv_files: sv, spec, top: top ?? null,
     seed: seed !== "" && seed != null ? parseInt(seed) : null,
@@ -465,6 +516,10 @@ async function addCurrentToRecent() {
 // 生成ボタン（§18.4 gen）
 // =========================================================================
 
+// =========================================================================
+// 生成ボタン（§18.4 A: 生成結果の保存画面）
+// =========================================================================
+
 async function runGen() {
   if (!state.project.svFiles.length) {
     log("SV ファイルを選択してください", "log-error");
@@ -481,25 +536,161 @@ async function runGen() {
       setStatus("生成失敗", "error");
       return;
     }
+    state.genResult = result;
     if (result.spec_yaml) {
-      // 文字列モード: エディタに表示
       setEditorContent(result.spec_yaml, "yaml");
       log(`✓ スペック YAML を生成しました（${result.module}）`, "log-info");
-      if (result.tb_sv) {
-        log(`TB SV も生成済み（表示はスペックのみ）`, "log-line");
-      }
+      if (result.tb_sv) log(`TB SV も生成済み（表示はスペックのみ）`, "log-line");
     } else if (result.spec_path) {
-      log(`✓ 生成完了: ${result.spec_path}`, "log-info");
-      // 生成したスペックをプロジェクトに追加
       state.project.specFile = { path: result.spec_path };
       renderFileList();
       await openFileInEditor(result.spec_path);
+      log(`✓ 生成完了: ${result.spec_path}`, "log-info");
     }
     setStatus("生成完了", "idle");
+    // 保存ダイアログを開く（文字列モードの場合）
+    if (result.spec_yaml || result.tb_sv) {
+      openGenSaveDialog(result);
+    }
   } catch (e) {
     log(`生成エラー: ${e.message}`, "log-error");
     setStatus("生成エラー", "error");
   }
+}
+
+function openGenSaveDialog(result) {
+  // デフォルト保存先: プロジェクトのフォルダまたはカレント
+  const firstSv = state.project.svFiles[0]?.path ?? "";
+  const projDir = firstSv ? firstSv.replace(/[\\/][^\\/]+$/, "") : ".";
+  if (dom.genSaveDir) dom.genSaveDir.value = projDir;
+  if (dom.genSaveTb) dom.genSaveTb.checked = !!result.tb_sv;
+  if (dom.genSaveSpec) dom.genSaveSpec.checked = !!result.spec_yaml;
+  _updateGenSavePreview();
+  if (dom.genSaveOverlay) dom.genSaveOverlay.style.display = "flex";
+}
+
+function _updateGenSavePreview() {
+  if (!dom.genSavePreview || !state.genResult) return;
+  const dir = dom.genSaveDir?.value?.trim() || ".";
+  const mod = state.genResult.module || "module";
+  const lines = [];
+  if (dom.genSaveTb?.checked) lines.push(`${dir}/${mod}_tb.sv`);
+  if (dom.genSaveSpec?.checked) lines.push(`${dir}/${mod}_spec.yaml`);
+  dom.genSavePreview.textContent = lines.length
+    ? "書き出し先:\n" + lines.join("\n")
+    : "(保存するファイルを選択してください)";
+}
+
+async function execGenSave(force = false) {
+  if (!state.genResult || !state.project.svFiles.length) return;
+  const dir = dom.genSaveDir?.value?.trim() || ".";
+  const mod = state.genResult.module || "module";
+  const svPaths = state.project.svFiles.map(f => f.path);
+  const top = state.project.top;
+  const tbPath = dom.genSaveTb?.checked ? null : "SKIP";   // null = auto, "SKIP" = no-tb
+  const specPath = dom.genSaveSpec?.checked ? null : "SKIP";
+  const noTb = !dom.genSaveTb?.checked;
+  const noSpec = !dom.genSaveSpec?.checked;
+
+  try {
+    const res = await api.genSave(
+      svPaths, top,
+      dir,
+      noTb ? `${dir}/__skip_tb__` : null,   // trick: pass null for auto
+      noSpec ? `${dir}/__skip_spec__` : null,
+      force,
+    );
+
+    // よりシンプルに: out_dir だけ指定して force を渡す
+    const res2 = await apiFetch("POST", "/api/gen", {
+      sv_files: svPaths,
+      top: top ?? null,
+      out_dir: dir,
+      tb_path: noTb ? undefined : null,
+      spec_path: noSpec ? undefined : null,
+      force: force,
+    }).catch(e => { throw e; });
+
+    if (res2.status === "ERROR") {
+      log(`保存失敗: ${(res2.errors ?? []).map(e => e.message).join(", ")}`, "log-error");
+      return;
+    }
+    if (dom.genSaveOverlay) dom.genSaveOverlay.style.display = "none";
+    log(`✓ 保存完了: ${res2.tb_path ?? ""} ${res2.spec_path ?? ""}`, "log-info");
+    if (res2.spec_path) {
+      state.project.specFile = { path: res2.spec_path };
+      renderFileList();
+      await openFileInEditor(res2.spec_path);
+      await addCurrentToRecent();
+      await loadRecentProjects();
+    }
+    setStatus("保存完了", "idle");
+  } catch (e) {
+    log(`保存エラー: ${e.message}`, "log-error");
+    setStatus("保存エラー", "error");
+  }
+}
+
+async function handleGenSaveOk() {
+  if (!state.genResult || !state.project.svFiles.length) return;
+  const dir = dom.genSaveDir?.value?.trim() || ".";
+  const noTb = !dom.genSaveTb?.checked;
+  const noSpec = !dom.genSaveSpec?.checked;
+  const svPaths = state.project.svFiles.map(f => f.path);
+  const top = state.project.top;
+
+  try {
+    // まず force=false で試みる
+    const res = await apiFetch("POST", "/api/gen", {
+      sv_files: svPaths,
+      top: top ?? null,
+      out_dir: dir,
+      force: false,
+    });
+
+    if (res.status === "ERROR") {
+      log(`保存失敗: ${(res.errors ?? []).map(e => e.message).join(", ")}`, "log-error");
+      return;
+    }
+
+    _applyGenSaveResult(res);
+  } catch (errObj) {
+    // 409: ファイルが既に存在する → 確認ダイアログ
+    let msg = errObj.message ?? String(errObj);
+    // fetch の場合はレスポンスボディに conflict がある
+    if (msg.includes("既に存在") || msg.includes("409") || msg.includes("conflict")) {
+      const ok = window.confirm(
+        `ファイルが既に存在します。上書きしますか？\n\n${msg.slice(0, 200)}`
+      );
+      if (!ok) return;
+      try {
+        const res2 = await apiFetch("POST", "/api/gen", {
+          sv_files: svPaths,
+          top: top ?? null,
+          out_dir: dir,
+          force: true,
+        });
+        _applyGenSaveResult(res2);
+      } catch (e2) {
+        log(`上書き保存失敗: ${e2.message}`, "log-error");
+      }
+    } else {
+      log(`保存エラー: ${msg}`, "log-error");
+      setStatus("保存エラー", "error");
+    }
+  }
+}
+
+function _applyGenSaveResult(res) {
+  if (dom.genSaveOverlay) dom.genSaveOverlay.style.display = "none";
+  log(`✓ 保存完了: ${[res.tb_path, res.spec_path].filter(Boolean).join(", ")}`, "log-info");
+  if (res.spec_path) {
+    state.project.specFile = { path: res.spec_path };
+    renderFileList();
+    openFileInEditor(res.spec_path);
+    addCurrentToRecent().then(() => loadRecentProjects());
+  }
+  setStatus("保存完了", "idle");
 }
 
 // =========================================================================
@@ -895,12 +1086,33 @@ function selectCase(card, c) {
   document.querySelectorAll(".case-card").forEach(el => el.classList.remove("selected"));
   card.classList.add("selected");
   state.selectedCase = c;
-  // 下段に詳細表示
   _renderCaseDetail(c);
-  // 波形カーソルを最初の失敗へジャンプ
-  const firstFail = (c.checks ?? []).find(chk => chk.status !== "PASS" && chk.status !== "SKIP");
-  if (firstFail && state.waveformData) {
+
+  // §18.4 B5: FAIL 選択時に対象信号をハイライト・未表示なら追加・time_ns へジャンプ
+  const failChecks = (c.checks ?? []).filter(chk => chk.status !== "PASS" && chk.status !== "SKIP");
+  if (failChecks.length > 0 && state.waveformData) {
+    // 実際の信号名（<expr> や空欄は除外）
+    const failSigs = [...new Set(
+      failChecks
+        .map(chk => chk.signal)
+        .filter(s => s && s !== "<expr>" && !s.startsWith("<"))
+    )];
+    if (failSigs.length > 0) addSigs(failSigs);
+
+    // カーソル A を最初の失敗の time_ns へ
+    const firstFail = failChecks[0];
     state.cursorA = firstFail.time_ns ?? (firstFail.cycle ?? 0) * 10;
+
+    // 失敗信号名を highlighted 表示
+    document.querySelectorAll(".sig-name-row").forEach(row => {
+      const sigName = row.dataset.sig;
+      if (failSigs.includes(sigName)) {
+        row.classList.add("sig-fail-highlight");
+      } else {
+        row.classList.remove("sig-fail-highlight");
+      }
+    });
+
     drawWaveform();
   }
 }
@@ -1060,16 +1272,216 @@ function clearWaveform() {
   canvas.getContext("2d").clearRect(0, 0, canvas.width, canvas.height);
 }
 
+// §18.4 B3: radix の表示ラベル
+const RADIX_LABELS = { bin: "BIN", hex: "HEX", unsigned: "U", signed: "S" };
+const RADIX_CYCLE  = ["hex", "bin", "unsigned", "signed"];
+
+function _nextRadix(cur) {
+  const idx = RADIX_CYCLE.indexOf(cur);
+  return RADIX_CYCLE[(idx + 1) % RADIX_CYCLE.length];
+}
+
 function renderSignalNames() {
   dom.signalNames.innerHTML = "";
-  state.selectedSignals.forEach(name => {
+  state.selectedSignals.forEach((name, idx) => {
     const row = document.createElement("div");
     row.className = "sig-name-row";
-    row.textContent = name;
-    row.title = name;
-    row.addEventListener("click", () => row.classList.toggle("highlighted"));
+    row.dataset.sig = name;
+
+    const radix = state.signalRadix[name] || state.radix;
+    const isActive = state.activeSignal === name;
+
+    row.innerHTML = `
+      <button class="sig-btn sig-btn-up" title="上へ" ${idx === 0 ? "disabled" : ""}>▴</button>
+      <button class="sig-btn sig-btn-dn" title="下へ" ${idx === state.selectedSignals.length - 1 ? "disabled" : ""}>▾</button>
+      <span class="sig-name-label ${isActive ? "sig-active" : ""}" title="${escHtml(name)}">${escHtml(name)}</span>
+      <button class="sig-btn sig-radix-btn" title="基数切替: ${radix}">${RADIX_LABELS[radix] ?? radix}</button>
+      <button class="sig-btn sig-btn-rm" title="削除">✕</button>
+    `;
+
+    row.querySelector(".sig-btn-up").addEventListener("click", e => {
+      e.stopPropagation();
+      _moveSig(name, -1);
+    });
+    row.querySelector(".sig-btn-dn").addEventListener("click", e => {
+      e.stopPropagation();
+      _moveSig(name, +1);
+    });
+    row.querySelector(".sig-name-label").addEventListener("click", () => {
+      state.activeSignal = state.activeSignal === name ? null : name;
+      renderSignalNames();
+    });
+    row.querySelector(".sig-radix-btn").addEventListener("click", e => {
+      e.stopPropagation();
+      state.signalRadix[name] = _nextRadix(radix);
+      renderSignalNames();
+      drawWaveform();
+    });
+    row.querySelector(".sig-btn-rm").addEventListener("click", e => {
+      e.stopPropagation();
+      removeSig(name);
+    });
+
     dom.signalNames.appendChild(row);
   });
+  dom.waveSigCount.textContent = `${state.selectedSignals.length} 信号表示`;
+}
+
+function _moveSig(name, delta) {
+  const idx = state.selectedSignals.indexOf(name);
+  if (idx < 0) return;
+  const newIdx = idx + delta;
+  if (newIdx < 0 || newIdx >= state.selectedSignals.length) return;
+  state.selectedSignals.splice(idx, 1);
+  state.selectedSignals.splice(newIdx, 0, name);
+  renderSignalNames();
+  drawWaveform();
+}
+
+function removeSig(name) {
+  state.selectedSignals = state.selectedSignals.filter(s => s !== name);
+  if (state.activeSignal === name) state.activeSignal = null;
+  renderSignalNames();
+  drawWaveform();
+}
+
+function addSigs(names) {
+  const existing = new Set(state.selectedSignals);
+  for (const n of names) {
+    if (!existing.has(n)) {
+      state.selectedSignals.push(n);
+      existing.add(n);
+    }
+  }
+  renderSignalNames();
+  if (state.waveformData) drawWaveform();
+}
+
+// =========================================================================
+// 信号追加ピッカー（§18.4 B1）
+// =========================================================================
+
+function openSigPicker() {
+  if (!state.vcdIndex) {
+    log("VCD が読み込まれていません", "log-warn");
+    return;
+  }
+  state.sigPickerSelected = new Set();
+  renderSigPicker("");
+  if (dom.sigPickerOverlay) dom.sigPickerOverlay.style.display = "flex";
+  if (dom.sigPickerSearch) {
+    dom.sigPickerSearch.value = "";
+    dom.sigPickerSearch.focus();
+  }
+}
+
+function renderSigPicker(filter) {
+  if (!dom.sigPickerList || !state.vcdIndex) return;
+  const allSigs = Object.keys(state.vcdIndex.signals || {});
+  const flt = filter.toLowerCase();
+  const filtered = flt ? allSigs.filter(s => s.toLowerCase().includes(flt)) : allSigs;
+
+  dom.sigPickerList.innerHTML = filtered.map(name => {
+    const added = state.selectedSignals.includes(name);
+    const sel = state.sigPickerSelected.has(name);
+    return `<div class="sig-picker-row ${sel ? "selected" : ""} ${added ? "already-added" : ""}"
+      data-name="${escHtml(name)}" title="${escHtml(name)}">
+      ${sel ? "☑" : "☐"} ${escHtml(name)} ${added ? "<span style='color:#8888aa;font-size:9px;'>(追加済)</span>" : ""}
+    </div>`;
+  }).join("") || '<div style="padding:8px;color:#8888aa;">一致する信号がありません</div>';
+
+  dom.sigPickerList.querySelectorAll(".sig-picker-row").forEach(el => {
+    el.addEventListener("click", () => {
+      const n = el.dataset.name;
+      if (state.sigPickerSelected.has(n)) {
+        state.sigPickerSelected.delete(n);
+      } else {
+        state.sigPickerSelected.add(n);
+      }
+      renderSigPicker(dom.sigPickerSearch?.value ?? "");
+    });
+  });
+}
+
+// =========================================================================
+// エッジ検索（§18.4 B2）
+// =========================================================================
+
+async function searchEdge(direction) {
+  if (!state.vcdPath || !state.activeSignal) {
+    log("VCD と検索対象信号を選択してください", "log-warn");
+    return;
+  }
+  const edgeType = dom.edgeTypeSelect?.value ?? "any";
+  const fromNs = state.cursorA >= 0 ? state.cursorA : 0;
+  try {
+    const data = await api.waveEdge(state.vcdPath, state.activeSignal, fromNs, direction, edgeType);
+    if (data.found && data.time_ns != null) {
+      state.cursorA = data.time_ns;
+      drawWaveform();
+      log(`エッジ: ${state.activeSignal} t=${data.time_ns}ns (${direction})`, "log-info");
+    } else {
+      log(`エッジが見つかりません: ${state.activeSignal} (${direction}, ${edgeType})`, "log-warn");
+    }
+  } catch (e) {
+    log(`エッジ検索エラー: ${e.message}`, "log-error");
+  }
+}
+
+// =========================================================================
+// 波形表示セット保存・読込（§18.4 B4）
+// =========================================================================
+
+function openWavesetSaveDialog() {
+  if (!state.selectedSignals.length) {
+    log("表示中の信号がありません", "log-warn");
+    return;
+  }
+  if (dom.wavesetNameInput) dom.wavesetNameInput.value = "";
+  if (dom.wavesetSaveInfo) {
+    dom.wavesetSaveInfo.textContent =
+      `信号 ${state.selectedSignals.length} 件を保存します。`;
+  }
+  if (dom.wavesetSaveOverlay) dom.wavesetSaveOverlay.style.display = "flex";
+  if (dom.wavesetNameInput) dom.wavesetNameInput.focus();
+}
+
+async function execWavesetSave() {
+  const name = dom.wavesetNameInput?.value?.trim();
+  if (!name) { log("セット名を入力してください", "log-warn"); return; }
+  const svPaths = state.project.svFiles.map(f => f.path);
+  const spec = state.project.specFile?.path ?? null;
+  try {
+    await api.wavesetSave(svPaths, spec, name, state.selectedSignals, state.signalRadix);
+    if (dom.wavesetSaveOverlay) dom.wavesetSaveOverlay.style.display = "none";
+    log(`✓ 波形セット「${name}」を保存しました`, "log-info");
+  } catch (e) {
+    log(`セット保存エラー: ${e.message}`, "log-error");
+  }
+}
+
+async function openWavesetLoadMenu() {
+  const svPaths = state.project.svFiles.map(f => f.path);
+  const spec = state.project.specFile?.path ?? null;
+  if (!svPaths.length) { log("プロジェクトが未選択です", "log-warn"); return; }
+  try {
+    const data = await api.wavesetGet(svPaths, spec);
+    const sets = data.sets ?? [];
+    if (!sets.length) { log("保存済みのセットがありません", "log-warn"); return; }
+    // シンプルな選択: window.prompt で名前を入力
+    const names = sets.map(s => s.name).join(", ");
+    const chosen = window.prompt(`読み込むセット名:\n${names}`, sets[0].name);
+    if (!chosen) return;
+    const found = sets.find(s => s.name === chosen);
+    if (!found) { log(`セットが見つかりません: ${chosen}`, "log-warn"); return; }
+    state.selectedSignals = [...(found.signals ?? [])];
+    state.signalRadix = { ...(found.radix ?? {}) };
+    renderSignalNames();
+    if (state.vcdPath) await fetchWaveRange();
+    log(`✓ 波形セット「${chosen}」を読み込みました`, "log-info");
+  } catch (e) {
+    log(`セット読込エラー: ${e.message}`, "log-error");
+  }
 }
 
 // =========================================================================
@@ -1140,7 +1552,7 @@ function drawWaveform() {
   sigs.forEach((name, si) => {
     const sigData = state.waveformData.signals[name];
     if (!sigData) return;
-    _drawSignal(ctx, sigData, WAVE_RULER_H + si * WAVE_ROW_H, WAVE_ROW_H, totalW, endTime, pxPerNs);
+    _drawSignal(ctx, sigData, WAVE_RULER_H + si * WAVE_ROW_H, WAVE_ROW_H, totalW, endTime, pxPerNs, name);
   });
 
   _drawCursor(ctx, state.cursorA, "#f9c74f", totalH);
@@ -1160,7 +1572,7 @@ function _drawCursor(ctx, t, color, h) {
   ctx.setLineDash([]);
 }
 
-function _drawSignal(ctx, sigData, y0, rowH, totalW, endTime, pxPerNs) {
+function _drawSignal(ctx, sigData, y0, rowH, totalW, endTime, pxPerNs, name) {
   const changes = sigData.changes;
   const width = sigData.width;
   const is1bit = width === 1;
@@ -1200,28 +1612,32 @@ function _drawSignal(ctx, sigData, y0, rowH, totalW, endTime, pxPerNs) {
       ctx.closePath(); ctx.fill(); ctx.stroke();
       const segW = x1 - x0;
       if (segW > 18) {
+        const sigRadix = state.signalRadix[name] || state.radix;
         ctx.fillStyle = stroke;
-        ctx.fillText(_truncate(fmtVal(v0, width, state.radix), segW - 10, ctx),
+        ctx.fillText(_truncate(fmtVal(v0, width, sigRadix), segW - 10, ctx),
                      (x0 + x1) / 2, midY + 3.5);
       }
     }
   }
 }
 
-// §12.4: Z と X の区別（大文字小文字は正規化済み）
+// §12.4 / §18.4 B3: Z/X 区別色、符号付き・符号なし表示
 function fmtVal(binStr, width, radix) {
   if (typeof binStr !== "string") binStr = String(binStr);
   const lower = binStr.toLowerCase();
-  // 単一文字 x/z はそのまま大文字表示
   if (lower === "x") return "X";
   if (lower === "z") return "Z";
-  // 混在バイナリ → そのまま
-  if (lower.includes("x") || lower.includes("z")) return binStr;
+  if (lower.includes("x") || lower.includes("z")) return binStr;  // 混在 → そのまま
   if (radix === "bin") return "b" + lower.padStart(width, "0");
   const n = parseInt(lower, 2);
   if (isNaN(n)) return binStr;
   if (radix === "hex") return "0x" + n.toString(16).toUpperCase().padStart(Math.ceil(width / 4), "0");
-  if (radix === "dec") return String(n);
+  if (radix === "dec" || radix === "unsigned") return String(n);
+  if (radix === "signed") {
+    // 2 の補数
+    const signed = n >= (1 << (width - 1)) ? n - (1 << width) : n;
+    return String(signed);
+  }
   return binStr;
 }
 
@@ -1683,6 +2099,37 @@ dom.btnSaveFile.addEventListener("click", saveFile);
 dom.btnClearLog.addEventListener("click", logClear);
 if (dom.btnExportJson) dom.btnExportJson.addEventListener("click", () => exportResult("json"));
 if (dom.btnExportJunit) dom.btnExportJunit.addEventListener("click", () => exportResult("junit"));
+
+// 波形ツールバー（§18.4 B1/B2/B4）
+if (dom.btnEdgePrev) dom.btnEdgePrev.addEventListener("click", () => searchEdge("prev"));
+if (dom.btnEdgeNext) dom.btnEdgeNext.addEventListener("click", () => searchEdge("next"));
+if (dom.btnWaveAddSig) dom.btnWaveAddSig.addEventListener("click", openSigPicker);
+if (dom.btnWavesetSave) dom.btnWavesetSave.addEventListener("click", openWavesetSaveDialog);
+if (dom.btnWavesetLoad) dom.btnWavesetLoad.addEventListener("click", openWavesetLoadMenu);
+
+// 信号ピッカー
+if (dom.btnSigPickerClose) dom.btnSigPickerClose.addEventListener("click", () => { dom.sigPickerOverlay.style.display = "none"; });
+if (dom.btnSigPickerCancel) dom.btnSigPickerCancel.addEventListener("click", () => { dom.sigPickerOverlay.style.display = "none"; });
+if (dom.btnSigPickerAdd) dom.btnSigPickerAdd.addEventListener("click", () => {
+  addSigs([...state.sigPickerSelected]);
+  dom.sigPickerOverlay.style.display = "none";
+  fetchWaveRange().catch(() => {});
+});
+if (dom.sigPickerSearch) dom.sigPickerSearch.addEventListener("input", e => renderSigPicker(e.target.value));
+if (dom.sigPickerOverlay) dom.sigPickerOverlay.addEventListener("click", e => { if (e.target === dom.sigPickerOverlay) dom.sigPickerOverlay.style.display = "none"; });
+
+// 波形セット保存ダイアログ
+if (dom.btnWavesetSaveClose) dom.btnWavesetSaveClose.addEventListener("click", () => { dom.wavesetSaveOverlay.style.display = "none"; });
+if (dom.btnWavesetSaveCancel) dom.btnWavesetSaveCancel.addEventListener("click", () => { dom.wavesetSaveOverlay.style.display = "none"; });
+if (dom.btnWavesetSaveOk) dom.btnWavesetSaveOk.addEventListener("click", execWavesetSave);
+
+// 生成保存ダイアログ
+if (dom.btnGenSaveClose) dom.btnGenSaveClose.addEventListener("click", () => { dom.genSaveOverlay.style.display = "none"; });
+if (dom.btnGenSaveCancel) dom.btnGenSaveCancel.addEventListener("click", () => { dom.genSaveOverlay.style.display = "none"; });
+if (dom.btnGenSaveOk) dom.btnGenSaveOk.addEventListener("click", handleGenSaveOk);
+if (dom.genSaveDir) dom.genSaveDir.addEventListener("input", _updateGenSavePreview);
+if (dom.genSaveTb) dom.genSaveTb.addEventListener("change", _updateGenSavePreview);
+if (dom.genSaveSpec) dom.genSaveSpec.addEventListener("change", _updateGenSavePreview);
 
 dom.btnBrowserClose.addEventListener("click", closeBrowser);
 dom.btnBrowserCancel.addEventListener("click", closeBrowser);

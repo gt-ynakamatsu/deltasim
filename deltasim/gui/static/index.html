@@ -151,12 +151,23 @@
   <!-- ===== 波形ビューア ===== -->
   <section id="waveform-panel">
     <div id="waveform-toolbar">
-      <span>波形ビューア</span>
+      <span>波形</span>
       <button id="btn-zoom-in"  class="btn btn-secondary" style="padding:2px 8px;" title="拡大">＋</button>
       <button id="btn-zoom-out" class="btn btn-secondary" style="padding:2px 8px;" title="縮小">－</button>
-      <button id="btn-zoom-fit" class="btn btn-secondary" style="padding:2px 8px;" title="全体表示">⊡ 全体</button>
-      <span id="wave-sig-count" style="font-size:11px; color:#8888aa;"></span>
-      <span style="font-size:11px; color:#8888aa;">　クリック: カーソルA　Shift+クリック: カーソルB</span>
+      <button id="btn-zoom-fit" class="btn btn-secondary" style="padding:2px 8px;" title="全体表示">⊡</button>
+      <span style="margin-left:4px;font-size:10px;color:#8888aa;">エッジ:</span>
+      <select id="edge-type-select" style="font-size:10px;padding:1px 4px;background:#1e1e2e;border:1px solid #3d3d5c;color:#e2e2f0;border-radius:3px;" title="エッジ種別">
+        <option value="any">任意</option>
+        <option value="rising">立上り</option>
+        <option value="falling">立下り</option>
+      </select>
+      <button id="btn-edge-prev" class="btn btn-secondary" style="padding:2px 7px;font-size:11px;" title="前のエッジへ">◀</button>
+      <button id="btn-edge-next" class="btn btn-secondary" style="padding:2px 7px;font-size:11px;" title="次のエッジへ">▶</button>
+      <span style="margin-left:4px;font-size:10px;color:#8888aa;">|</span>
+      <button id="btn-wave-add-sig" class="btn btn-secondary" style="padding:2px 7px;font-size:10px;" title="信号を追加">＋信号</button>
+      <button id="btn-waveset-save" class="btn btn-secondary" style="padding:2px 7px;font-size:10px;" title="表示セットを保存">💾</button>
+      <button id="btn-waveset-load" class="btn btn-secondary" style="padding:2px 7px;font-size:10px;" title="表示セットを読込">📂</button>
+      <span id="wave-sig-count" style="font-size:11px; color:#8888aa;margin-left:4px;"></span>
     </div>
     <div id="waveform-container">
       <div id="signal-names"></div>
@@ -165,6 +176,75 @@
       </div>
     </div>
   </section>
+
+  <!-- ===== 信号追加ピッカー ===== -->
+  <div id="sig-picker-overlay" class="dialog-overlay" style="display:none;">
+    <div class="dialog-box" style="width:500px;">
+      <div class="dialog-header">
+        <span>信号を追加</span>
+        <button class="dialog-close" id="btn-sig-picker-close">✕</button>
+      </div>
+      <div style="padding:8px;border-bottom:1px solid #3d3d5c;">
+        <input id="sig-picker-search" type="text" placeholder="信号名で絞り込み…"
+               style="width:100%;box-sizing:border-box;padding:5px 8px;background:#1e1e2e;border:1px solid #3d3d5c;color:#e2e2f0;font-size:12px;border-radius:4px;">
+      </div>
+      <div id="sig-picker-list" style="max-height:300px;overflow-y:auto;padding:4px;"></div>
+      <div class="dialog-footer">
+        <button class="btn btn-secondary" id="btn-sig-picker-cancel">キャンセル</button>
+        <button class="btn btn-primary" id="btn-sig-picker-add">追加</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 波形セット保存ダイアログ ===== -->
+  <div id="waveset-save-overlay" class="dialog-overlay" style="display:none;">
+    <div class="dialog-box" style="width:380px;">
+      <div class="dialog-header">
+        <span>💾 波形セットを保存</span>
+        <button class="dialog-close" id="btn-waveset-save-close">✕</button>
+      </div>
+      <div style="padding:12px;">
+        <label style="font-size:12px;color:#a3a3b4;">セット名:</label>
+        <input id="waveset-name-input" type="text" placeholder="例: デフォルト表示"
+               style="width:100%;box-sizing:border-box;margin-top:4px;padding:6px 8px;background:#1e1e2e;border:1px solid #3d3d5c;color:#e2e2f0;font-size:12px;border-radius:4px;">
+        <div id="waveset-save-info" style="margin-top:8px;font-size:11px;color:#8888aa;"></div>
+      </div>
+      <div class="dialog-footer">
+        <button class="btn btn-secondary" id="btn-waveset-save-cancel">キャンセル</button>
+        <button class="btn btn-primary" id="btn-waveset-save-ok">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 生成結果の保存ダイアログ ===== -->
+  <div id="gen-save-overlay" class="dialog-overlay" style="display:none;">
+    <div class="dialog-box" style="width:480px;">
+      <div class="dialog-header">
+        <span>⚙ 生成ファイルを保存</span>
+        <button class="dialog-close" id="btn-gen-save-close">✕</button>
+      </div>
+      <div style="padding:12px;display:flex;flex-direction:column;gap:8px;">
+        <div>
+          <label style="font-size:11px;color:#a3a3b4;">保存ディレクトリ（既定: プロジェクトフォルダ）:</label>
+          <input id="gen-save-dir" type="text" placeholder="例: /path/to/project"
+                 style="width:100%;box-sizing:border-box;margin-top:3px;padding:5px 8px;background:#1e1e2e;border:1px solid #3d3d5c;color:#e2e2f0;font-size:11px;border-radius:4px;">
+        </div>
+        <div style="display:flex;gap:8px;">
+          <label style="font-size:11px;color:#a3a3b4;display:flex;align-items:center;gap:4px;">
+            <input type="checkbox" id="gen-save-tb" checked> TB SV を保存
+          </label>
+          <label style="font-size:11px;color:#a3a3b4;display:flex;align-items:center;gap:4px;">
+            <input type="checkbox" id="gen-save-spec" checked> スペック YAML を保存
+          </label>
+        </div>
+        <div id="gen-save-preview" style="font-size:10px;color:#8888aa;font-family:monospace;"></div>
+      </div>
+      <div class="dialog-footer">
+        <button class="btn btn-secondary" id="btn-gen-save-cancel">キャンセル</button>
+        <button class="btn btn-primary" id="btn-gen-save-ok">保存</button>
+      </div>
+    </div>
+  </div>
 
   <!-- ===== ログ ===== -->
   <section id="log-panel">

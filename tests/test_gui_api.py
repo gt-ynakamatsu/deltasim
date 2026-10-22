@@ -2468,3 +2468,404 @@ class TestIsPidRunning:
         # 99999999 は実際のシステムでまず使われない PID
         result = _is_pid_running(99999999)
         assert result is False, "存在しない PID は False を返すこと"
+
+
+# ============================================================================
+# 次の PR: A. 生成結果の保存画面 + B. 波形機能
+# ============================================================================
+
+EXAMPLES_DIR_PATH = Path(__file__).parent.parent / "examples"
+_COUNTER_SV   = str(EXAMPLES_DIR_PATH / "counter.sv")
+_COUNTER_SPEC = str(EXAMPLES_DIR_PATH / "counter_spec.yaml")
+_MUX2_SV      = str(EXAMPLES_DIR_PATH / "mux2.sv")
+
+
+# ---------------------------------------------------------------------------
+# A. /api/gen の force フラグ・409 応答テスト
+# ---------------------------------------------------------------------------
+
+class TestGenSave:
+    """§18.4 A: 生成結果の保存 — force フラグと 409 応答"""
+
+    @pytest.fixture()
+    def client(self):
+        with TestClient(app, base_url="http://127.0.0.1") as c:
+            yield c
+
+    def test_gen_string_mode_no_force_needed(self, client):
+        """ファイルを書き出さない文字列モードは force 不要"""
+        res = client.post("/api/gen", json={"sv_files": [_COUNTER_SV], "top": "counter"})
+        assert res.status_code == 200
+        data = res.json()
+        assert data.get("status") == "PASS"
+        assert "spec_yaml" in data
+
+    def test_gen_file_mode_409_on_existing(self, client, tmp_path):
+        """ファイルが既に存在する場合 409 を返すこと"""
+        from deltasim.gui.filesec import add_extra_root
+        add_extra_root(tmp_path)
+
+        # 既存ファイルを作成
+        (tmp_path / "counter_tb.sv").write_text("// existing")
+        (tmp_path / "counter_spec.yaml").write_text("# existing")
+
+        res = client.post("/api/gen", json={
+            "sv_files": [_COUNTER_SV],
+            "top": "counter",
+            "out_dir": str(tmp_path),
+            "force": False,
+        })
+        assert res.status_code == 409, f"既存ファイルがある場合 409: {res.text}"
+        data = res.json()
+        assert "conflict" in data
+        assert len(data["conflict"]) >= 1
+
+    def test_gen_file_mode_force_overwrites(self, client, tmp_path):
+        """force=True の場合は既存ファイルを上書きすること"""
+        from deltasim.gui.filesec import add_extra_root
+        add_extra_root(tmp_path)
+
+        (tmp_path / "counter_tb.sv").write_text("// existing")
+        (tmp_path / "counter_spec.yaml").write_text("# existing")
+
+        res = client.post("/api/gen", json={
+            "sv_files": [_COUNTER_SV],
+            "top": "counter",
+            "out_dir": str(tmp_path),
+            "force": True,
+        })
+        assert res.status_code == 200, f"force=True で上書き成功: {res.text}"
+        data = res.json()
+        assert data.get("status") == "PASS"
+        # ファイルが上書きされていること
+        assert (tmp_path / "counter_tb.sv").read_text() != "// existing"
+        assert (tmp_path / "counter_spec.yaml").read_text() != "# existing"
+
+    def test_gen_file_mode_no_conflict_no_409(self, client, tmp_path):
+        """ファイルが存在しない場合は force なしでも書き出せること"""
+        from deltasim.gui.filesec import add_extra_root
+        add_extra_root(tmp_path)
+
+        res = client.post("/api/gen", json={
+            "sv_files": [_COUNTER_SV],
+            "top": "counter",
+            "out_dir": str(tmp_path),
+            "force": False,
+        })
+        assert res.status_code == 200
+        data = res.json()
+        assert data.get("status") == "PASS"
+        assert (tmp_path / "counter_tb.sv").exists()
+        assert (tmp_path / "counter_spec.yaml").exists()
+
+    def test_gen_409_conflict_list_correct(self, client, tmp_path):
+        """409 の conflict リストに正しいパスが含まれること"""
+        from deltasim.gui.filesec import add_extra_root
+        add_extra_root(tmp_path)
+
+        tb_path = tmp_path / "counter_tb.sv"
+        tb_path.write_text("// existing")
+
+        res = client.post("/api/gen", json={
+            "sv_files": [_COUNTER_SV],
+            "top": "counter",
+            "out_dir": str(tmp_path),
+            "force": False,
+        })
+        assert res.status_code == 409
+        data = res.json()
+        conflict_paths = data.get("conflict", [])
+        assert any("counter_tb.sv" in p for p in conflict_paths), (
+            f"tb_path が conflict に含まれること: {conflict_paths}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# B2. /api/waveform/edge — エッジ検索テスト
+# ---------------------------------------------------------------------------
+
+class TestWaveEdge:
+    """§18.4 B2: エッジ検索 API と waveutil.find_edge() の純粋関数テスト"""
+
+    # --- 純粋関数テスト ---
+
+    def test_find_edge_next_any(self):
+        """next/any: from_ns より後の最初の変化を返すこと"""
+        from deltasim.gui.waveutil import find_edge
+        changes = [(0, "0"), (10, "1"), (20, "0"), (30, "1")]
+        assert find_edge(changes, 5, "next", "any") == 10
+        assert find_edge(changes, 10, "next", "any") == 20
+
+    def test_find_edge_prev_any(self):
+        """prev/any: from_ns より前の最後の変化を返すこと"""
+        from deltasim.gui.waveutil import find_edge
+        changes = [(0, "0"), (10, "1"), (20, "0"), (30, "1")]
+        assert find_edge(changes, 25, "prev", "any") == 20
+        assert find_edge(changes, 10, "prev", "any") is None
+
+    def test_find_edge_rising(self):
+        """rising: L→H の変化のみ検出すること"""
+        from deltasim.gui.waveutil import find_edge
+        changes = [(0, "0"), (10, "1"), (20, "0"), (30, "1")]
+        assert find_edge(changes, 0, "next", "rising") == 10
+        assert find_edge(changes, 15, "next", "rising") == 30  # 20は falling をスキップ
+
+    def test_find_edge_falling(self):
+        """falling: H→L の変化のみ検出すること"""
+        from deltasim.gui.waveutil import find_edge
+        changes = [(0, "0"), (10, "1"), (20, "0"), (30, "1")]
+        assert find_edge(changes, 0, "next", "falling") == 20
+
+    def test_find_edge_no_change(self):
+        """変化がない場合は None を返すこと"""
+        from deltasim.gui.waveutil import find_edge
+        changes = [(0, "0"), (10, "0")]  # 値が変わっていない
+        assert find_edge(changes, 0, "next", "any") is None
+
+    def test_find_edge_empty(self):
+        """空リストは None を返すこと"""
+        from deltasim.gui.waveutil import find_edge
+        assert find_edge([], 0, "next", "any") is None
+
+    def test_find_edge_multibit_any(self):
+        """多ビット信号: 値の変化があれば any"""
+        from deltasim.gui.waveutil import find_edge
+        changes = [(0, "0000"), (10, "0001"), (20, "0011")]
+        assert find_edge(changes, 5, "next", "any", width=4) == 10
+
+    # --- /api/waveform/edge エンドポイントテスト ---
+
+    @pytest.fixture(scope="class")
+    def edge_vcd(self, tmp_path_factory):
+        """エッジ検索用の VCD を生成する"""
+        vcd = tmp_path_factory.mktemp("edge") / "counter.vcd"
+        with TestClient(app, base_url="http://127.0.0.1") as c:
+            res = c.post("/api/test", json={
+                "sv_files": [_COUNTER_SV],
+                "spec": _COUNTER_SPEC,
+                "vcd_out": str(vcd),
+            })
+        assert res.status_code == 200
+        return str(vcd)
+
+    def test_edge_api_next(self, edge_vcd):
+        """API: next エッジを取得できること"""
+        with TestClient(app, base_url="http://127.0.0.1") as c:
+            res = c.get(f"/api/waveform/edge?path={edge_vcd}&signal=clk&from_ns=0&direction=next&edge=any")
+        assert res.status_code == 200
+        data = res.json()
+        assert data["found"] is True
+        assert data["time_ns"] is not None
+        assert data["time_ns"] > 0
+
+    def test_edge_api_prev_no_edge(self, edge_vcd):
+        """API: from_ns=0 で prev のエッジがない場合 found=False"""
+        with TestClient(app, base_url="http://127.0.0.1") as c:
+            res = c.get(f"/api/waveform/edge?path={edge_vcd}&signal=clk&from_ns=0&direction=prev&edge=any")
+        assert res.status_code == 200
+        data = res.json()
+        assert data["found"] is False
+
+    def test_edge_api_signal_not_found(self, edge_vcd):
+        """存在しない信号は 404"""
+        with TestClient(app, base_url="http://127.0.0.1") as c:
+            res = c.get(f"/api/waveform/edge?path={edge_vcd}&signal=nonexistent_xyz&from_ns=0&direction=next&edge=any")
+        assert res.status_code == 404
+
+    def test_edge_api_vcd_not_found(self):
+        """VCD ファイルが存在しない場合は 404"""
+        with TestClient(app, base_url="http://127.0.0.1") as c:
+            res = c.get("/api/waveform/edge?path=/nonexistent.vcd&signal=clk&from_ns=0&direction=next&edge=any")
+        assert res.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# B3. 符号付き変換テスト（waveutil.signed_value / fmt_value）
+# ---------------------------------------------------------------------------
+
+class TestSignedConversion:
+    """§18.4 B3: 符号付き変換の純粋関数テスト"""
+
+    def test_signed_positive(self):
+        from deltasim.gui.waveutil import signed_value
+        assert signed_value("0111", 4) == 7
+
+    def test_signed_negative(self):
+        from deltasim.gui.waveutil import signed_value
+        assert signed_value("1111", 4) == -1
+        assert signed_value("1000", 4) == -8
+        assert signed_value("1001", 4) == -7
+
+    def test_signed_1bit(self):
+        from deltasim.gui.waveutil import signed_value
+        assert signed_value("0", 1) == 0
+        assert signed_value("1", 1) == -1
+
+    def test_signed_with_xz_returns_none(self):
+        from deltasim.gui.waveutil import signed_value
+        assert signed_value("1x01", 4) is None
+        assert signed_value("zzzz", 4) is None
+
+    def test_fmt_value_signed(self):
+        from deltasim.gui.waveutil import fmt_value
+        assert fmt_value("1111", 4, "signed") == "-1"
+        assert fmt_value("0111", 4, "signed") == "7"
+        assert fmt_value("1000", 4, "signed") == "-8"
+
+    def test_fmt_value_unsigned(self):
+        from deltasim.gui.waveutil import fmt_value
+        assert fmt_value("1111", 4, "unsigned") == "15"
+        assert fmt_value("0000", 4, "unsigned") == "0"
+
+    def test_fmt_value_hex(self):
+        from deltasim.gui.waveutil import fmt_value
+        assert fmt_value("1111", 4, "hex") == "0xF"
+        assert fmt_value("0000", 4, "hex") == "0x0"
+
+    def test_fmt_value_bin(self):
+        from deltasim.gui.waveutil import fmt_value
+        assert fmt_value("101", 4, "bin") == "b0101"
+
+    def test_fmt_value_xz_passthrough(self):
+        from deltasim.gui.waveutil import fmt_value
+        assert fmt_value("x", 1, "hex") == "X"
+        assert fmt_value("z", 1, "signed") == "Z"
+        assert fmt_value("1x0", 3, "hex") == "1x0"
+
+    # --- /api/waveform/decode エンドポイントテスト ---
+
+    @pytest.fixture
+    def client(self):
+        with TestClient(app, base_url="http://127.0.0.1") as c:
+            yield c
+
+    def test_decode_api_signed(self, client):
+        """API: 符号付き変換"""
+        res = client.get("/api/waveform/decode?value=1111&width=4&radix=signed")
+        assert res.status_code == 200
+        assert res.json()["result"] == "-1"
+
+    def test_decode_api_unsigned(self, client):
+        res = client.get("/api/waveform/decode?value=1111&width=4&radix=unsigned")
+        assert res.status_code == 200
+        assert res.json()["result"] == "15"
+
+    def test_decode_api_hex(self, client):
+        res = client.get("/api/waveform/decode?value=1111&width=4&radix=hex")
+        assert res.status_code == 200
+        assert res.json()["result"] == "0xF"
+
+    def test_decode_api_invalid_radix(self, client):
+        res = client.get("/api/waveform/decode?value=1111&width=4&radix=invalid")
+        assert res.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# B4. 波形表示セット保存・読込テスト（waveset.py + API）
+# ---------------------------------------------------------------------------
+
+class TestWaveset:
+    """§18.4 B4: 波形表示セットの保存・読込"""
+
+    @pytest.fixture(autouse=True)
+    def patch_config_dir(self, tmp_path, monkeypatch):
+        from deltasim.gui import waveset as _ws_mod
+        monkeypatch.setattr(_ws_mod, "_wavesets_dir", lambda config_dir=None: tmp_path)
+
+    @pytest.fixture
+    def client(self):
+        with TestClient(app, base_url="http://127.0.0.1") as c:
+            yield c
+
+    # --- 純粋関数テスト ---
+
+    def test_load_empty(self, tmp_path):
+        from deltasim.gui.waveset import load_wavesets
+        assert load_wavesets([_COUNTER_SV], config_dir=tmp_path) == []
+
+    def test_save_and_load(self, tmp_path):
+        from deltasim.gui.waveset import save_waveset, load_wavesets
+        save_waveset(
+            [_COUNTER_SV], _COUNTER_SPEC, "テスト",
+            ["clk", "count"], {"count": "signed"},
+            config_dir=tmp_path,
+        )
+        sets = load_wavesets([_COUNTER_SV], _COUNTER_SPEC, config_dir=tmp_path)
+        assert len(sets) == 1
+        assert sets[0]["name"] == "テスト"
+        assert sets[0]["signals"] == ["clk", "count"]
+        assert sets[0]["radix"]["count"] == "signed"
+
+    def test_save_overwrites_same_name(self, tmp_path):
+        from deltasim.gui.waveset import save_waveset, load_wavesets
+        save_waveset([_COUNTER_SV], None, "S1", ["clk"], {}, config_dir=tmp_path)
+        save_waveset([_COUNTER_SV], None, "S1", ["count"], {}, config_dir=tmp_path)
+        sets = load_wavesets([_COUNTER_SV], config_dir=tmp_path)
+        assert len(sets) == 1
+        assert sets[0]["signals"] == ["count"]
+
+    def test_delete_waveset(self, tmp_path):
+        from deltasim.gui.waveset import save_waveset, delete_waveset, load_wavesets
+        save_waveset([_COUNTER_SV], None, "del_me", ["clk"], {}, config_dir=tmp_path)
+        deleted = delete_waveset([_COUNTER_SV], None, "del_me", config_dir=tmp_path)
+        assert deleted is True
+        assert load_wavesets([_COUNTER_SV], config_dir=tmp_path) == []
+
+    def test_delete_nonexistent(self, tmp_path):
+        from deltasim.gui.waveset import delete_waveset
+        assert delete_waveset([_COUNTER_SV], None, "nonexistent", config_dir=tmp_path) is False
+
+    def test_project_isolation(self, tmp_path):
+        """別プロジェクトのセットは影響を受けないこと"""
+        from deltasim.gui.waveset import save_waveset, load_wavesets
+        save_waveset([_COUNTER_SV], None, "A", ["clk"], {}, config_dir=tmp_path)
+        save_waveset([_MUX2_SV], None, "B", ["a"], {}, config_dir=tmp_path)
+        sets_counter = load_wavesets([_COUNTER_SV], config_dir=tmp_path)
+        sets_mux = load_wavesets([_MUX2_SV], config_dir=tmp_path)
+        assert len(sets_counter) == 1 and sets_counter[0]["name"] == "A"
+        assert len(sets_mux) == 1 and sets_mux[0]["name"] == "B"
+
+    # --- API テスト ---
+
+    def test_waveset_api_get_empty(self, client):
+        """空の場合は空リストを返すこと"""
+        res = client.get(f"/api/waveset?sv_files={_COUNTER_SV}")
+        assert res.status_code == 200
+        assert res.json()["sets"] == []
+
+    def test_waveset_api_save_and_get(self, client):
+        """API でセットを保存・取得できること"""
+        res = client.post("/api/waveset", json={
+            "sv_files": [_COUNTER_SV],
+            "spec": _COUNTER_SPEC,
+            "name": "テストセット",
+            "signals": ["clk", "count"],
+            "radix": {"count": "signed"},
+        })
+        assert res.status_code == 200
+        assert res.json()["ok"] is True
+
+        res2 = client.get(f"/api/waveset?sv_files={_COUNTER_SV}&spec={_COUNTER_SPEC}")
+        assert res2.status_code == 200
+        sets = res2.json()["sets"]
+        assert len(sets) == 1
+        assert sets[0]["name"] == "テストセット"
+        assert "count" in sets[0]["radix"]
+
+    def test_waveset_api_delete(self, client):
+        """API でセットを削除できること"""
+        client.post("/api/waveset", json={
+            "sv_files": [_COUNTER_SV], "spec": None,
+            "name": "to_delete", "signals": ["clk"], "radix": {},
+        })
+        res = client.request("DELETE", "/api/waveset", json={
+            "sv_files": [_COUNTER_SV], "spec": None, "name": "to_delete",
+        })
+        assert res.status_code == 200
+
+    def test_waveset_api_delete_not_found(self, client):
+        """存在しないセットの削除は 404"""
+        res = client.request("DELETE", "/api/waveset", json={
+            "sv_files": [_COUNTER_SV], "spec": None, "name": "nonexistent_xyz",
+        })
+        assert res.status_code == 404
