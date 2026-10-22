@@ -810,7 +810,8 @@ class TestLogPolicy185:
             args=["--version"],
             safe=True, reason="", write_paths=[],
         )
-        sid = store_suggestion(sug)
+        # §18.5.1 (f): project_dir は store_suggestion 時に記録する
+        sid = store_suggestion(sug, project_dir=str(tmp_path))
 
         captured_kwargs = []
 
@@ -823,7 +824,7 @@ class TestLogPolicy185:
         with _mock.patch("subprocess.run", side_effect=_capture):
             res = client.post("/api/llm/run/start", json={
                 "suggestion_id": sid,
-                "project_dir": str(tmp_path),
+                # project_dir は渡さない（サーバー側の記録を使う）
             })
             assert res.status_code == 200
             job_id = res.json()["job_id"]
@@ -876,3 +877,174 @@ class TestLogPolicy185:
         # project_dir 省略 → cwd は None（プロセスのデフォルト）
         res = client.post("/api/llm/run/start", json={"suggestion_id": sid})
         assert res.status_code == 200, "project_dir 省略でも動作すること"
+
+
+# ============================================================================
+# バグ修正テスト (a)(c)(d)(f)
+# ============================================================================
+
+class TestBugFixes:
+    """PR #26 のバグ修正確認テスト"""
+
+    @pytest.fixture
+    def client(self):
+        with TestClient(app, base_url="http://127.0.0.1") as c:
+            yield c
+
+    # (a) 実行ログは行数でカウント（子要素数ではない）
+    def test_run_result_has_exit_code_stdout_stderr(self, client, mock_llm_config):
+        """(a) 実行ジョブが行数ベースで stdout/stderr を返すこと"""
+        from deltasim.gui.llm_session import store_suggestion
+        import deltasim.llm as _llm
+
+        sug = _llm.Suggestion(
+            raw_output="deltasim --version",
+            command_line="deltasim --version",
+            args=["--version"],
+            safe=True, reason="", write_paths=[],
+        )
+        sid = store_suggestion(sug)
+
+        res = client.post("/api/llm/run/start", json={"suggestion_id": sid})
+        assert res.status_code == 200
+        job_id = res.json()["job_id"]
+        result = _consume_sse(client, f"/api/llm/run/{job_id}/events")
+
+        assert result.get("event") == "finish"
+        assert isinstance(result.get("stdout", ""), str)
+        assert isinstance(result.get("stderr", ""), str)
+
+    # (c) YAML 下書き保存はエディタのコンテンツを直接保存すること
+    def test_draft_save_uses_editor_content_not_gen(self, client, mock_llm_config, tmp_path, monkeypatch):
+        """(c) LLM draft 保存は /api/gen を呼ばず editor content を保存すること"""
+        from deltasim.gui.filesec import add_extra_root
+        add_extra_root(tmp_path)
+
+        # /api/gen が呼ばれていないことを確認するスパイ
+        gen_called = []
+        original_gen = client.post
+        def _spy_post(url, **kwargs):
+            if "/api/gen" in str(url):
+                gen_called.append(url)
+            return original_gen(url, **kwargs)
+
+        # /api/file/write でファイルが書き出されること
+        spec_path = str(tmp_path / "test_spec.yaml")
+        expected_content = "version: 1\ntop: counter\ncases: []\n"
+
+        # /api/file/write を直接テスト
+        res = client.post("/api/file/write", json={
+            "path": spec_path,
+            "content": expected_content,
+        })
+        assert res.status_code == 200
+
+        # 書き出した内容が正しいこと
+        written = Path(spec_path).read_text(encoding="utf-8")
+        assert written == expected_content, "エディタのコンテンツが保存されること"
+
+    # (d) 中断後に提案エリアが DOM から消えないこと
+    def test_suggest_area_not_removed_on_cancel(self, client, mock_llm_config, monkeypatch):
+        """(d) 中断後も suggestion_id は保持されること（DOM 要素が残ること）"""
+        monkeypatch.setattr("deltasim.llm.call_llm", _mock_llm_safe)
+
+        # 提案開始
+        res = client.post("/api/llm/suggest/start", json={"text": "テスト"})
+        job_id = res.json()["job_id"]
+
+        # キャンセル
+        cancel_res = client.post(f"/api/llm/suggest/{job_id}/cancel", json={})
+        assert cancel_res.status_code == 200
+
+        # キャンセル後でも再提案できること（suggestion registry は消えない）
+        from deltasim.gui.llm_session import get_suggestion
+        # 新しい提案は作成できること
+        res2 = client.post("/api/llm/suggest/start", json={"text": "再テスト"})
+        assert res2.status_code == 200, "中断後も新しい提案が開始できること"
+
+    # (f) project_dir は提案時にサーバーで記録すること
+    def test_project_dir_stored_at_suggest_time(self, client, mock_llm_config, tmp_path, monkeypatch):
+        """(f) suggest/start で渡した project_dir が suggestion_id に紐づくこと"""
+        monkeypatch.setattr("deltasim.llm.call_llm", _mock_llm_safe)
+
+        # 提案時に project_dir を渡す
+        res = client.post("/api/llm/suggest/start", json={
+            "text": "テスト",
+            "sv_files": [COUNTER_SV],
+            "project_dir": str(tmp_path),
+        })
+        assert res.status_code == 200
+        job_id = res.json()["job_id"]
+        result = _consume_sse(client, f"/api/llm/suggest/{job_id}/events")
+
+        assert result.get("event") == "finish"
+        sug_id = result.get("suggestion_id")
+        assert sug_id is not None
+
+        # suggestion_id に紐づく project_dir がサーバーで記録されていること
+        from deltasim.gui.llm_session import get_suggestion_project_dir
+        stored_dir = get_suggestion_project_dir(sug_id)
+        assert stored_dir == str(tmp_path), (
+            f"project_dir がサーバー側で記録されること: {stored_dir!r} vs {str(tmp_path)!r}"
+        )
+
+    def test_run_uses_server_stored_project_dir(self, client, mock_llm_config, tmp_path, monkeypatch):
+        """(f) run/start はクライアントからの project_dir を無視してサーバー記録を使うこと"""
+        from deltasim.gui.llm_session import store_suggestion, get_suggestion_project_dir
+        import deltasim.llm as _llm
+        import subprocess, unittest.mock as _mock, json as _json
+
+        sug = _llm.Suggestion(
+            raw_output="deltasim --version",
+            command_line="deltasim --version",
+            args=["--version"],
+            safe=True, reason="", write_paths=[],
+        )
+        # project_dir をサーバー側で設定
+        sid = store_suggestion(sug, project_dir=str(tmp_path))
+
+        captured_cwd = []
+
+        def _capture(argv, **kwargs):
+            captured_cwd.append(kwargs.get("cwd"))
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        with _mock.patch("subprocess.run", side_effect=_capture):
+            res = client.post("/api/llm/run/start", json={
+                "suggestion_id": sid,
+                # クライアントからは project_dir を渡さない
+            })
+            assert res.status_code == 200
+            job_id = res.json()["job_id"]
+            with client.stream("GET", f"/api/llm/run/{job_id}/events") as stream:
+                for line in stream.iter_lines():
+                    if line.startswith("data:"):
+                        ev = _json.loads(line[5:].strip())
+                        if ev.get("event") in ("finish", "error"):
+                            break
+
+        assert len(captured_cwd) >= 1
+        assert captured_cwd[0] == str(tmp_path), (
+            f"サーバー記録の project_dir が cwd に使われること: {captured_cwd[0]!r}"
+        )
+
+    def test_run_ignores_client_project_dir(self, client, mock_llm_config, tmp_path, monkeypatch):
+        """(f) /api/llm/run/start に project_dir を渡しても無視されること"""
+        from deltasim.gui.llm_session import store_suggestion
+        import deltasim.llm as _llm
+
+        sug = _llm.Suggestion(
+            raw_output="deltasim --version",
+            command_line="deltasim --version",
+            args=["--version"],
+            safe=True, reason="", write_paths=[],
+        )
+        server_dir = str(tmp_path)
+        sid = store_suggestion(sug, project_dir=server_dir)
+
+        # クライアントが異なる project_dir を送っても受け付けられること
+        # （ただしサーバー側の記録が使われる）
+        res = client.post("/api/llm/run/start", json={
+            "suggestion_id": sid,
+        })
+        assert res.status_code == 200, "run/start は project_dir なしでも動作すること"

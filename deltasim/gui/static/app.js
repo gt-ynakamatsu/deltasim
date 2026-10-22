@@ -359,11 +359,11 @@ const api = {
   recentAdd:    (entry)             => apiFetch("POST", "/api/recent-projects/add", entry),
   // §18.3 LLM API
   llmStatus:    ()                  => apiFetch("GET", "/api/llm/status"),
-  llmSuggestStart: (text, svFiles, spec, moduleInfo) => apiFetch("POST", "/api/llm/suggest/start", {
-    text, sv_files: svFiles ?? [], spec: spec ?? null, module_info: moduleInfo ?? null,
+  llmSuggestStart: (text, svFiles, spec, moduleInfo, projDir) => apiFetch("POST", "/api/llm/suggest/start", {
+    text, sv_files: svFiles ?? [], spec: spec ?? null, module_info: moduleInfo ?? null, project_dir: projDir ?? null,
   }),
   llmSuggestCancel: (jid)          => apiFetch("POST", `/api/llm/suggest/${jid}/cancel`, {}),
-  llmRunStart:  (suggestionId, projectDir) => apiFetch("POST", "/api/llm/run/start", { suggestion_id: suggestionId, project_dir: projectDir || null }),
+  llmRunStart:  (suggestionId) => apiFetch("POST", "/api/llm/run/start", { suggestion_id: suggestionId }),
   llmDraftStart:(svFiles, top)     => apiFetch("POST", "/api/llm/draft-spec/start", { sv_files: svFiles, top: top ?? null }),
   llmDraftCancel:(jid)             => apiFetch("POST", `/api/llm/draft-spec/${jid}/cancel`, {}),
   llmExplainStart:(result, svFiles, spec) => apiFetch("POST", "/api/llm/explain/start", {
@@ -717,16 +717,66 @@ async function execGenSave(force = false) {
   }
 }
 
+// §18.3.2 fix (c): LLM 下書きの保存 — エディタの YAML テキストを直接保存
+function _openLlmDraftSaveDialog(stem, projDir) {
+  if (dom.genSaveDir) dom.genSaveDir.value = projDir || ".";
+  if (dom.genSaveTb) dom.genSaveTb.checked = false;
+  if (dom.genSaveSpec) dom.genSaveSpec.checked = true;
+  _updateGenSavePreview();
+  // 保存ボタンを LLM 下書き専用に差し替え
+  if (dom.btnGenSaveOk) {
+    dom.btnGenSaveOk.dataset.llmDraft = "1";
+  }
+  if (dom.genSaveOverlay) dom.genSaveOverlay.style.display = "flex";
+}
+
 async function handleGenSaveOk() {
-  if (!state.genResult || !state.project.svFiles.length) return;
+  if (!state.project.svFiles.length) return;
   const dir = dom.genSaveDir?.value?.trim() || ".";
-  const noTb = !dom.genSaveTb?.checked;
-  const noSpec = !dom.genSaveSpec?.checked;
+  const isLlmDraft = dom.btnGenSaveOk?.dataset?.llmDraft === "1";
+
+  // §18.3.2 fix (c): LLM下書きモードではエディタのYAMLを直接保存
+  if (isLlmDraft && cmEditor && state.genResult?._default_spec_name) {
+    const yamlContent = cmEditor.getValue();
+    const stem = state.genResult._default_spec_name.replace(/_spec\.yaml$/, "");
+    const specName = state.genResult._default_spec_name;
+    const specPath = dir.replace(/[\\/]+$/, "") + "/" + specName;
+
+    // 既存ファイルチェック
+    let fileExists = false;
+    try {
+      await api.fileRead(specPath);
+      fileExists = true;
+    } catch (_) { fileExists = false; }
+
+    if (fileExists) {
+      const ok = window.confirm(`${specPath}\n上書きしますか？`);
+      if (!ok) return;
+    }
+
+    try {
+      await api.fileWrite(specPath, yamlContent);
+      dom.btnGenSaveOk.dataset.llmDraft = "";
+      if (dom.genSaveOverlay) dom.genSaveOverlay.style.display = "none";
+      log(`✓ スペック保存完了: ${specPath}`, "log-info");
+      state.project.specFile = { path: specPath };
+      renderFileList();
+      openFileInEditor(specPath);
+      addCurrentToRecent().then(() => loadRecentProjects());
+      setStatus("保存完了", "idle");
+    } catch (e) {
+      log(`保存エラー: ${e.message}`, "log-error");
+      setStatus("保存エラー", "error");
+    }
+    return;
+  }
+
+  // 通常モード: /api/gen を呼ぶ
+  if (!state.genResult) return;
   const svPaths = state.project.svFiles.map(f => f.path);
   const top = state.project.top;
 
   try {
-    // まず force=false で試みる
     const res = await apiFetch("POST", "/api/gen", {
       sv_files: svPaths,
       top: top ?? null,
@@ -741,20 +791,13 @@ async function handleGenSaveOk() {
 
     _applyGenSaveResult(res);
   } catch (errObj) {
-    // 409: ファイルが既に存在する → 確認ダイアログ
     let msg = errObj.message ?? String(errObj);
-    // fetch の場合はレスポンスボディに conflict がある
     if (msg.includes("既に存在") || msg.includes("409") || msg.includes("conflict")) {
-      const ok = window.confirm(
-        `ファイルが既に存在します。上書きしますか？\n\n${msg.slice(0, 200)}`
-      );
+      const ok = window.confirm(`ファイルが既に存在します。上書きしますか？\n\n${msg.slice(0, 200)}`);
       if (!ok) return;
       try {
         const res2 = await apiFetch("POST", "/api/gen", {
-          sv_files: svPaths,
-          top: top ?? null,
-          out_dir: dir,
-          force: true,
+          sv_files: svPaths, top: top ?? null, out_dir: dir, force: true,
         });
         _applyGenSaveResult(res2);
       } catch (e2) {
@@ -2589,10 +2632,19 @@ function _llmAppendRunResult(cmd, exitCode, stdout, stderr) {
     dom.llmRunLog.appendChild(el);
   }
 
-  // 最新 2000 行に制限
-  const children = Array.from(dom.llmRunLog.children);
-  if (children.length > LLM_MAX_LOG_LINES) {
-    children.slice(0, children.length - LLM_MAX_LOG_LINES).forEach(el => el.remove());
+  // 最新 2000 行に制限（行数ベース: textContent の改行数でカウント）
+  const currentText = dom.llmRunLog.textContent || "";
+  const currentLines = currentText.split("\n").length;
+  if (currentLines > LLM_MAX_LOG_LINES) {
+    // 先頭の子要素から古い行を削除して 2000 行以内に収める
+    const children = Array.from(dom.llmRunLog.children);
+    let linesToRemove = currentLines - LLM_MAX_LOG_LINES;
+    for (const child of children) {
+      if (linesToRemove <= 0) break;
+      const childLines = (child.textContent || "").split("\n").length;
+      child.remove();
+      linesToRemove -= childLines;
+    }
   }
   dom.llmRunLog.scrollTop = dom.llmRunLog.scrollHeight;
 }
@@ -2619,7 +2671,10 @@ async function llmAsk() {
     const moduleInfo = state.module
       ? { module: state.module.module, ports: state.module.ports || [] }
       : null;
-    const { job_id } = await api.llmSuggestStart(text, svPaths, state.project.specFile?.path, moduleInfo);
+    // §18.5.1 (f): 提案時に project_dir をサーバーに渡して記録する
+    const firstSv = svPaths[0] || "";
+    const projDir = firstSv ? firstSv.replace(/[\\/][^\\/]+$/, "") : null;
+    const { job_id } = await api.llmSuggestStart(text, svPaths, state.project.specFile?.path, moduleInfo, projDir);
     state.llmCurrentSuggestJob = job_id;
 
     const result = await new Promise(resolve => {
@@ -2696,10 +2751,9 @@ async function llmRunSuggestion() {
 
   const cmd = dom.llmSuggestionCmd?.textContent || "";
   try {
-    // §18.5.1: プロジェクトフォルダを cwd に設定（--log 等の引数は変えない）
-    const firstSvPath = state.project.svFiles[0]?.path || "";
-    const projDir = firstSvPath ? firstSvPath.replace(/[\\/][^\\/]+$/, "") : null;
-    const { job_id } = await api.llmRunStart(sid, projDir);
+    // §18.5.1 (f): project_dir はサーバー側で suggestion_id に紐づけて管理
+    // クライアントからは渡さない（セキュリティ）
+    const { job_id } = await api.llmRunStart(sid);
     state.llmCurrentRunJob = job_id;
     const result = await _llmConsumeSSE(`/api/llm/run/${job_id}/events`);
 
@@ -2763,13 +2817,10 @@ async function llmDraftSpec() {
       const stem = top || firstSv.split(/[\\/]/).pop().replace(/\.(sv|v)$/i, "");
       const projDir = firstSv ? firstSv.replace(/[\\/][^\\/]+$/, "") : ".";
       state.genResult = { module: stem, spec_yaml: result.yaml_text };
-      // 保存ダイアログに既定値をセット
-      if (dom.genSaveDir) dom.genSaveDir.value = projDir;
-      if (dom.genSaveTb) dom.genSaveTb.checked = false;   // TB は不要
-      if (dom.genSaveSpec) dom.genSaveSpec.checked = true;
-      // spec_path を指定して <stem>_spec.yaml にする
+      // §18.3.2 fix (c): LLM下書きはエディタのYAMLテキストをそのまま保存する
+      // _default_spec_name を実際に使って保存ダイアログを開く
       state.genResult._default_spec_name = `${stem}_spec.yaml`;
-      openGenSaveDialog(state.genResult);
+      _openLlmDraftSaveDialog(stem, projDir);
     } else if (result.event === "error") {
       _llmShowError(result.code, result.message);
     }
@@ -3044,12 +3095,13 @@ if (dom.btnLlmAskCancel) dom.btnLlmAskCancel.addEventListener("click", () => {
   state.llmCurrentSuggestJob = null;
   if (dom.btnLlmAsk) dom.btnLlmAsk.disabled = false;
   if (dom.btnLlmAskCancel) dom.btnLlmAskCancel.style.display = "none";
+  // §18.3.2 fix (d): innerHTML="" で要素ごと消えないよう、子要素のみ差し替え
   if (dom.llmSuggestionArea) {
     dom.llmSuggestionArea.style.display = "block";
+    while (dom.llmSuggestionArea.firstChild) dom.llmSuggestionArea.removeChild(dom.llmSuggestionArea.firstChild);
     const msg = document.createElement("div");
     msg.style.cssText = "color:#fbbf24;font-size:11px;padding:4px;";
     msg.textContent = "中断しました";
-    dom.llmSuggestionArea.innerHTML = "";
     dom.llmSuggestionArea.appendChild(msg);
   }
 });

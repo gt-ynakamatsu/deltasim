@@ -566,6 +566,7 @@ async def run_llm_suggest_job(
     cfg=None,
     llm_fn=None,
     module_info: Optional[dict] = None,
+    project_dir: Optional[str] = None,
 ) -> None:
     """コマンド提案ジョブ（suggest_command を非同期実行）。
 
@@ -601,7 +602,7 @@ async def run_llm_suggest_job(
 
     try:
         sug = await asyncio.to_thread(_suggest)
-        sug_id = store_suggestion(sug)
+        sug_id = store_suggestion(sug, project_dir=project_dir)  # §18.5.1 (f)
         job.result = {"suggestion_id": sug_id, "safe": sug.safe, "command_line": sug.command_line}
         await job.queue.put({
             "event": "finish",

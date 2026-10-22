@@ -1307,6 +1307,7 @@ class LLMSuggestRequest(BaseModel):
     sv_files: List[str] = []
     spec: Optional[str] = None
     module_info: Optional[Dict] = None  # §18.3.2: {module, ports} パーサ結果から
+    project_dir: Optional[str] = None  # §18.5.1 (f): サーバー側で suggestion_id に紐づけて保管
 
 
 @app.post("/api/llm/suggest/start")
@@ -1320,12 +1321,14 @@ async def llm_suggest_start(req: LLMSuggestRequest):
     from deltasim.gui.jobs import create_job, run_llm_suggest_job
 
     job = create_job()
+    # §18.5.1 (f): project_dir をジョブに渡す（store_suggestion で suggestion_id に紐づける）
     job.task = asyncio.create_task(
         run_llm_suggest_job(
             job, req.text,
             sv_files=req.sv_files,
             spec_file=req.spec,
             module_info=req.module_info,
+            project_dir=req.project_dir,
         )
     )
     return {"job_id": job.job_id}
@@ -1404,8 +1407,9 @@ async def llm_suggest_cancel(job_id: str):
 
 
 class LLMRunRequest(BaseModel):
-    suggestion_id: str           # サーバーが発行した提案 ID のみ受け付ける
-    project_dir: Optional[str] = None  # §18.5.1: SV ファイルのあるプロジェクトフォルダ（cwd に使用）
+    suggestion_id: str  # サーバーが発行した提案 ID のみ受け付ける
+    # §18.5.1 (f): project_dir はサーバー側で suggestion_id に紐づけて管理
+    # クライアントからの入力は使わない（セキュリティ）
 
 
 @app.post("/api/llm/run/start")
@@ -1428,8 +1432,12 @@ async def llm_run_start(req: LLMRunRequest):
     if not sug.safe:
         raise HTTPException(status_code=400, detail=f"安全でないコマンドです（E_LLM_UNSAFE_CMD）: {sug.reason}")
 
+    # §18.5.1 (f): project_dir はサーバー側の記録から取得（クライアント入力を使わない）
+    from deltasim.gui.llm_session import get_suggestion_project_dir
+    project_dir = get_suggestion_project_dir(req.suggestion_id)
+
     job = create_job()
-    job.task = asyncio.create_task(run_llm_run_job(job, req.suggestion_id, project_dir=req.project_dir))
+    job.task = asyncio.create_task(run_llm_run_job(job, req.suggestion_id, project_dir=project_dir))
     return {"job_id": job.job_id}
 
 
