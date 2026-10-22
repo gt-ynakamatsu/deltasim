@@ -23,6 +23,7 @@
 | `E_OFFSET_RANGE` | YAML 解析 | `offset_ns` が有効範囲外（0 ≤ offset_ns < period_ns） |
 | `E_DELTA_LIMIT` | シミュレータ | デルタサイクル収束ループ上限超過（既定 10,000）|
 | `E_LOOP_LIMIT` | シミュレータ | for/while/forever/repeat ループ反復上限超過（既定 1,000,000）|
+| `E_INCLUDE_LOOP` | プリプロセッサ (§18.9) | 循環 `include` を検出（A → B → A など） |
 | `E_INTERNAL` | CLI | 想定外の例外（RecursionError 含む）|
 
 ### E001 メッセージ例

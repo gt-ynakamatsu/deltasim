@@ -161,6 +161,9 @@ class Scenario:
     # §18.6: top-level constraints (applies to all cases)
     constraints: List[str] = field(default_factory=list)
     max_constraint_attempts: Optional[int] = None
+    # §18.9: プリプロセッサ設定（YAML からも指定可能）
+    defines: List[str] = field(default_factory=list)   # "+define+NAME=VALUE" 形式
+    incdirs: List[str] = field(default_factory=list)   # ディレクトリパス
 
 
 # ---------------------------------------------------------------------------
@@ -240,6 +243,12 @@ def load_scenario(path: str) -> Scenario:
         if mca < 1:
             raise ScenarioError(f"max_constraint_attempts は 1 以上の整数が必要です: {mca}")
         s.max_constraint_attempts = mca
+
+    # §18.9: defines / incdirs
+    if data.get("defines"):
+        s.defines = [str(d) for d in data["defines"]]
+    if data.get("incdirs"):
+        s.incdirs = [str(d) for d in data["incdirs"]]
 
     # §13.2: Parse cases: list
     raw_cases = data.get("cases")
@@ -353,6 +362,7 @@ _KNOWN_TOP_KEYS = frozenset({
     "skip", "skip_reason",
     "cases",
     "constraints", "max_constraint_attempts",  # §18.6
+    "defines", "incdirs",   # §18.9 プリプロセッサ設定
 })
 
 # clock/reset/sim の既知キー

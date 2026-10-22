@@ -71,6 +71,14 @@ _FILELIST_OPT = click.option(
     "-f", "--filelist", "filelist", multiple=True, metavar="FILE.f",
     help="§18.2: ファイルリスト (.f) を指定（複数回指定可）",
 )
+_DEFINE_OPT = click.option(
+    "-D", "--define", "defines", multiple=True, metavar="NAME[=VALUE]",
+    help="§18.9: プリプロセッサマクロを定義（複数回指定可）",
+)
+_INCDIR_OPT = click.option(
+    "-I", "--incdir", "incdirs", multiple=True, metavar="DIR",
+    help="§18.9: インクルードパスを追加（複数回指定可）",
+)
 
 # §18.5: --log オプション（run/test/gen/parse 共通）
 _LOG_OPT = click.option(
@@ -95,6 +103,40 @@ def _write_log(log_path: str, lines: list) -> None:
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
+
+def _preproc_kwargs(defines: tuple, incdirs: tuple, fl=None) -> dict:
+    """§18.9: -D/-I と .f ファイルの +define+/+incdir+ をまとめて kwargs にする。
+
+    優先順位: -f が先、CLI (-D/-I) が後勝ち（後から追加）。
+    defines は Preprocessor が受け付ける dict 形式で返す。
+    """
+    defs: dict = {}  # NAME → VALUE
+    dirs: list = []
+    # .f ファイルの defines/incdirs を先に追加
+    if fl is not None:
+        # fl.defines は Dict[str, str]
+        fl_defs = getattr(fl, "defines", {})
+        if isinstance(fl_defs, dict):
+            defs.update(fl_defs)
+        for d in getattr(fl, "incdirs", []):
+            dirs.append(d)
+    # CLI の defines/incdirs を後から追加（後勝ち）
+    for d in defines:
+        # -D NAME=VALUE or -D NAME
+        d = d.lstrip()
+        if d.startswith("+define+"):
+            d = d[len("+define+"):]
+        if "=" in d:
+            k, _, v = d.partition("=")
+            defs[k.strip()] = v
+        else:
+            defs[d.strip()] = "1"
+    for d in incdirs:
+        dirs.append(d)
+    if not defs and not dirs:
+        return {}
+    return {"defines": defs or None, "incdirs": dirs or None}
+
 
 def _parse_params(params) -> dict:
     overrides = {}
@@ -124,6 +166,8 @@ def _emit_json_event(event: dict, json_events: bool) -> None:
 @main.command("run")
 @click.argument("sv_files", nargs=-1, required=False, metavar="FILE [FILE …]")
 @_FILELIST_OPT
+@_DEFINE_OPT
+@_INCDIR_OPT
 @_LOG_OPT
 @click.option("--top", "-t", default=None)
 @click.option("--cycles", "-n", default=100, show_default=True, type=int)
@@ -144,7 +188,7 @@ def _emit_json_event(event: dict, json_events: bool) -> None:
               help="デルタサイクル上限（既定10000）。超えると E_DELTA_LIMIT。")
 @click.option("--max-loop", "max_loop", default=None, type=int, metavar="N",
               help="ループ反復上限（既定1000000）。超えると E_LOOP_LIMIT。")
-def run_cmd(sv_files, filelist, log_path, top, cycles, vcd, reset_cycles, half_period,
+def run_cmd(sv_files, filelist, defines, incdirs, log_path, top, cycles, vcd, reset_cycles, half_period,
             clk, rst, rst_active_high, params, verbose, json_out, json_events,
             max_delta, max_loop, interactive):
     """SystemVerilog ファイルをシミュレートして VCD を出力する。
@@ -155,18 +199,20 @@ def run_cmd(sv_files, filelist, log_path, top, cycles, vcd, reset_cycles, half_p
     import deltasim.api as ds
 
     sv_files, _fl = _expand_files(sv_files, filelist)
+    _pp_kwargs = _preproc_kwargs(defines, incdirs, _fl)
 
     if interactive:
         # 対話モード: deltasim sim と同じ処理に委譲
         _run_interactive(list(sv_files), top=top,
                          params=_parse_params(params),
-                         reset_cycles=reset_cycles)
+                         reset_cycles=reset_cycles,
+                         **_pp_kwargs)
         return
 
     param_overrides = _parse_params(params)
 
     # clk/rst は load 後に上書きするため、先に elaborate
-    di = ds.load(list(sv_files), top=top, params=param_overrides)
+    di = ds.load(list(sv_files), top=top, params=param_overrides, **_pp_kwargs)
     if di.status != "PASS":
         for e in di.errors:
             click.echo(f"ERROR ({e.code}): {e.file}:{e.line}: {e.message}", err=True)
@@ -250,6 +296,8 @@ def run_cmd(sv_files, filelist, log_path, top, cycles, vcd, reset_cycles, half_p
 @main.command("gen")
 @click.argument("sv_files", nargs=-1, required=False, metavar="FILE [FILE …]")
 @_FILELIST_OPT
+@_DEFINE_OPT
+@_INCDIR_OPT
 @_LOG_OPT
 @click.option("--top", "-t", default=None)
 @click.option("--param", "-p", "params", multiple=True, metavar="NAME=VALUE")
@@ -260,7 +308,7 @@ def run_cmd(sv_files, filelist, log_path, top, cycles, vcd, reset_cycles, half_p
 @click.option("--no-spec", is_flag=True, default=False)
 @click.option("--strings", is_flag=True, default=False,
               help="ファイル書き込みの代わりに文字列として stdout に出力")
-def gen_cmd(sv_files, filelist, log_path, top, params, out_dir, spec_path, tb_path, no_tb, no_spec, strings):
+def gen_cmd(sv_files, filelist, defines, incdirs, log_path, top, params, out_dir, spec_path, tb_path, no_tb, no_spec, strings):
     """テストベンチ SV と YAML スペックスケルトンを生成する。
 
     --strings: ファイルに書き込まず TB SV / YAML 文字列を stdout に出力する。
@@ -269,16 +317,18 @@ def gen_cmd(sv_files, filelist, log_path, top, params, out_dir, spec_path, tb_pa
     import deltasim.api as ds
 
     sv_files, _fl = _expand_files(sv_files, filelist)
+    _pp_kwargs = _preproc_kwargs(defines, incdirs, _fl)
     param_overrides = _parse_params(params)
 
     if strings:
-        result = ds.gen(list(sv_files), top=top, params=param_overrides)
+        result = ds.gen(list(sv_files), top=top, params=param_overrides, **_pp_kwargs)
     else:
         result = ds.gen(
             list(sv_files), top=top, params=param_overrides,
             out_dir=out_dir,
             tb_path=tb_path if not no_tb else None,
             spec_path=spec_path if not no_spec else None,
+            **_pp_kwargs,
         )
 
     if result.get("status") != "PASS":
@@ -309,6 +359,8 @@ def gen_cmd(sv_files, filelist, log_path, top, params, out_dir, spec_path, tb_pa
 @main.command("test")
 @click.argument("sv_files", nargs=-1, required=False, metavar="FILE [FILE …]")
 @_FILELIST_OPT
+@_DEFINE_OPT
+@_INCDIR_OPT
 @_LOG_OPT
 @click.option("--top", "-t", default=None)
 @click.option("--spec", "-s", required=True, metavar="YAML")
@@ -334,7 +386,7 @@ def gen_cmd(sv_files, filelist, log_path, top, params, out_dir, spec_path, tb_pa
               help="デルタサイクル上限（既定10000）。超えると E_DELTA_LIMIT。")
 @click.option("--max-loop", "max_loop", default=None, type=int, metavar="N",
               help="ループ反復上限（既定1000000）。超えると E_LOOP_LIMIT。")
-def test_cmd(sv_files, filelist, log_path, top, spec, params, junit, json_out, vcd, seed,
+def test_cmd(sv_files, filelist, defines, incdirs, log_path, top, spec, params, junit, json_out, vcd, seed,
              verbose, no_color, json_events, record_mode, record_all_deprecated,
              wave_mem_mb, filter_cases, max_delta, max_loop):
     """YAML スペックに従ってテストを実行し PASS/FAIL を判定する。
@@ -352,6 +404,7 @@ def test_cmd(sv_files, filelist, log_path, top, spec, params, junit, json_out, v
     from deltasim.report.terminal import print_results_v2
 
     sv_files, _fl = _expand_files(sv_files, filelist)
+    _pp_kwargs = _preproc_kwargs(defines, incdirs, _fl)
     # §18.2: -f ファイルの W_FILELIST_OPT を warn イベントとして emit
     _fl_warnings = _filelist_to_result_warnings(_fl)
     for w in _fl_warnings:
@@ -391,6 +444,7 @@ def test_cmd(sv_files, filelist, log_path, top, spec, params, junit, json_out, v
             filter_cases=list(filter_cases) if filter_cases else None,
             max_delta=max_delta,
             max_loop=max_loop,
+            **_pp_kwargs,
         )
         # §18.2: W_FILELIST_OPT を TestResult.warnings に追加（JSON 出力用）
         if _fl_warnings:
@@ -451,15 +505,18 @@ def test_cmd(sv_files, filelist, log_path, top, spec, params, junit, json_out, v
 @main.command("parse")
 @click.argument("sv_files", nargs=-1, required=False, metavar="FILE [FILE …]")
 @_FILELIST_OPT
+@_DEFINE_OPT
+@_INCDIR_OPT
 @_LOG_OPT
-def parse_cmd(sv_files, filelist, log_path):
+def parse_cmd(sv_files, filelist, defines, incdirs, log_path):
     """SV ファイルをパースして AST を表示する（デバッグ用）。
     -f FILE.f でファイルリストを指定できます。
     """
     import deltasim.api as ds
 
     sv_files_list, _fl = _expand_files(sv_files, filelist)
-    di = ds.load(sv_files_list)
+    _pp_kwargs = _preproc_kwargs(defines, incdirs, _fl)
+    di = ds.load(sv_files_list, **_pp_kwargs)
     if di.status != "PASS":
         for e in di.errors:
             click.echo(f"ERROR ({e.code}): {e.file}:{e.line}: {e.message}", err=True)
@@ -522,7 +579,8 @@ def _fmt_val(val, width: int) -> str:
         return bs
 
 
-def _run_interactive(sv_files, top=None, params=None, reset_cycles=10):
+def _run_interactive(sv_files, top=None, params=None, reset_cycles=10,
+                     defines=None, incdirs=None):
     """§18 対話セッションを起動するヘルパー（run -i / sim コマンドから使用）。"""
     import deltasim.api as ds
     from deltasim.interp.session import SimSession
@@ -530,7 +588,8 @@ def _run_interactive(sv_files, top=None, params=None, reset_cycles=10):
     click.echo("[deltasim] シミュレータを起動中...", err=True)
     try:
         sim = ds.Simulator(sv_files, top=top, params=params or {},
-                           reset_cycles=reset_cycles)
+                           reset_cycles=reset_cycles,
+                           defines=defines, incdirs=incdirs)
     except Exception as e:
         click.echo(f"ERROR: {e}", err=True)
         sys.exit(1)

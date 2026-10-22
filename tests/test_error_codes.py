@@ -7,7 +7,7 @@ E_INTERNAL に化けていないことを特にチェック。
 各テストは期待コードを1つに絞って assert する。
 `any(...)` や `or status == "ERROR"` は禁止。
 
-§18.9 追加の E_INCLUDE_LOOP は test_preproc.py に分離。
+E_INCLUDE_LOOP (§18.9) もここで統合テスト（CLI + API）。
 LLM 系 (E_LLM_*) は LLM 未設定環境でしか発生しないため test_llm.py に分離。
 
 原因調査メモ:
@@ -739,7 +739,51 @@ class TestConstraintExpr:
 
 
 # ===========================================================================
-# 10. E001 — ファイル未発見
+# 10. E_INCLUDE_LOOP — 循環 include（§18.9）
+# ===========================================================================
+
+class TestIncludeLoop:
+    """E_INCLUDE_LOOP: 2 ファイルの循環 include が E_LOOP_LIMIT でなく E_INCLUDE_LOOP を返すこと。"""
+
+    def _make_circular(self, tmp_path: Path):
+        """a.sv → include b.sv → include a.sv (循環)"""
+        a = tmp_path / "a.sv"
+        b = tmp_path / "b.sv"
+        a.write_text('`include "b.sv"\nmodule dummy;\nendmodule\n', encoding="utf-8")
+        b.write_text('`include "a.sv"\n', encoding="utf-8")
+        return str(a)
+
+    def test_cli(self, tmp_path):
+        """CLI: 循環 include が E_INCLUDE_LOOP を返すこと"""
+        a_sv = self._make_circular(tmp_path)
+        spec = {
+            "version": 1, "top": "dummy",
+            "clock": {"signal": "clk", "period_ns": 10},
+            "reset": {"signal": "rst", "active_low": False, "duration_cycles": 1},
+            "sim": {"cycles": 1},
+            "cases": [{"name": "t", "expected": [{"at": 1, "check": {"xxx": 0}}]}],
+        }
+        spec_p = str(tmp_path / "spec.yaml")
+        with open(spec_p, "w", encoding="utf-8") as f:
+            yaml.dump(spec, f)
+        out = _cli_test(a_sv, spec_p, tmp_path)
+        codes = _all_codes(out)
+        assert "E_INCLUDE_LOOP" in codes, \
+            f"E_INCLUDE_LOOP expected from CLI, got: {codes}"
+        assert "E_INTERNAL" not in codes
+
+    def test_api(self, tmp_path):
+        """API: 循環 include が E_INCLUDE_LOOP を返すこと"""
+        a_sv = self._make_circular(tmp_path)
+        di = ds.load([a_sv])
+        codes = [e.code for e in di.errors]
+        assert "E_INCLUDE_LOOP" in codes, \
+            f"E_INCLUDE_LOOP expected from API, got: {codes}"
+        assert "E_INTERNAL" not in codes
+
+
+# ===========================================================================
+# 11. E001 — ファイル未発見
 # ===========================================================================
 
 class TestE001:

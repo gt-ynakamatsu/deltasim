@@ -7,6 +7,24 @@
 
 ## [0.3.0+] — 開発中（§18.2 -f ファイルリスト + §18 対話デバッグ）
 
+### 追加（§18.9 プリプロセッサ）
+
+- **`deltasim/preproc.py`: SystemVerilog プリプロセッサを実装**
+  - 対応指令: `` `define ``（引数なし・引数あり・デフォルト値・複数行 `\`）、`` `undef ``、`` `ifdef ``/`` `ifndef ``/`` `elsif ``/`` `else ``/`` `endif ``、`` `include ``（相対パス→`+incdir+` 順で探索）、`` `timescale ``（受け付けのみ、W_TIMESCALE 警告）、`` `default_nettype ``（受け付けのみ）
+  - パーサの前段として独立モジュール（`deltasim/preproc.py`）に
+  - ソースマップ: 展開後行番号 → 元ファイル・元行の対応表（エラー表示が元ファイルを指す）
+  - 新エラーコード: `E_INCLUDE_LOOP`（循環 include）
+  - 非対応指令（`` `pragma `` 等）は W_UNKNOWN_DIRECTIVE 警告で無視
+- **CLI**: `-D NAME[=VAL]`/`-I DIR` を run/test/gen/parse に追加（複数指定可）
+- **Python API**: `load()`/`test()`/`run()`/`Simulator()` に `defines`/`incdirs` パラメータを追加
+- **YAML スペック**: `defines:`/`incdirs:` キーを追加（既知キーとして登録）
+- **`.f` ファイル**: `+define+`/`+incdir+` が §18.9 プリプロセッサに渡される（以前は保持のみ）
+- **優先順位**: `.f` の `+define+`/`+incdir+` → CLI の `-D`/`-I` の順（CLI 後勝ち）
+- **Windows 対応**: `encoding="utf-8"` 明示、パス区切りは `os.path.normpath` で正規化
+- **docs/spec_format.md**: §18.9 プリプロセッサ使い方セクション追加
+- **docs/api.md**: §18.9 API リファレンスセクション追加
+- **docs/error_codes.md**: `E_INCLUDE_LOOP` を追加
+
 ### 修正（hotfix2: always_comb / always_ff 内 while ループが E_INTERNAL になる退行）
 
 - **`always_comb` 内の while ループが `E_INTERNAL` を返す退行を修正**

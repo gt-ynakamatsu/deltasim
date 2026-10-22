@@ -52,12 +52,14 @@ _WRITE_OPTS_LONG: Tuple[str, ...] = (
 # テストで click のコマンド定義と照合する
 _READ_OPTS_LONG: Tuple[str, ...] = (
     "--config",     # llm ask/draft-spec/explain: simconfig.yaml
+    "--incdir",     # §18.9: インクルードパス（ディレクトリ読み取り）
 )
 _READ_OPTS_SHORT: Tuple[str, ...] = (
     "-f",           # すべて: ファイルリスト .f（読み取り）
+    "-I",           # §18.9: インクルードパス（短形式）
 )
 
-# パスを取るが書き込みでも読み取りでもないオプション（フラグや非パス引数）
+    # パスを取るが書き込みでも読み取りでもないオプション（フラグや非パス引数）
 # このリストに入れることで分類テストをパスできる
 _NON_PATH_OPTS: frozenset = frozenset({
     # フラグ（bool、パスでない）
@@ -76,6 +78,8 @@ _NON_PATH_OPTS: frozenset = frozenset({
     # LLM コマンド固有
     "--rtl",
     # gen --spec は書き込み側 (--spec/-s) に含む
+    # §18.9: -D はマクロ名=値（パスでない）
+    "--define", "-D",
 })
 _WRITE_OPTS_SHORT: Tuple[str, ...] = (
     "-o",   # run: VCD 出力 (--vcd 相当)
