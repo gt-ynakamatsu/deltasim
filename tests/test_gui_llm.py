@@ -1065,22 +1065,34 @@ class TestFilesecValidation:
             yield c
 
     # draft-spec/start: sv_files が許可ルート外なら 403
-    def test_draft_spec_rejects_unsafe_sv_file(self, client, mock_llm_config):
+    def test_draft_spec_rejects_unsafe_sv_file(self, client, mock_llm_config, tmp_path):
         """draft-spec/start: 許可ルート外の sv_files は 403 を返すこと"""
         import os
         home = Path(os.path.expanduser("~")).resolve()
         cwd = Path.cwd().resolve()
-        # /etc/passwd はほぼ確実に許可ルート外
-        unsafe_path = "/etc/passwd"
-        p = Path(unsafe_path).resolve()
-        is_in_allowed = str(p).startswith(str(home)) or str(p).startswith(str(cwd))
-        if is_in_allowed:
-            pytest.skip("このパスは許可ルート内")
 
-        res = client.post("/api/llm/draft-spec/start", json={
-            "sv_files": [unsafe_path],
-        })
-        assert res.status_code == 403, f"許可ルート外は 403: {res.status_code}"
+        # filesec 検証のために、許可ルート外かつ実際に存在するファイルを作成
+        # 一時ディレクトリ内（これは許可ルートに追加しない）
+        import tempfile
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".sv") as tf:
+            unsafe_path = tf.name
+            tf.write(b"module m; endmodule")
+
+        try:
+            p = Path(unsafe_path).resolve()
+            is_in_allowed = str(p).startswith(str(home)) or str(p).startswith(str(cwd))
+            if is_in_allowed:
+                pytest.skip("このパスは許可ルート内")
+
+            res = client.post("/api/llm/draft-spec/start", json={
+                "sv_files": [unsafe_path],
+            })
+            assert res.status_code == 403, f"許可ルート外は 403: {res.status_code}"
+        finally:
+            try:
+                os.unlink(unsafe_path)
+            except Exception:
+                pass
 
     def test_draft_spec_accepts_safe_sv_file(self, client, mock_llm_config, monkeypatch, tmp_path):
         """draft-spec/start: 許可ルート内の sv_files は受け付けること"""
@@ -1103,38 +1115,58 @@ class TestFilesecValidation:
     # explain/start: sv_files・spec が許可ルート外なら 403
     def test_explain_rejects_unsafe_sv_file(self, client, mock_llm_config):
         """explain/start: 許可ルート外の sv_files は 403"""
-        import os
+        import os, tempfile
         home = Path(os.path.expanduser("~")).resolve()
         cwd = Path.cwd().resolve()
-        unsafe_path = "/etc/passwd"
-        p = Path(unsafe_path).resolve()
-        is_in_allowed = str(p).startswith(str(home)) or str(p).startswith(str(cwd))
-        if is_in_allowed:
-            pytest.skip("このパスは許可ルート内")
 
-        res = client.post("/api/llm/explain/start", json={
-            "result": {"status": "FAIL", "cases": [], "errors": []},
-            "sv_files": [unsafe_path],
-        })
-        assert res.status_code == 403, f"許可ルート外の sv_files は 403: {res.status_code}"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".sv") as tf:
+            unsafe_path = tf.name
+            tf.write(b"module m; endmodule")
 
-    def test_explain_rejects_unsafe_spec(self, client, mock_llm_config, tmp_path):
+        try:
+            p = Path(unsafe_path).resolve()
+            is_in_allowed = str(p).startswith(str(home)) or str(p).startswith(str(cwd))
+            if is_in_allowed:
+                pytest.skip("このパスは許可ルート内")
+
+            res = client.post("/api/llm/explain/start", json={
+                "result": {"status": "FAIL", "cases": [], "errors": []},
+                "sv_files": [unsafe_path],
+            })
+            assert res.status_code == 403, f"許可ルート外の sv_files は 403: {res.status_code}"
+        finally:
+            try:
+                os.unlink(unsafe_path)
+            except Exception:
+                pass
+
+    def test_explain_rejects_unsafe_spec(self, client, mock_llm_config):
         """explain/start: 許可ルート外の spec は 403"""
-        import os
+        import os, tempfile
         home = Path(os.path.expanduser("~")).resolve()
         cwd = Path.cwd().resolve()
-        unsafe_spec = "/etc/hosts"
-        p = Path(unsafe_spec).resolve()
-        is_in_allowed = str(p).startswith(str(home)) or str(p).startswith(str(cwd))
-        if is_in_allowed:
-            pytest.skip("このパスは許可ルート内")
 
-        res = client.post("/api/llm/explain/start", json={
-            "result": {"status": "FAIL", "cases": [], "errors": []},
-            "sv_files": [COUNTER_SV],
-            "spec": unsafe_spec,
-        })
-        assert res.status_code == 403, f"許可ルート外の spec は 403: {res.status_code}"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".yaml") as tf:
+            unsafe_spec = tf.name
+            tf.write(b"version: 1\n")
+
+        try:
+            p = Path(unsafe_spec).resolve()
+            is_in_allowed = str(p).startswith(str(home)) or str(p).startswith(str(cwd))
+            if is_in_allowed:
+                pytest.skip("このパスは許可ルート内")
+
+            res = client.post("/api/llm/explain/start", json={
+                "result": {"status": "FAIL", "cases": [], "errors": []},
+                "sv_files": [COUNTER_SV],
+                "spec": unsafe_spec,
+            })
+            assert res.status_code == 403, f"許可ルート外の spec は 403: {res.status_code}"
+        finally:
+            try:
+                os.unlink(unsafe_spec)
+            except Exception:
+                pass
 
     def test_explain_accepts_safe_paths(self, client, mock_llm_config):
         """explain/start: 許可ルート内のパスは受け付けること"""
