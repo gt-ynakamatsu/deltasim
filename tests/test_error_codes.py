@@ -202,6 +202,7 @@ module wloop(input logic clk, input logic a, output logic [31:0] y);
   end
 endmodule
 """
+# max_loop は YAML キーでなく ds.test() / --max-loop で渡す
 _WLOOP_SPEC = {
     "version": 1, "top": "wloop",
     "clock": {"signal": "clk", "period_ns": 10},
@@ -239,30 +240,32 @@ _LOOP_SPEC_TMPL = {
     "sim": {"cycles": 2},
     "cases": [{"name": "t", "expected": [{"at": 1, "check": {"y": 0}}]}],
 }
+# CLI 引数: --max-loop 10 でループ上限を小さくし Windows CI でもタイムアウトしない
+_LOOP_MAX_LOOP_ARGS = ("--max-loop", "10")
 
 
 class TestLoopLimitAlwaysComb:
     """always_comb 内の while ループが E_LOOP_LIMIT を返すこと（新退行）"""
 
     def test_wloop_cli(self, tmp_path):
-        """CLI: wloop（ユーザー報告の再現コード）→ E_LOOP_LIMIT"""
+        """CLI: wloop（ユーザー報告の再現コード）→ E_LOOP_LIMIT  --max-loop 10 で高速化"""
         sv_p = _write(tmp_path, "wloop.sv", _WLOOP_SV)
         spec_p = str(tmp_path / "spec.yaml")
         with open(spec_p, "w", encoding="utf-8") as f:
             yaml.dump(_WLOOP_SPEC, f)
-        out = _cli_test(sv_p, spec_p, tmp_path)
+        out = _cli_test(sv_p, spec_p, tmp_path, extra_args=_LOOP_MAX_LOOP_ARGS)
         codes = _all_codes(out)
         assert "E_LOOP_LIMIT" in codes, \
             f"E_LOOP_LIMIT expected (wloop CLI), got: {codes}"
         assert "E_INTERNAL" not in codes
 
     def test_wloop_api(self, tmp_path):
-        """API: wloop → E_LOOP_LIMIT"""
+        """API: wloop → E_LOOP_LIMIT  max_loop=10 で高速化"""
         sv_p = _write(tmp_path, "wloop.sv", _WLOOP_SV)
         spec_p = str(tmp_path / "spec.yaml")
         with open(spec_p, "w", encoding="utf-8") as f:
             yaml.dump(_WLOOP_SPEC, f)
-        result = _api_test(sv_p, spec_p)
+        result = _api_test(sv_p, spec_p, max_loop=10)
         codes = _all_codes(result)
         assert "E_LOOP_LIMIT" in codes, \
             f"E_LOOP_LIMIT expected (wloop API), got: {codes}"
@@ -275,7 +278,7 @@ class TestLoopLimitAlwaysComb:
         spec_p = str(tmp_path / "spec.yaml")
         with open(spec_p, "w", encoding="utf-8") as f:
             yaml.dump(spec, f)
-        out = _cli_test(sv_p, spec_p, tmp_path)
+        out = _cli_test(sv_p, spec_p, tmp_path, extra_args=_LOOP_MAX_LOOP_ARGS)
         codes = _all_codes(out)
         assert "E_LOOP_LIMIT" in codes
         assert "E_INTERNAL" not in codes
@@ -287,7 +290,7 @@ class TestLoopLimitAlwaysComb:
         spec_p = str(tmp_path / "spec.yaml")
         with open(spec_p, "w", encoding="utf-8") as f:
             yaml.dump(spec, f)
-        result = _api_test(sv_p, spec_p)
+        result = _api_test(sv_p, spec_p, max_loop=10)
         codes = _all_codes(result)
         assert "E_LOOP_LIMIT" in codes
         assert "E_INTERNAL" not in codes
@@ -299,7 +302,7 @@ class TestLoopLimitAlwaysComb:
         spec_p = str(tmp_path / "spec.yaml")
         with open(spec_p, "w", encoding="utf-8") as f:
             yaml.dump(spec, f)
-        out = _cli_test(sv_p, spec_p, tmp_path)
+        out = _cli_test(sv_p, spec_p, tmp_path, extra_args=_LOOP_MAX_LOOP_ARGS)
         codes = _all_codes(out)
         assert "E_LOOP_LIMIT" in codes
         assert "E_INTERNAL" not in codes
@@ -311,7 +314,7 @@ class TestLoopLimitAlwaysComb:
         spec_p = str(tmp_path / "spec.yaml")
         with open(spec_p, "w", encoding="utf-8") as f:
             yaml.dump(spec, f)
-        result = _api_test(sv_p, spec_p)
+        result = _api_test(sv_p, spec_p, max_loop=10)
         codes = _all_codes(result)
         assert "E_LOOP_LIMIT" in codes
         assert "E_INTERNAL" not in codes
@@ -751,7 +754,7 @@ endmodule
         "E_CONSTRAINT_EXPR",
         id="E_CONSTRAINT_EXPR",
     ),
-    # wloop (always_comb while) — 新退行ケース
+    # wloop (always_comb while) — 新退行ケース（max_loop=10 で高速化）
     pytest.param(
         "E_LOOP_LIMIT_always_comb_wloop",
         _WLOOP_SV,
@@ -775,6 +778,13 @@ endmodule
     ),
 ]
 
+# max_loop=10 を必要とするパラメータ化テスト ID のセット
+_NEEDS_SMALL_MAX_LOOP = frozenset({
+    "E_LOOP_LIMIT_always_comb_wloop",
+    "E_LOOP_LIMIT_always_comb",
+    "E_LOOP_LIMIT_always_ff",
+})
+
 
 @pytest.mark.parametrize("name,sv_code,spec_dict,expected_code", _PARAM_CASES)
 def test_error_code_cli(name, sv_code, spec_dict, expected_code, tmp_path):
@@ -783,15 +793,16 @@ def test_error_code_cli(name, sv_code, spec_dict, expected_code, tmp_path):
     Path(sv_p).write_text(sv_code, encoding="utf-8")
     spec_p = str(tmp_path / "spec.yaml")
 
-    extra = {}
+    extra_args: list = []
     if expected_code == "E_NO_CASE":
-        extra["extra_args"] = ["--case", "nonexistent_case"]
+        extra_args = ["--case", "nonexistent_case"]
+    if name in _NEEDS_SMALL_MAX_LOOP:
+        extra_args = list(extra_args) + list(_LOOP_MAX_LOOP_ARGS)
 
     with open(spec_p, "w", encoding="utf-8") as f:
         yaml.dump(spec_dict, f, allow_unicode=True)
 
-    out = _cli_test(sv_p, spec_p, tmp_path,
-                    extra_args=extra.get("extra_args", ()))
+    out = _cli_test(sv_p, spec_p, tmp_path, extra_args=tuple(extra_args))
     codes = _all_codes(out)
 
     assert "E_INTERNAL" not in codes, \
@@ -812,6 +823,8 @@ def test_error_code_api(name, sv_code, spec_dict, expected_code, tmp_path):
     kw = {}
     if expected_code == "E_NO_CASE":
         kw["filter_cases"] = ["nonexistent_case"]
+    if name in _NEEDS_SMALL_MAX_LOOP:
+        kw["max_loop"] = 10
 
     result = _api_test(sv_p, spec_p, **kw)
     codes = _all_codes(result)
