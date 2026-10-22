@@ -2903,18 +2903,30 @@ function _showFilelistBanner(items) {
   const banner = document.createElement("div");
   banner.id = "filelist-warnings-banner";
   banner.className = "top-warnings-block";
-  banner.innerHTML = items.map(w => {
+  // §18.3.2 fix: textContent で組んで二重エスケープを防ぐ
+  items.forEach(w => {
     const sev = w.severity ?? "warning";
-    const code = escHtml(w.code ?? "");
-    const msg = escHtml(w.message ?? "");
-    const loc = w.file ? ` (${escHtml(w.file)}${w.line > 0 ? `:${w.line}` : ""})` : "";
-    const icon = sev === "error" ? "❌" : "⚠";
-    return `<div class="top-warn-item">
-      <span class="warn-icon">${icon}</span>
-      <span class="warn-code">[${code}]</span>
-      <span class="warn-msg">${msg}${escHtml(loc)}</span>
-    </div>`;
-  }).join("");
+    const row = document.createElement("div");
+    row.className = "top-warn-item";
+
+    const iconEl = document.createElement("span");
+    iconEl.className = "warn-icon";
+    iconEl.textContent = sev === "error" ? "❌" : "⚠";
+
+    const codeEl = document.createElement("span");
+    codeEl.className = "warn-code";
+    codeEl.textContent = "[" + (w.code ?? "") + "]";
+
+    const msgEl = document.createElement("span");
+    msgEl.className = "warn-msg";
+    const locStr = w.file ? " (" + w.file + (w.line > 0 ? ":" + w.line : "") + ")" : "";
+    msgEl.textContent = (w.message ?? "") + locStr;
+
+    row.appendChild(iconEl);
+    row.appendChild(codeEl);
+    row.appendChild(msgEl);
+    banner.appendChild(row);
+  });
 
   const resultPanel = document.getElementById("result-panel");
   if (resultPanel) {
