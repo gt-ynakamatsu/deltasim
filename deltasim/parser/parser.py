@@ -567,12 +567,13 @@ class Parser:
         return ImportDecl(pkg=pkg, item=item)
 
     def _parse_assign_item(self) -> AssignItem:
+        _line = self._peek().line
         self._consume("assign")
         lhs = self._parse_lvalue()
         self._consume("=")
         rhs = self._parse_expression()
         self._consume(";")
-        return AssignItem(lhs=lhs, rhs=rhs)
+        return AssignItem(lhs=lhs, rhs=rhs, source_line=_line, source_file=self._filename)
 
     def _parse_always_item(self) -> AlwaysItem:
         keyword = self._consume().value

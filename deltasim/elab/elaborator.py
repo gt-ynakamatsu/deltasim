@@ -65,6 +65,8 @@ class SignalInfo:
 class AssignProc:
     lhs: object
     rhs: object
+    source_line: int = 0   # §18: ソース行番号
+    source_file: str = ""
 
 
 @dataclass
@@ -369,7 +371,11 @@ def _process_item(item, params, typedefs, signals, procs, cat,
                         signal_types[name] = item.net_type
 
     elif isinstance(item, AssignItem):
-        procs["assign"].append(AssignProc(lhs=item.lhs, rhs=item.rhs))
+        procs["assign"].append(AssignProc(
+            lhs=item.lhs, rhs=item.rhs,
+            source_line=getattr(item, "source_line", 0),
+            source_file=getattr(item, "source_file", ""),
+        ))
 
     elif isinstance(item, AlwaysItem):
         kw = item.keyword

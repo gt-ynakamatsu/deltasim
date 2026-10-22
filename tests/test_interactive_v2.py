@@ -145,7 +145,7 @@ class TestLineBreakpoint:
         assert any("5" in l or "test_bp.sv" in l for l in lines)
 
     def test_bp_line_fires_on_run(self, tmp_path):
-        """run -all で行ブレークポイントが発火すること"""
+        """run -all で行ブレークポイントが発火し、出力に bp [id] file:line t=Xns が出ること"""
         sv_p = str(tmp_path / "test_bp.sv")
         Path(sv_p).write_text(SV_WITH_LOC, encoding="utf-8")
         import deltasim.api as ds
@@ -153,28 +153,19 @@ class TestLineBreakpoint:
         sim = ds.Simulator([sv_p], top="test_bp", reset_cycles=2)
         session = SimSession(sim)
 
-        # AST の source_line が設定されているか確認
-        from deltasim.parser.ast_nodes import BlockingAssign, NonBlockingAssign
-        stmts = []
-        for proc in sim._design.seq_procs + sim._design.comb_procs:
-            def _collect(node):
-                if node is None: return
-                if isinstance(node, (BlockingAssign, NonBlockingAssign)):
-                    stmts.append((node.source_line, node.source_file))
-                for attr in ("stmts", "then_body", "else_body", "body"):
-                    c = getattr(node, attr, None)
-                    if c is not None:
-                        if isinstance(c, list):
-                            for x in c: _collect(x)
-                        else:
-                            _collect(c)
-            _collect(getattr(proc, "body", None))
+        # Line 7: q <= q + d (NonBlockingAssign inside always_ff)
+        session.eval_script(f"bp {{{sv_p}:7}}")
+        assert session._breakpoints, "bp が登録されなかった"
 
-        # source_line が設定されていれば行ブレークポイントテスト実施
-        if not stmts:
-            pytest.skip("AST source_line not set in this build")
-        bp_line = stmts[0][0]  # 最初の文の行番号
-        assert bp_line > 0, f"source_line not set: {stmts}"
+        session.eval_script("force d 1")
+        session.eval_script("run -all")
+        out = session._output_lines
+        bp_msgs = [l for l in out if "bp [" in l and "t=" in l]
+        assert bp_msgs, f"bp 発火メッセージがない: {out}"
+        assert "7" in bp_msgs[0], f"行番号 7 が message にない: {bp_msgs[0]!r}"
+        assert "ns" in bp_msgs[0], f"時刻が message にない: {bp_msgs[0]!r}"
+        # q should be 1 after first posedge
+        assert sim.get("q") == 1, f"q={sim.get('q')} != 1"
 
     def test_bp_snap_to_next_line(self, tmp_path):
         """文のない行に bp を設定すると次の文のある行に寄せて警告が出ること"""

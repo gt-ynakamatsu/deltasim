@@ -321,7 +321,10 @@ class SimSession:
                     bp.hit_count += 1
                     self._out(f"# when [{bp.id}] 発火: {cond!r}")
                     self._tcl.eval(bp.kwargs["cmds"])
-            except (_StopSignal, TclError, ExprError, Exception):
+            except _StopSignal:
+                self._prev_sig_snap = dict(snap.signals)
+                raise  # propagate to caller so stop_count can be tracked
+            except (TclError, ExprError, Exception):
                 pass
 
         self._prev_sig_snap = dict(snap.signals)
@@ -499,9 +502,16 @@ class SimSession:
                     _collect(getattr(item, "body", None))
 
         for proc in (self._sim._design.seq_procs +
-                     self._sim._design.comb_procs +
-                     list(getattr(self._sim._design, "assign_procs", []))):
+                     self._sim._design.comb_procs):
             _collect(getattr(proc, "body", None))
+
+        # assign_procs: source_line is on the proc itself (no body to recurse into)
+        for proc in getattr(self._sim._design, "assign_procs", []):
+            sl = getattr(proc, "source_line", 0)
+            sf = getattr(proc, "source_file", "")
+            if sl and (not fname or sf.endswith(fname) or fname in sf
+                       or (fname and fname in sf.replace("\\", "/"))):
+                stmt_lines.append(sl)
 
         return sorted(set(stmt_lines))
 

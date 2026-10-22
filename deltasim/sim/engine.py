@@ -1274,6 +1274,13 @@ class SimEngine:
             changed = False
 
             for proc in self.design.assign_procs:
+                # §18: bp_check for assign lines (deferred, fires after delta settles)
+                _bp = getattr(self, "_active_bp_check", None)
+                if _bp is not None:
+                    sl = getattr(proc, "source_line", 0)
+                    sf = getattr(proc, "source_file", "")
+                    if sl:
+                        _bp(sf, sl)
                 v, w = eval_expr(proc.rhs, self.signals, self._widths, self._params, self._ctx)
                 changed |= _assign_to_lhs(proc.lhs, v, w, self.signals, self._widths, self._ctx)
 

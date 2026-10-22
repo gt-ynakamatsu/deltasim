@@ -75,6 +75,8 @@ class AssignItem:
     """Continuous assignment: assign lhs = rhs;"""
     lhs: Expr
     rhs: Expr
+    source_line: int = 0   # §18: ソース行番号
+    source_file: str = ""
 
 
 @dataclass
