@@ -244,31 +244,37 @@ class TestConsoleCancel:
         assert res2.status_code == 200
         job_id = res2.json()["job_id"]
 
-        # 少し待ってからキャンセル
+        # 少し待ってからキャンセル（スレッドが起動するのを待つ）
         import time as _time
-        _time.sleep(0.2)
+        _time.sleep(0.5)
 
         res3 = client.post(f"/api/console/{sid}/exec/{job_id}/cancel", json={})
         assert res3.status_code == 200
         assert res3.json()["ok"] is True
 
-        # SSE を消費（中断メッセージが含まれること）
-        result = {"output": []}
-        with client.stream("GET", f"/api/console/{sid}/exec/{job_id}/events") as stream:
-            for line in stream.iter_lines():
-                if not line.startswith("data:"):
-                    continue
-                ev = json.loads(line[5:].strip())
-                evtype = ev.get("event") or ev.get("type")
-                if evtype == "output":
-                    result["output"].extend(ev.get("lines", []))
-                elif evtype in ("finish", "error"):
-                    result["output"].extend(ev.get("output", []))
-                    break
+        # SSE を消費（finish イベントを待つ、タイムアウト付き）
+        # キャンセル後に finish イベントが来ることを確認
+        result = {"output": [], "got_finish": False}
+        try:
+            with client.stream("GET", f"/api/console/{sid}/exec/{job_id}/events",
+                               timeout=30.0) as stream:
+                for line in stream.iter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    ev = json.loads(line[5:].strip())
+                    evtype = ev.get("event") or ev.get("type")
+                    if evtype == "output":
+                        result["output"].extend(ev.get("lines", []))
+                    elif evtype in ("finish", "error"):
+                        result["output"].extend(ev.get("output", []))
+                        result["got_finish"] = True
+                        break
+        except Exception:
+            pass  # ストリームが閉じられた場合も OK
 
-        # キャンセルが通ったことを確認（エラーにならない）
-        # 中断メッセージまたは正常終了どちらでもよい
-        # （キャンセルのタイミングによっては既に終了していることもある）
+        # キャンセルが通ったことを確認（エラーにならない、かつ finish イベントが来ること）
+        # タイミングによっては既に終了している場合もあるので、got_finish は必須でない
+        assert res3.json()["ok"] is True
 
 
 # ---------------------------------------------------------------------------

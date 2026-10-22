@@ -538,6 +538,23 @@ async def run_console_job(
             "quit": result["quit"],
         }
         await job.queue.put(evt)
+    except asyncio.CancelledError:
+        # タスクがキャンセルされた場合、SSE ストリームを閉じるために finish イベントを送る
+        engine = getattr(interp._sim, "_engine", None)
+        time_ns = engine._time if engine else 0
+        try:
+            job.queue.put_nowait({
+                "event": "finish",
+                "time_ns": time_ns,
+                "cycle": getattr(interp._sim, "cycle", 0),
+                "output": collected_output,
+                "paused_bp": None,
+                "quit": False,
+                "cancelled": True,
+            })
+        except Exception:
+            pass
+        raise
     except Exception as e:
         job.result = {"error": str(e)}
         await job.queue.put({"event": "error", "message": str(e)})
