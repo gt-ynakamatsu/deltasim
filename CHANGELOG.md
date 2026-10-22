@@ -20,7 +20,12 @@
 - `==` は x/z で x を返す; `===`/`!==` は常に 0/1
 - `?:` の条件が x のとき両辺の per-bit merge（一致ビット → 確定値、不一致 → x）
 - `case`: `===` 相当; `casez`: pattern 側の z/`?` ワイルドカード; `casex`: x/z ワイルドカード
-- 内部信号（`direction=None`の logic/reg）が x で初期化; ポートは 0 のまま
+- `PartSelect`/`BitSelect`: FourState 値に対して per-bit 精度で抽出
+- 初期値ポリシー（IEEE 1800 準拠）:
+  - `input` ポート: 0（テストベンチ駆動; §18.6 constraints との整合）
+  - `output`/`inout` ポートおよび内部 logic で `always_ff` 駆動: x（未リセット FF）
+  - `assign`/`always_comb` のみで駆動: 0（`_eval_comb_loop()` で即時上書き）
+  - 未駆動 net（どこからも書き込まれない）: z
 - 初期化後に `_eval_comb_loop()` を実行してコンビナショナル出力を確定
 - `$display` の `%b/%h/%d` が x/z を正しく表示（`%h` で x ビットは X、`%d` では x）
 
@@ -44,22 +49,28 @@
 
 | 変更点 | 旧動作 | 新動作 |
 |---|---|---|
-| 内部 logic/reg の初期値 | 0 | x (None) |
-| `assign y = ~y;` の初期状態 | y=0 → ループ → DeltaLimit | y=0 (ポート) → ループ継続 |
+| `output` ポート FF（always_ff 駆動）の初期値 | 0 | **x** ← 今回追加 |
+| 内部 logic/reg の初期値（direction=None）| 0 | **x** |
+| 未駆動 net の初期値 | 0 | **z** |
+| `assign y = ~y;` の初期状態 | y=0 → ループ | y=0 (assign 駆動) → ループ継続 |
 | `1 & 'x` | None (x) | FourState(bit=x) |
 | `0 & 'x` | None (x) | 0 ✓ (IEEE 1800 修正済) |
-| `x ^ y` | None (x) | FourState(x) — x/z は x に (不意の z ビットなし) |
+| `x ^ y` | None (x) | FourState(x) — x/z は x に (z ビットなし) |
 | `0 \| 'z` | None (x) | FourState(x) — z treated as x ✓ |
 | `===` with x/z | 純2値比較 (xを0扱い) | FourState ceq (正確) |
 | `case(x)` | 0 と比較 | x は no-match → default |
 | `casez` pattern `?` | 整数0扱い | xz_mask wildcard ✓ |
+| `PartSelect` q[hi:lo] で q=x | (None, 1) — 幅バグ | (FourState, hi-lo+1) ✓ |
 | counters without `initial` | 0 からカウント | x からカウント (x+1=x) |
-| `initial y = 0;` のある回路 | 変わらず | 変わらず ✓ |
 | リセット付き回路 | 変わらず | 変わらず ✓ |
+| assign 駆動の combinational 出力 | 0 → 評価で上書き | 0 → 評価で上書き（変わらず） |
 
-#### 性能（100万サイクル相当: リセット付きカウンタ、100k cy × 3試行平均）
-- **現バージョン**: ~130k cy/s (0.77s)
-- pure 2-state パスはハンドラの分岐追加のみ — x/z がない場合のオーバーヘッドは小
+#### 性能（リセット付きカウンタ 10万サイクル × 3試行平均）
+| バージョン | 時間 | スループット |
+|---|---|---|
+| main (2-state) | 0.785s | ~127k cy/s |
+| §18.7 (4-state) | 0.809s | ~124k cy/s |
+| オーバーヘッド | +3% | (許容範囲内) |
 
 ### 互換性変更
 - YAML の整数 expected に対して、actual が x/z なら FAIL（変わらず）

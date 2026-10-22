@@ -14,10 +14,14 @@ def _make_engine(sv_path, reset_cycles=2):
 
 class TestShiftReg:
     def test_reset_clears_output(self, shift_reg_sv):
-        """リセット中は q=0"""
+        """リセット中は q=0（§18.7: cycle 0 は x がありえる）"""
         eng = _make_engine(shift_reg_sv, reset_cycles=3)
         result = eng.run(cycles=3)
-        for c in range(0, 4):
+        # cycle 0: リセット前の初期状態 → x (None) は許容
+        v0 = result.get_value("q", 0)
+        assert v0 is None or v0 == 0, f"cycle 0: expected x(None) or 0, got {v0}"
+        # cycle 1..3: リセット中 → 0
+        for c in range(1, 4):
             assert result.get_value("q", c) == 0, f"cycle {c}: expected 0"
 
     def test_shift_in_ones(self, shift_reg_sv):
@@ -42,9 +46,15 @@ class TestShiftReg:
         design = elaborate(mod)
         eng = SimEngine(design, reset_cycles=0)
 
-        # signals を直接制御してサイクルごとに検証
-        result = eng.run(cycles=0)  # 初期化のみ
-        assert eng.signals.get("q", 0) == 0
+        # §18.7: output q は FF 出力なので x で初期化
+        assert eng.signals.get("q") is None or eng.signals.get("q") == 0
+
+        # §18.7: x ビットをフラッシュするために 4 サイクル d=0 をシフトイン
+        eng.signals["d"] = 0
+        for _ in range(4):
+            eng.run(cycles=1, reset_cycles=0)
+        # これで q = 0b0000
+        assert eng.signals.get("q") == 0, f"flush後 q={eng.signals.get('q')}"
 
         # 手動でクロックを刻む代わりに、run(1) を複数回呼ぶ
         eng.signals["d"] = 1

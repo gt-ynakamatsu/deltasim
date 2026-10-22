@@ -20,8 +20,13 @@ class TestCounterBasic:
         """リセット中（最初の10サイクル）はcount=0のまま"""
         eng = _make_engine(counter_sv)
         result = eng.run(cycles=10)
-        # cycle 0 = 初期状態, cycle 1..10 = リセット期間
-        for cycle in range(0, 11):
+        # §18.7: cycle 0 = リセット前の初期状態 → x（None）
+        # output ポートは未リセット FF なので x で始まる
+        v0 = result.get_value("count", 0)
+        assert v0 is None or v0 == 0, \
+            f"cycle 0: expected x(None) or 0, got {v0}"
+        # cycle 1..10 = リセット期間（always_ff が q <= 0 を実行）→ 0
+        for cycle in range(1, 11):
             assert result.get_value("count", cycle) == 0, \
                 f"cycle {cycle}: expected 0, got {result.get_value('count', cycle)}"
 

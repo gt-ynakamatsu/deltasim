@@ -20,9 +20,9 @@ COUNTER_SV = os.path.join(EXAMPLES, "counter.sv")
 # テスト用 SV: always_ff + always_comb の行番号を持つファイル
 SV_WITH_LOC = """\
 module test_bp(input logic clk, rst, d, output logic [7:0] q, output logic c);
-  // line 2: comment
+  // line 2: comment (rst は active-high: _detect_rst が rst→active-high と判定)
   always_ff @(posedge clk) begin  // line 3
-    if (!rst) begin                // line 4
+    if (rst) begin                 // line 4 (rst=1: reset active)
       q <= 0;                      // line 5
     end else begin                 // line 6
       q <= q + d;                  // line 7

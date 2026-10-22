@@ -216,17 +216,53 @@ def eval_expr(
             return _eval_array_element(expr, signals, widths, params, ctx)
         base_v, _ = eval_expr(expr.base, signals, widths, params, ctx)
         idx_v, _ = eval_expr(expr.index, signals, widths, params, ctx)
-        if base_v is None or idx_v is None:
+        if idx_v is None:
             return (None, 1)
+        if base_v is None:
+            return (None, 1)    # all-x base → 1-bit x
+        # §18.7: FourState base → extract specific bit
+        try:
+            from deltasim.fourstate import FourState as _FS
+            from deltasim.result import Z_VALUE as _ZV
+            if base_v is _ZV:
+                return (None, 1)   # z → x for bit-select
+            if isinstance(base_v, _FS):
+                aval_bit = (base_v.aval >> idx_v) & 1
+                bval_bit = (base_v.bval >> idx_v) & 1
+                if bval_bit:
+                    return (None, 1)   # x or z bit → x
+                return (aval_bit, 1)
+        except ImportError:
+            pass
         return ((base_v >> idx_v) & 1, 1)
 
     if isinstance(expr, PartSelect):
         base_v, _ = eval_expr(expr.base, signals, widths, params, ctx)
         hi_v, _ = eval_expr(expr.hi, signals, widths, params, ctx)
         lo_v, _ = eval_expr(expr.lo, signals, widths, params, ctx)
-        if base_v is None or hi_v is None or lo_v is None:
+        if hi_v is None or lo_v is None:
             return (None, 1)
         w = hi_v - lo_v + 1
+        if base_v is None:
+            # all-x base: return w-bit all-x
+            return (None, w)
+        # §18.7: FourState base → extract per-bit slice
+        try:
+            from deltasim.fourstate import FourState as _FS
+            from deltasim.result import Z_VALUE as _ZV
+            if base_v is _ZV:
+                # all-z base: return w-bit z
+                from deltasim.fourstate import from_z
+                return (from_z(w), w)
+            if isinstance(base_v, _FS):
+                aval = (base_v.aval >> lo_v) & ((1 << w) - 1)
+                bval = (base_v.bval >> lo_v) & ((1 << w) - 1)
+                result_fs = _FS(aval, bval, w)
+                if result_fs.bval == 0:
+                    return (result_fs.aval, w)
+                return (result_fs, w)
+        except ImportError:
+            pass
         mask = (1 << w) - 1
         return ((base_v >> lo_v) & mask, w)
 
@@ -904,6 +940,64 @@ def _lhs_name(lhs) -> str:
     raise SimError(f"Unsupported LHS expression type: {type(lhs).__name__}")
 
 
+def _collect_lhs_from_stmt(stmt, out: set) -> None:
+    """stmt ツリーを再帰的に走査して LHS 信号名を out に追加する。"""
+    from deltasim.parser.ast_nodes import (
+        Block, IfStmt, CaseStmt, BlockingAssign, NonBlockingAssign,
+        ForStmt, WhileStmt, RepeatStmt, ForeverStmt,
+    )
+    if isinstance(stmt, (BlockingAssign, NonBlockingAssign)):
+        try:
+            out.add(_lhs_name(stmt.lhs))
+        except (SimError, Exception):
+            pass
+    elif isinstance(stmt, Block):
+        for s in stmt.stmts:
+            _collect_lhs_from_stmt(s, out)
+    elif isinstance(stmt, IfStmt):
+        _collect_lhs_from_stmt(stmt.then_body, out)
+        if stmt.else_body is not None:
+            _collect_lhs_from_stmt(stmt.else_body, out)
+    elif isinstance(stmt, CaseStmt):
+        for item in stmt.items:
+            if item.body is not None:
+                _collect_lhs_from_stmt(item.body, out)
+    elif isinstance(stmt, (ForStmt, WhileStmt, RepeatStmt, ForeverStmt)):
+        body = getattr(stmt, "body", None)
+        if body is not None:
+            _collect_lhs_from_stmt(body, out)
+
+
+def _collect_driven_signals(design):
+    """プロセス別に書き込まれる信号名を収集する。
+
+    返り値: (seq_driven, any_driven)
+      - seq_driven: always_ff など seq_proc が書き込む信号名の集合 → x で初期化
+      - any_driven: いずれかのプロセスが書き込む信号名の集合 → 駆動あり信号
+    """
+    seq_driven: set = set()
+    any_driven: set = set()
+
+    for proc in design.assign_procs:
+        try:
+            name = _lhs_name(proc.lhs)
+            any_driven.add(name)
+        except Exception:
+            pass
+
+    for proc in design.comb_procs:
+        _collect_lhs_from_stmt(proc.body, any_driven)
+
+    for proc in design.seq_procs:
+        _collect_lhs_from_stmt(proc.body, seq_driven)
+        any_driven.update(seq_driven)
+
+    for blk in getattr(design, "initial_blocks", []):
+        _collect_lhs_from_stmt(blk, any_driven)
+
+    return seq_driven, any_driven
+
+
 # ---------------------------------------------------------------------------
 # Initial-block coroutine executor
 # ---------------------------------------------------------------------------
@@ -1293,15 +1387,26 @@ class SimEngine:
         }
         self._params = design.params
 
-        # §18.7: ポート（input/output/inout）は 0 で初期化（後方互換・テストベンチ駆動）。
-        # 内部信号（direction=None: モジュール内部の logic/reg）のみ x で初期化。
-        # output ポートも 0 スタートにすることで、assign/always が駆動する前の
-        # 既存テスト（delta limit loop など）が壊れないようにする。
-        # "リセット前の FF 出力が x" テスト用には内部信号を使うこと。
-        self.signals: Dict[str, object] = {
-            name: (None if info.direction is None else 0)
-            for name, info in design.signals.items()
-        }
+        # §18.7: 初期値ポリシー（IEEE 1800 準拠）
+        # - input  ポート              → 0    (テストベンチが駆動; §18.6 constraints との整合)
+        # - output/inout ポート        → x    (未リセット FF 出力は x)
+        # - 内部信号 (direction=None)  → x    (未初期化 logic/reg は x)
+        # - 上記のうち assign/always_comb だけで駆動される信号
+        #                              → x のまま初期化後の _eval_comb_loop() で上書き
+        # - どこからも駆動されない信号  → z    (未駆動 net は z)
+        from deltasim.result import Z_VALUE as _Z_INIT
+        _seq_driven, _any_driven = _collect_driven_signals(design)
+        self.signals: Dict[str, object] = {}
+        for _name, _info in design.signals.items():
+            if _info.direction == "input":
+                self.signals[_name] = 0              # テストベンチ駆動 → 0
+            elif _name in _seq_driven:
+                self.signals[_name] = None           # always_ff 駆動 → x（未リセット FF）
+            elif _name in _any_driven:
+                self.signals[_name] = 0              # assign/always_comb 駆動 → 0
+                                                     # (_eval_comb_loop() で即時上書き)
+            else:
+                self.signals[_name] = _Z_INIT        # 未駆動 net → z
         self._prev: Dict[str, object] = dict(self.signals)
 
         self.vcd_writer = None

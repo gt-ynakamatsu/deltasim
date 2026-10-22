@@ -1131,9 +1131,22 @@ stimulus:
 
 `checks[].expected` / `checks[].actual` は 4値文字列（例: `"1x0z"`）として出力されます。既存の数値フィールド形式は変わりません。
 
-### 初期値
+### 初期値（§18.7 ポリシー）
 
-現バージョン（0.3.0）では `logic`/`reg` の初期値は `0` です（将来的に `x` に変更予定）。`input` ポートの初期値 `0` は §18.6 の制約式評価でも使われます。
+deltasim の信号初期値は信号の種類とドライバによって決まります:
+
+| 信号の種類 | 初期値 | 備考 |
+|---|---|---|
+| `input` ポート | **0** | テストベンチが駆動。§18.6 constraints の前提値 |
+| `output`/`inout`（always_ff 駆動） | **x** | 未リセット FF 出力は x。リセット後は定義済み |
+| `output`/`inout`（assign/always_comb 駆動） | **0 → 即評価** | 組み合わせ論理は init 後の comb loop で上書き |
+| 内部 logic/reg（direction=None, always_ff 駆動） | **x** | 未初期化 FF/reg |
+| 内部 logic（assign/always_comb 駆動） | **0 → 即評価** | 同上 |
+| 未駆動 net | **z** | どこからも書き込まれない信号 |
+
+**§18.6 constraints との整合**: input ポートの初期値 0 は維持しています。制約式（`a + b < 16` 等）は input ポートの値を参照しますが、その初期値は 0 なので、リセット前でも制約式は定義済み値で評価されます。
+
+**リセット付き回路は影響なし**: FF 出力が x で始まっても、リセット後（always_ff の if/reset 分岐で 0 に設定）は 0 になります。`examples/counter.sv` 等の典型例は引き続き PASS します。
 
 ### 信号名 x/z の衝突（Fix §18.7.6）
 
