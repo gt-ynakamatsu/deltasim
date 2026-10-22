@@ -72,6 +72,16 @@ class SimError(Exception):
     pass
 
 
+class BreakpointHit(Exception):
+    """Raised by the executor when a line breakpoint is hit (§18)."""
+    def __init__(self, bp_id: int, source_file: str, source_line: int, time_ns: int):
+        self.bp_id      = bp_id
+        self.source_file = source_file
+        self.source_line = source_line
+        self.time_ns    = time_ns
+        super().__init__(f"bp [{bp_id}] {source_file}:{source_line} @ {time_ns}ns")
+
+
 class DeltaLimitError(SimError):
     """Raised when delta-cycle convergence exceeds max_delta (E_DELTA_LIMIT)."""
     def __init__(self, time_ns: int, signal_hint: str = "", max_delta: int = MAX_DELTA):
@@ -451,6 +461,7 @@ class _Executor:
         ctx: Optional[EvalContext] = None,
         max_loop: int = MAX_FOREVER_TICKS,
         time_ns: int = 0,
+        bp_check=None,   # §18: Optional[Callable[[str, int], None]] — file, line
     ):
         self.signals = dict(signals)
         self.widths = widths
@@ -458,11 +469,19 @@ class _Executor:
         self.ctx = ctx or _EMPTY_CTX
         self.max_loop = max_loop
         self.time_ns = time_ns
+        self._bp_check = bp_check  # raises BreakpointHit if a bp is set
         # NBA items: (name, val) for signals, (arr_name, idx, val) for arrays
         self.nba_queue: List[tuple] = []
         self.display_log: List[str] = []
 
     def execute(self, stmt) -> None:
+        # §18: Check line breakpoints before executing each statement
+        if self._bp_check is not None:
+            sl = getattr(stmt, "source_line", 0)
+            sf = getattr(stmt, "source_file", "")
+            if sl:
+                self._bp_check(sf, sl)
+
         if isinstance(stmt, Block):
             for s in stmt.stmts:
                 self.execute(s)
@@ -1046,7 +1065,9 @@ class SimEngine:
         cycle_idx: int,
         pre_posedge_hook: Optional[Callable] = None,
         post_posedge_hook: Optional[Callable] = None,
-    ) -> None:
+        posedge_only: bool = False,  # §18: stop after posedge (for sub-cycle timing)
+    ) -> bool:
+        """Run one clock cycle.  Returns True if both posedge and negedge ran."""
         hp = self.half_period
         cycle_num = cycle_idx + 1
 
@@ -1109,6 +1130,10 @@ class SimEngine:
         if post_posedge_hook:
             post_posedge_hook(cycle_num, dict(self.signals))
 
+        # §18: Stop after posedge if requested (sub-cycle timing)
+        if posedge_only:
+            return False  # negedge not yet run
+
         # --- Run initial blocks between posedge and negedge ---
         negedge_time = (cycle_idx + 1) * 2 * hp
         if self._initial_scheduler:
@@ -1132,6 +1157,7 @@ class SimEngine:
 
         if self.vcd_writer:
             self.vcd_writer.record(self._time, self.signals)
+        return True  # both posedge and negedge ran
 
     # ------------------------------------------------------------------
     # Internal: NBA collection for a single edge event

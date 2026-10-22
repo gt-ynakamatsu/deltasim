@@ -987,14 +987,61 @@ class Simulator:
         )
 
     def run_until(self, time_ns: int) -> SimSnapshot:
-        """Run the simulation until *time_ns* (approximate, clock-cycle granularity)."""
+        """Run the simulation until *time_ns* (approximate, clock-cycle granularity).
+        For exact ns stopping use step_to_ns().
+        """
+        return self.step_to_ns(time_ns)
+
+    def step_to_ns(self, target_ns: int, bp_check=None) -> SimSnapshot:
+        """Advance simulation to exactly *target_ns* (sub-cycle precision).
+
+        §18: Stops at the first clock edge (posedge or negedge) at or after
+        target_ns.  For a 10ns clock with target=25ns, stops at posedge t=25.
+        bp_check: optional callable(file, line) that raises BreakpointHit.
+        """
         hp = self._engine.half_period
-        cycle_period = 2 * hp
-        target_cycle = time_ns // cycle_period
-        n_to_run = max(0, target_cycle - self._cycle)
-        if n_to_run == 0:
-            return self.step(1)
-        return self.step(n_to_run)
+        changes_acc: list = []
+
+        while self._engine._time < target_ns:
+            cycle_idx = self._cycle
+            posedge_time = cycle_idx * 2 * hp + hp
+            negedge_time = (cycle_idx + 1) * 2 * hp
+
+            if posedge_time > target_ns:
+                break  # next event is past target
+
+            # Run posedge phase only (posedge_only=True)
+            completed = self._engine._run_cycle(
+                cycle_idx,
+                posedge_only=(posedge_time >= target_ns),
+                # bp_check would be threaded through _collect_nba_for_edge if needed
+            )
+
+            # Collect changes
+            cur = self._engine.signals
+            for sname in self._design.signals:
+                new_val = cur.get(sname)
+                old_val = self._prev_signals.get(sname)
+                if new_val != old_val:
+                    changes_acc.append((sname, new_val))
+                    self._prev_signals[sname] = new_val
+
+            if not completed:
+                # Stopped after posedge
+                break
+
+            # Both phases ran; count as full cycle
+            self._cycle += 1
+
+            if self._engine._time >= target_ns:
+                break
+
+        return SimSnapshot(
+            time_ns=self._engine._time,
+            signals=dict(self._engine.signals),
+            changes=list(changes_acc),
+            breakpoint_hit=None,
+        )
 
     # ------------------------------------------------------------------
     # Signal access

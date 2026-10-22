@@ -118,6 +118,8 @@ class SensitivityList:
 class Block:
     """begin … end"""
     stmts: List[Stmt]
+    source_line: int = 0      # §18: ソース行番号（0 = 不明）
+    source_file: str = ""
 
 
 @dataclass
@@ -125,6 +127,8 @@ class IfStmt:
     cond: Expr
     then_body: Stmt
     else_body: Optional[Stmt]
+    source_line: int = 0
+    source_file: str = ""
 
 
 @dataclass
@@ -138,23 +142,30 @@ class CaseStmt:
     keyword: str   # 'case' | 'casex' | 'casez'
     expr: Expr
     items: List[CaseItem]
+    source_line: int = 0
+    source_file: str = ""
 
 
 @dataclass
 class BlockingAssign:
     lhs: Expr
     rhs: Expr
+    source_line: int = 0
+    source_file: str = ""
 
 
 @dataclass
 class NonBlockingAssign:
     lhs: Expr
     rhs: Expr
+    source_line: int = 0
+    source_file: str = ""
 
 
 @dataclass
 class NullStmt:
-    pass
+    source_line: int = 0
+    source_file: str = ""
 
 
 @dataclass
@@ -200,6 +211,8 @@ class ForStmt:
     cond: Expr
     update: "Stmt"
     body: "Stmt"
+    source_line: int = 0
+    source_file: str = ""
 
 
 @dataclass
@@ -207,6 +220,8 @@ class WhileStmt:
     """while (cond) body"""
     cond: Expr
     body: "Stmt"
+    source_line: int = 0
+    source_file: str = ""
 
 
 Stmt = (Block | IfStmt | CaseStmt | BlockingAssign | NonBlockingAssign
