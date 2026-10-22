@@ -534,7 +534,9 @@ def _run_one_case(
         engine = SimEngine(design, half_period_ns=hp, reset_cycles=eff_reset.duration_cycles,
                            max_delta=_eff_max_delta, max_loop=_eff_max_loop)
     except (DeltaLimitError, LoopLimitError) as _eng_e:
-        # SimEngine.__init__ が (DeltaLimitError, LoopLimitError) を再 raise した場合
+        # 防衛的 try: SimEngine.__init__ の _eval_comb_loop() 呼び出しが
+        # (DeltaLimitError, LoopLimitError) を catch せずに raise した場合の保険。
+        # 現在の __init__ は両方を catch しているが、将来の変更に備えて残す。
         _ecode = "E_DELTA_LIMIT" if isinstance(_eng_e, DeltaLimitError) else "E_LOOP_LIMIT"
         cr.status = "ERROR"
         cr.errors.append(_exc_to_error(_eng_e, _ecode))
@@ -922,6 +924,9 @@ def run(
         engine = SimEngine(design, half_period_ns=half_period, reset_cycles=reset_cycles,
                            max_delta=_eff_max_delta, max_loop=_eff_max_loop)
     except (DeltaLimitError, LoopLimitError) as _eng_e:
+        # 防衛的 try: SimEngine.__init__ が例外を再 raise した場合の保険。
+        # 現在の __init__ は (DeltaLimitError, LoopLimitError) を catch しているが
+        # 将来の変更に備えて残す。実際の検出は下の try ブロック内の _eval_comb_loop で行われる。
         _ecode = "E_DELTA_LIMIT" if isinstance(_eng_e, DeltaLimitError) else "E_LOOP_LIMIT"
         result.status = "ERROR"
         result.errors.append(_exc_to_error(_eng_e, _ecode))
