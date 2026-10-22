@@ -77,10 +77,10 @@ python3 -m venv .venv
 source .venv/bin/activate
 
 # CLI + GUI をインストール
-pip install "deltasim[gui] @ git+https://github.com/gt-ynakamatsu/deltasim.git@v0.3.0"
+pip install "deltasim[gui] @ git+https://github.com/gt-ynakamatsu/deltasim.git@v0.4.0"
 
 # CLI のみ（GUI 不要の場合）
-pip install "git+https://github.com/gt-ynakamatsu/deltasim.git@v0.3.0"
+pip install "git+https://github.com/gt-ynakamatsu/deltasim.git@v0.4.0"
 ```
 
 ### Windows（PowerShell）
@@ -92,10 +92,10 @@ py -m venv .venv
 
 # CLI + GUI をインストール
 # PowerShell では外側をダブルクォートで囲む
-py -m pip install "deltasim[gui] @ git+https://github.com/gt-ynakamatsu/deltasim.git@v0.3.0"
+py -m pip install "deltasim[gui] @ git+https://github.com/gt-ynakamatsu/deltasim.git@v0.4.0"
 
 # CLI のみ
-py -m pip install "git+https://github.com/gt-ynakamatsu/deltasim.git@v0.3.0"
+py -m pip install "git+https://github.com/gt-ynakamatsu/deltasim.git@v0.4.0"
 ```
 
 ### Windows（コマンドプロンプト / cmd）
@@ -107,7 +107,7 @@ py -m venv .venv
 
 :: CLI + GUI をインストール
 :: cmd では外側をダブルクォートで囲む
-py -m pip install "deltasim[gui] @ git+https://github.com/gt-ynakamatsu/deltasim.git@v0.3.0"
+py -m pip install "deltasim[gui] @ git+https://github.com/gt-ynakamatsu/deltasim.git@v0.4.0"
 ```
 
 依存パッケージ: `click`, `pyyaml`（GUI 追加時は `fastapi`, `uvicorn[standard]`, `httpx` も必要）
@@ -128,14 +128,14 @@ pip install -e ".[gui,dev]"
 
 ### インストール
 
-> v0.3.0 から `deltasim gui` コマンドが利用できます。
+> v0.3.0 から `deltasim gui` コマンドが利用できます（v0.4.0 でもそのまま利用可能）。
 
 ```bash
 # Linux / macOS
-pip install "deltasim[gui] @ git+https://github.com/gt-ynakamatsu/deltasim.git@v0.3.0"
+pip install "deltasim[gui] @ git+https://github.com/gt-ynakamatsu/deltasim.git@v0.4.0"
 
 # Windows PowerShell
-py -m pip install "deltasim[gui] @ git+https://github.com/gt-ynakamatsu/deltasim.git@v0.3.0"
+py -m pip install "deltasim[gui] @ git+https://github.com/gt-ynakamatsu/deltasim.git@v0.4.0"
 ```
 
 ### 起動

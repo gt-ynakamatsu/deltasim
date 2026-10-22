@@ -5,6 +5,57 @@
 
 ---
 
+## [0.4.0] — 2026-10-22
+
+### ⚠ 挙動の変更（Behavior Changes）
+
+これらの変更により、v0.3.0 と比べてシミュレーション結果が変わる場合があります。
+
+**1. 信号の初期値が変わりました**
+
+| 信号の種類 | v0.3.0 | v0.4.0 |
+|---|---|---|
+| `output`/内部 logic（always_ff 駆動）| 0 | **x** |
+| `input` ポート | 0 | 0（変わらず） |
+| `assign`/`always_comb` 駆動 | 0 | 0（comb eval で上書き） |
+| 未駆動 net | 0 | **z** |
+
+リセット付き回路は影響を受けません。リセット前の FF 出力が x になります。
+`initial` ブロックや明示的な初期値がある回路は引き続き正常動作します。
+
+**2. `always_comb`/`always_ff` 内のループが E_LOOP_LIMIT を正しく返すようになりました**（#30/#31）
+
+v0.3.0 では `initial` ブロック内・`always_comb` 内の無限 while ループが
+`E_INTERNAL` を返していました。v0.4.0 では正しく `E_LOOP_LIMIT` を返します。
+
+**3. 乱数の消費順が変わりました**（§18.6）
+
+`constraints:` を使うスペックで同じ seed を指定しても v0.3.0 と異なる乱数列になります。
+RNG 消費順が (cycle, offset) 昇順に正規化されたためです。
+
+**4. `set` の意味: ストローブからドライブ継続に変更**（§18.1 の確定仕様）
+
+`stimulus/set` で入力ポートに値を書いた場合、そのサイクルだけでなく
+次の `set` が来るまでその値を保持します（v0.3.0 では毎サイクル 0 にリセットされていた）。
+
+---
+
+### 新機能（§18.1〜§18.9.1）
+
+| § | 機能 |
+|---|---|
+| §18.1 | 対話デバッグ（`deltasim sim`）: Questa 風コマンド、bp/when、Tcl、force/noforce、restart |
+| §18.2 | `-f filelist.f` 対応（`+define+`/`+incdir+`/複数 SV） |
+| §18.3 | ローカル LLM 連携（`deltasim ask`/`llm draft-spec`/`llm explain`） |
+| §18.5 | E_UNKNOWN_PORT、E_NO_CHECK、find_top_candidates、--log |
+| §18.6 | `constraints:` による制約付き乱数刺激、E_CONSTRAINT/E_CONSTRAINT_EXPR |
+| §18.7 | 4値論理（x/z）: aval/bval 表現、IEEE 1800 演算、casez/casex、初期値 x/z、$display x/z |
+| §18.8 | GUI: 波形表示・デバッグパネル・コンソール入力欄（コードの実装は §18.4） |
+| §18.9 | プリプロセッサ: `` `define ``/`` `undef ``/`` `ifdef ``/`` `include ``、`-D`/`-I`、E_INCLUDE_LOOP |
+| §18.9.1 | W_TIMESCALE/W_UNKNOWN_DIRECTIVE → `test --json` の `warnings[]` |
+
+---
+
 ## [0.3.0+] — 開発中（§18.2 -f ファイルリスト + §18 対話デバッグ）
 
 ### 追加（§18.9.1 プリプロセッサ警告 → JSON warnings[]）
