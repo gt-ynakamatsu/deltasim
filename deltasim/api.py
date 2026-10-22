@@ -514,7 +514,26 @@ def _run_one_case(
     if eff_reset.signal:
         engine.set_rst(eff_reset.signal, active_low=eff_reset.active_low)
 
-    stim = StimulusSchedule(eff_inputs, eff_cycles, seed=eff_seed)
+    # §18.6: 有効な constraints はケース→シナリオ順で取得
+    eff_constraints = case.constraints or scenario.constraints
+    eff_max_attempts = (case.max_constraint_attempts
+                        or scenario.max_constraint_attempts)
+    try:
+        stim = StimulusSchedule(
+            eff_inputs, eff_cycles, seed=eff_seed,
+            constraints=eff_constraints,
+            max_constraint_attempts=eff_max_attempts,
+        )
+    except __import__('deltasim.tb.scenario', fromlist=['ConstraintError']).ConstraintError as _ce:
+        err = ErrorInfo(code="E_CONSTRAINT", message=str(_ce), severity="error")
+        cr.status = "ERROR"; cr.errors.append(err); cr.message = err.message
+        cr.elapsed_ms = (time.time() - case_t0) * 1000
+        return cr
+    except __import__('deltasim.tb.scenario', fromlist=['ConstraintExprError']).ConstraintExprError as _cee:
+        err = ErrorInfo(code="E_CONSTRAINT_EXPR", message=str(_cee), severity="error")
+        cr.status = "ERROR"; cr.errors.append(err); cr.message = err.message
+        cr.elapsed_ms = (time.time() - case_t0) * 1000
+        return cr
 
     # Reference model
     model = None

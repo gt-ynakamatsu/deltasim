@@ -219,3 +219,36 @@ expected:           # expect の別名
   - at: 20
     check: {q: 1}
 ```
+
+---
+
+## §18.6 `constraints:` 制約付き乱数生成
+
+`random:` フィールドと組み合わせて使います。
+
+```yaml
+# スペック全体に適用（全ケース）
+constraints:
+  - "a + b < 16"
+  - "a != b"
+max_constraint_attempts: 10000  # 省略可（既定 10000）
+
+# ケースレベルでも指定可能
+cases:
+  - name: constrained
+    constraints:
+      - "x > y"
+    stimulus:
+      - at: [1, 10]
+        random:
+          x: {range: [0, 15]}
+          y: {range: [0, 15]}
+    expected:
+      - at: 5
+        check:
+          z: 3
+```
+
+- 式は SV 式サブセット（`deltasim.interp.expr` パーサ）で評価。Python `eval` は使用しません。
+- `+incdir+`/`+define+` 同様に `constraints:` は既知キーなので `W_UNKNOWN_KEY` は出ません。
+- `max_constraint_attempts` を超えると `E_CONSTRAINT` エラー（`--json` の `errors[]` に入ります）。

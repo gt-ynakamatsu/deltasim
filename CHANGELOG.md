@@ -7,6 +7,15 @@
 
 ## [0.3.0+] — 開発中（§18.2 -f ファイルリスト + §18 対話デバッグ）
 
+### 追加（§18.6 constraints: 制約付き乱数生成）
+
+- YAML スペックに `constraints:` フィールドを追加
+  - 信号間の式（例: `a + b < 16`）でランダム刺激を制約
+  - リジェクションサンプリングで実装（`max_constraint_attempts` 上限、既定 10000）
+  - スペック全体またはケースごとに指定可能
+  - 新エラーコード: `E_CONSTRAINT`（上限超過）、`E_CONSTRAINT_EXPR`（式エラー）
+  - `random.Random(seed)` で seed 固定 → Windows/Linux 同一値列
+
 ### 修正（§18.5 不具合修正）
 
 - **TB 生成**: 内部信号（direction=None）をポート接続から除外（E_UNKNOWN_PORT エラーを追加）

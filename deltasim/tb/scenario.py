@@ -102,6 +102,10 @@ class CaseSpec:
     inputs: List[InputEntry] = field(default_factory=list)
     expected: List[ExpectedEntry] = field(default_factory=list)
     model: Optional[ModelSpec] = None  # overrides top-level model
+    # §18.6: 乱数刺激の制約式リスト（SV 式サブセット）
+    constraints: List[str] = field(default_factory=list)
+    # §18.6: リジェクションサンプリング上限（None はデフォルト値を使用）
+    max_constraint_attempts: Optional[int] = None
 
 
 @dataclass
@@ -122,6 +126,9 @@ class Scenario:
     _base_dir: str = field(default="", compare=False)
     _stem: str = field(default="scenario", compare=False)   # filename stem
     _warnings: list = field(default_factory=list, compare=False)  # §15.12 WarningInfo
+    # §18.6: top-level constraints (applies to all cases)
+    constraints: List[str] = field(default_factory=list)
+    max_constraint_attempts: Optional[int] = None
 
 
 # ---------------------------------------------------------------------------
@@ -193,6 +200,12 @@ def load_scenario(path: str) -> Scenario:
             params=dict(m.get("params") or {}),
         )
 
+    # §18.6: top-level constraints
+    if data.get("constraints"):
+        s.constraints = [str(c) for c in data["constraints"]]
+    if data.get("max_constraint_attempts") is not None:
+        s.max_constraint_attempts = int(data["max_constraint_attempts"])
+
     # §13.2: Parse cases: list
     raw_cases = data.get("cases")
     if raw_cases is not None:
@@ -251,6 +264,11 @@ def load_scenario(path: str) -> Scenario:
                     class_name=str(m.get("class", m.get("class_name", "Model"))),
                     params=dict(m.get("params") or {}),
                 )
+            # §18.6: case-level constraints
+            if rc.get("constraints"):
+                case.constraints = [str(c) for c in rc["constraints"]]
+            if rc.get("max_constraint_attempts") is not None:
+                case.max_constraint_attempts = int(rc["max_constraint_attempts"])
             s.cases.append(case)
     # else: no cases: key → legacy single-case (s.cases stays empty)
 
@@ -296,6 +314,7 @@ _KNOWN_TOP_KEYS = frozenset({
     "model",
     "skip", "skip_reason",
     "cases",
+    "constraints", "max_constraint_attempts",  # §18.6
 })
 
 # clock/reset/sim の既知キー
@@ -311,6 +330,7 @@ _KNOWN_CASE_KEYS = frozenset({
     "inputs", "stimulus",   # aliases
     "expected", "expect",   # aliases
     "model",
+    "constraints", "max_constraint_attempts",  # §18.6
 })
 
 
@@ -473,10 +493,25 @@ def validate_offset_ns(scenario: "Scenario", spec_path: str = "") -> list:
 # Stimulus schedule
 # ---------------------------------------------------------------------------
 
+# §18.6: デフォルトのリジェクションサンプリング上限
+DEFAULT_MAX_CONSTRAINT_ATTEMPTS = 10_000
+
+
+class ConstraintError(Exception):
+    """§18.6: 制約を満たす値が上限回数内に見つからなかった。"""
+    code = "E_CONSTRAINT"
+
+
+class ConstraintExprError(Exception):
+    """§18.6: 制約式の構文エラーまたは未知の信号名。"""
+    code = "E_CONSTRAINT_EXPR"
+
+
 class StimulusSchedule:
     """Pre-computes the input values to apply at each (cycle, offset_ns).
 
     §15.2: keyed by (cycle, offset_ns) to support sub-cycle stimuli.
+    §18.6: supports constraints: (rejection sampling).
     Backward-compatible: get(cycle) is equivalent to get(cycle, 0).
     """
 
@@ -485,8 +520,14 @@ class StimulusSchedule:
         inputs: List[InputEntry],
         total_cycles: int,
         seed: int = 0,
+        constraints: Optional[List[str]] = None,
+        max_constraint_attempts: Optional[int] = None,
     ):
         self._rng = _random_mod.Random(seed)
+        self._constraints = constraints or []
+        self._max_attempts = (max_constraint_attempts
+                              if max_constraint_attempts is not None
+                              else DEFAULT_MAX_CONSTRAINT_ATTEMPTS)
         # (cycle, offset_ns) -> {signal: value}
         self._schedule: Dict[tuple, Dict[str, int]] = {}
         self._build(inputs, total_cycles)
@@ -500,9 +541,41 @@ class StimulusSchedule:
                 if entry.set_values:
                     vals.update(entry.set_values)
                 elif entry.random_spec:
-                    for sig, spec in entry.random_spec.items():
-                        vals[sig] = self._sample(spec)
+                    vals = self._sample_with_constraints(entry.random_spec, cycle)
                 self._schedule.setdefault((cycle, offset), {}).update(vals)
+
+    def _sample_with_constraints(
+        self, random_spec: dict, cycle: int
+    ) -> Dict[str, int]:
+        """§18.6: 制約を満たす乱数を生成する（リジェクションサンプリング）。"""
+        if not self._constraints:
+            return {sig: self._sample(spec) for sig, spec in random_spec.items()}
+
+        from deltasim.interp.expr import eval_bool, ExprError
+
+        for attempt in range(1, self._max_attempts + 1):
+            # 保存点（この試行でのランダム状態は使い捨て）
+            # reproducibility: シードをベースに試行ごとに決定論的に生成する
+            candidate = {sig: self._sample(spec) for sig, spec in random_spec.items()}
+            all_ok = True
+            for cstr in self._constraints:
+                try:
+                    ok = eval_bool(cstr, candidate)
+                except ExprError as exc:
+                    raise ConstraintExprError(
+                        f"制約式 '{cstr}' の評価に失敗しました: {exc}"
+                    ) from exc
+                if not ok:
+                    all_ok = False
+                    break
+            if all_ok:
+                return candidate
+
+        # 上限超過
+        raise ConstraintError(
+            f"E_CONSTRAINT: サイクル {cycle} で制約 {self._constraints} を満たす値が "
+            f"{self._max_attempts} 回以内に見つかりませんでした。"
+        )
 
     def get(self, cycle: int, offset_ns: int = 0) -> Dict[str, int]:
         """Input values to apply at (cycle, offset_ns). offset_ns=0 → posedge."""

@@ -10,6 +10,8 @@
 |--------|----------|------|
 | `E001` | パーサ / レキサー / .f 解析 | 構文エラー、または .f ファイルに書かれた SV ファイルが存在しない |
 | `E_AMBIGUOUS_TOP` | ロード | `--top` 省略時に top 候補が複数ある |
+| `E_CONSTRAINT` | テスト実行 | 制約を満たす乱数が `max_constraint_attempts` 回以内に見つからなかった |
+| `E_CONSTRAINT_EXPR` | テスト実行 | `constraints:` の式が構文エラーまたは未知の信号名 |
 | `E_UNKNOWN_PORT` | テスト実行 | stimulus の set に input でないポート名、または check に内部信号名を指定 |
 | `E_NO_CHECK` | テスト実行 | スペックにチェックが0件（全 skip ケースを除く） |
 | `E002` | エラボレータ | 信号幅・型の矛盾など |
