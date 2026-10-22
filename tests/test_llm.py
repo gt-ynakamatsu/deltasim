@@ -900,3 +900,116 @@ class TestDraftSpecExitCode:
         ])
         assert result.exit_code == 6, \
             f"expected exit_code=6 but got {result.exit_code}: {result.output}"
+
+
+class TestSafetyFixes:
+    """Fix 1-3 の追加テスト"""
+
+    # ---- Fix 1: when 入れ子ブレース ----
+
+    def test_when_nested_brace_rejected(self):
+        """`when {c} {if {1} {exec x}}` が拒否されること"""
+        from deltasim.llm.safety import check_session_command_deep, UnsafeCommandError
+        with pytest.raises(UnsafeCommandError):
+            check_session_command_deep("when {c} {if {1} {exec x}}")
+
+    def test_when_extra_arg_rejected(self):
+        """`when {c} {stop} {extra}` が拒否されること"""
+        from deltasim.llm.safety import check_session_command_deep, UnsafeCommandError
+        with pytest.raises(UnsafeCommandError):
+            check_session_command_deep("when {c} {stop} {extra}")
+
+    def test_when_unbalanced_brace_rejected(self):
+        """ブレースの対応が崩れていれば拒否されること"""
+        from deltasim.llm.safety import check_session_command_deep, UnsafeCommandError
+        with pytest.raises(UnsafeCommandError):
+            check_session_command_deep("when {c} {stop")
+
+    def test_when_valid_passes(self):
+        """`when {count == 1} {examine count}` が通ること"""
+        from deltasim.llm.safety import check_session_command_deep
+        cmd, rest = check_session_command_deep("when {count == 1} {examine count}")
+        assert cmd == "when"
+
+    def test_when_condition_with_bracket_rejected(self):
+        """when 条件に [...] があれば拒否されること"""
+        from deltasim.llm.safety import check_session_command_deep, UnsafeCommandError
+        with pytest.raises(UnsafeCommandError):
+            check_session_command_deep("when {[exec id] == 1} {stop}")
+
+    # ---- Fix 2: --opt=value 書き込み先 ----
+
+    def test_json_equals_outside_cwd_rejected(self, tmp_path):
+        """`--json=/tmp/x.json` 形式が拒否されること"""
+        import os
+        from deltasim.llm.safety import check_command, UnsafeCommandError
+        old_cwd = os.getcwd()
+        try:
+            os.chdir(str(tmp_path))
+            with pytest.raises(UnsafeCommandError, match="カレントディレクトリ"):
+                check_command("deltasim test a.sv --json=/tmp/x.json",
+                              check_write=True)
+        finally:
+            os.chdir(old_cwd)
+
+    def test_vcd_equals_dotdot_rejected(self, tmp_path):
+        """`--vcd=../x.vcd` 形式が拒否されること"""
+        import os
+        from deltasim.llm.safety import check_command, UnsafeCommandError
+        sub = tmp_path / "sub"; sub.mkdir()
+        old_cwd = os.getcwd()
+        try:
+            os.chdir(str(sub))
+            with pytest.raises(UnsafeCommandError, match="カレントディレクトリ"):
+                check_command("deltasim run a.sv --vcd=../x.vcd",
+                              check_write=True)
+        finally:
+            os.chdir(old_cwd)
+
+    def test_short_option_attached_rejected(self, tmp_path):
+        """`-o/tmp/x.vcd` 形式が拒否されること"""
+        import os
+        from deltasim.llm.safety import check_command, UnsafeCommandError
+        old_cwd = os.getcwd()
+        try:
+            os.chdir(str(tmp_path))
+            with pytest.raises(UnsafeCommandError, match="カレントディレクトリ"):
+                check_command("deltasim run a.sv -o/tmp/x.vcd",
+                              check_write=True)
+        finally:
+            os.chdir(old_cwd)
+
+    def test_json_equals_in_cwd_ok(self, tmp_path):
+        """`--json=result.json` はCWD内なので許可されること"""
+        import os
+        from deltasim.llm.safety import check_command
+        old_cwd = os.getcwd()
+        try:
+            os.chdir(str(tmp_path))
+            cmd, args, write_paths = check_command(
+                "deltasim test a.sv --json=result.json", check_write=True
+            )
+            assert "result.json" in write_paths
+        finally:
+            os.chdir(old_cwd)
+
+    def test_extract_all_write_paths_equals_form(self):
+        """_extract_all_write_paths が --opt=value 形式を抽出すること"""
+        from deltasim.llm.safety import _extract_all_write_paths
+        parts = ["a.sv", "--json=/tmp/x.json", "--vcd=../x.vcd"]
+        paths = _extract_all_write_paths(parts)
+        assert "/tmp/x.json" in paths
+        assert "../x.vcd" in paths
+
+    # ---- Fix 3: 書き込みオプション一覧の一元管理 ----
+
+    def test_write_opts_centralized(self):
+        """_WRITE_OPTS_LONG と _WRITE_OPTS_SHORT が safety.py に一元管理されていること"""
+        from deltasim.llm import safety
+        assert hasattr(safety, "_WRITE_OPTS_LONG")
+        assert hasattr(safety, "_WRITE_OPTS_SHORT")
+        assert hasattr(safety, "_ALL_WRITE_OPTS")
+        # --json は長形式に含まれる
+        assert "--json" in safety._ALL_WRITE_OPTS
+        # -o は短形式に含まれる
+        assert "-o" in safety._ALL_WRITE_OPTS

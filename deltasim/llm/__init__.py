@@ -24,7 +24,7 @@ from deltasim.llm.client import (
 )
 from deltasim.llm.safety import (
     check_command, check_session_command_deep, UnsafeCommandError,
-    ALLOWED_SUBCOMMANDS, _check_write_paths,
+    ALLOWED_SUBCOMMANDS, _extract_all_write_paths,
 )
 
 
