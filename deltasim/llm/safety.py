@@ -5,6 +5,7 @@ LLM が返したテキストを deltasim コマンドとして実行する前に
 """
 from __future__ import annotations
 
+import os
 import re
 import shlex
 from typing import List, Optional, Tuple
@@ -48,9 +49,9 @@ def check_command(llm_output: str) -> Tuple[str, List[str]]:
             f"シェル記号が含まれているため拒否しました: {cmd_line!r}"
         )
 
-    # shlex 分解
+    # shlex 分解（Windows のバックスラッシュパスを壊さないよう posix=False）
     try:
-        parts = shlex.split(cmd_line)
+        parts = shlex.split(cmd_line, posix=(os.name != "nt"))
     except ValueError as exc:
         raise UnsafeCommandError(f"コマンドの解析に失敗しました: {exc}") from exc
 
