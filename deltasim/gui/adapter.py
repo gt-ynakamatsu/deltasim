@@ -61,28 +61,6 @@ def _get_spec_vcd(spec_path: str) -> Optional[str]:
 # load(): RTL ファイルを解析してモジュール情報を返す
 # ---------------------------------------------------------------------------
 
-def _find_top_candidates(mods_catalog: dict) -> dict:
-    """instantiated でないモジュール名を top 候補として返す。
-
-    全モジュールの InstDecl をスキャンし、どこからもインスタンス化されていない
-    モジュールを top 候補（is_top_candidate=True）とする。
-    公開 API の catalog（モジュール名 → Module オブジェクト）を使う。
-    """
-    try:
-        from deltasim.parser.ast_nodes import InstDecl
-        instantiated: set = set()
-        for mod in mods_catalog.values():
-            for item in mod.body:
-                if isinstance(item, InstDecl):
-                    instantiated.add(item.module_name)
-        return {
-            name: {"is_top_candidate": name not in instantiated}
-            for name in mods_catalog
-        }
-    except Exception:
-        return {name: {"is_top_candidate": True} for name in mods_catalog}
-
-
 def load(
     files: List[str],
     top: Optional[str] = None,
@@ -92,30 +70,46 @@ def load(
     """RTL ファイルをパース・エラボレーションしてモジュール情報を返す。
 
     §18.4: all_modules にすべての解析済みモジュール一覧と is_top_candidate フラグを返す。
+    §18.5: 公開 API deltasim.api.find_top_candidates() を使い、generate ブロック内の
+           インスタンスも含めたトップ候補判定を行う。
+           E_AMBIGUOUS_TOP エラーには candidates フィールドを含む（ドロップダウン誘導用）。
     """
     import deltasim.api as ds
 
     di = ds.load([str(f) for f in files], top=top, params=param_overrides or {})
 
-    # §18.4: トップ候補判定（catalog から）
+    # §18.5: 公開 find_top_candidates() でトップ候補を取得
     all_modules: List[dict] = []
     cat = getattr(di, "_catalog", None) or {}
-    if cat:
-        candidates = _find_top_candidates(cat)
+    mods_list = list(cat.values()) if cat else []
+
+    if mods_list:
+        try:
+            candidate_names = ds.find_top_candidates(mods_list, catalog=cat)
+        except Exception:
+            candidate_names = [mods_list[0].name] if mods_list else []
+        candidate_set = set(candidate_names)
         # トップ候補を先頭に
-        top_cands = [
-            {"name": n, "is_top_candidate": True}
-            for n, v in candidates.items()
-            if v["is_top_candidate"]
-        ]
+        top_cands = [{"name": n, "is_top_candidate": True} for n in candidate_names]
         non_top = [
-            {"name": n, "is_top_candidate": False}
-            for n, v in candidates.items()
-            if not v["is_top_candidate"]
+            {"name": m.name, "is_top_candidate": False}
+            for m in mods_list
+            if m.name not in candidate_set
         ]
         all_modules = top_cands + non_top
     elif di.module:
         all_modules = [{"name": di.module, "is_top_candidate": True}]
+
+    # §18.5: E_AMBIGUOUS_TOP に candidates フィールドを追加（ドロップダウン誘導用）
+    errors_with_candidates = []
+    for e in di.errors:
+        ed = e.to_dict()
+        if ed.get("code") == "E_AMBIGUOUS_TOP" and mods_list:
+            try:
+                ed["candidates"] = ds.find_top_candidates(mods_list, catalog=cat)
+            except Exception:
+                pass
+        errors_with_candidates.append(ed)
 
     return {
         "module": di.module,
@@ -130,7 +124,7 @@ def load(
         ],
         "hierarchy": di.hierarchy.to_dict() if di.hierarchy else None,
         "status": di.status,
-        "errors": [e.to_dict() for e in di.errors],
+        "errors": errors_with_candidates,
         "all_modules": all_modules,
     }
 
