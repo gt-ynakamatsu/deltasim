@@ -51,6 +51,9 @@ E_LOOP_LIMIT: 5ns の for loop が 100 回を超えました
 |--------|----------|------|
 | `W_UNKNOWN_KEY` | YAML 解析 | 仕様 YAML に未知のキーがある（無視されます） |
 | `W_FILELIST_OPT` | .f ファイル解析 | `.f` ファイルに未対応のオプションがある（無視されます） |
+| `E_LLM_NOT_CONFIGURED` | LLM 機能 | `simconfig.yaml` の `llm` 設定がない |
+| `E_LLM_CONNECT` | LLM 機能 | LLM サーバーへの接続失敗・タイムアウト |
+| `E_LLM_UNSAFE_CMD` | LLM 機能 | LLM が安全でないコマンドを返した（シェル記号・再帰等） |
 
 ### W_UNKNOWN_KEY メッセージ例（§15.13）
 
