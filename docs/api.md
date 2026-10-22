@@ -1028,8 +1028,8 @@ result = ds.test(fl.files, spec="spec.yaml")
 | フィールド | 型 | 説明 |
 |-----------|-----|------|
 | `files` | `List[str]` | 絶対パスに解決された SV ファイルリスト |
-| `incdirs` | `List[str]` | `+incdir+` ディレクトリリスト |
-| `defines` | `Dict[str, str]` | `+define+NAME[=VAL]` マクロ辞書 |
+| `incdirs` | `List[str]` | `+incdir+` ディレクトリリスト（**保持のみ。まだパーサに渡されません**） |
+| `defines` | `Dict[str, str]` | `+define+NAME[=VAL]` マクロ辞書（**保持のみ。まだパーサに渡されません**） |
 | `warnings` | `List[FileListWarning]` | 未対応オプション警告（`W_FILELIST_OPT`） |
 | `errors` | `List[FileListError]` | 存在しないファイルのエラー |
 

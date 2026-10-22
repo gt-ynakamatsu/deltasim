@@ -34,9 +34,9 @@ def main():
 # §18.2: -f/--filelist ヘルパー
 # ---------------------------------------------------------------------------
 
-def _expand_files(sv_files: tuple, filelist: tuple) -> list:
-    """sv_files と -f ファイルを結合して SV ファイルリストを返す。
-    警告は stderr に出力する。
+def _expand_files(sv_files: tuple, filelist: tuple):
+    """sv_files と -f ファイルを結合して (all_files, FileList) を返す。
+    警告は stderr に出力する。エラーがあれば sys.exit(1) する。
     """
     from deltasim.filelist import expand_filelist_args
     all_files, fl = expand_filelist_args(sv_files, filelist)
@@ -50,7 +50,21 @@ def _expand_files(sv_files: tuple, filelist: tuple) -> list:
         click.echo("ERROR: SV ファイルが指定されていません（-f またはファイル引数を指定してください）",
                    err=True)
         sys.exit(1)
-    return all_files
+    return all_files, fl
+
+
+def _filelist_to_result_warnings(fl) -> list:
+    """FileList の警告を WarningInfo リストに変換する（test --json 出力用）。"""
+    from deltasim.result import WarningInfo
+    return [
+        WarningInfo(
+            code=w.code,
+            message=w.message,
+            file=w.file,
+            line=w.line,
+        )
+        for w in fl.warnings
+    ]
 
 
 _FILELIST_OPT = click.option(
@@ -120,7 +134,7 @@ def run_cmd(sv_files, filelist, top, cycles, vcd, reset_cycles, half_period,
     """
     import deltasim.api as ds
 
-    sv_files = _expand_files(sv_files, filelist)
+    sv_files, _fl = _expand_files(sv_files, filelist)
 
     if interactive:
         # 対話モード: deltasim sim と同じ処理に委譲
@@ -232,7 +246,7 @@ def gen_cmd(sv_files, filelist, top, params, out_dir, spec_path, tb_path, no_tb,
     """
     import deltasim.api as ds
 
-    sv_files = _expand_files(sv_files, filelist)
+    sv_files, _fl = _expand_files(sv_files, filelist)
     param_overrides = _parse_params(params)
 
     if strings:
@@ -312,7 +326,15 @@ def test_cmd(sv_files, filelist, top, spec, params, junit, json_out, vcd, seed,
     import deltasim.api as ds
     from deltasim.report.terminal import print_results_v2
 
-    sv_files = _expand_files(sv_files, filelist)
+    sv_files, _fl = _expand_files(sv_files, filelist)
+    # §18.2: -f ファイルの W_FILELIST_OPT を warn イベントとして emit
+    _fl_warnings = _filelist_to_result_warnings(_fl)
+    for w in _fl_warnings:
+        _emit_json_event(
+            {"type": "warning", "code": w.code, "message": w.message,
+             "file": w.file, "line": w.line},
+            json_events,
+        )
 
     # --record-all 非推奨エイリアス（stderr のみ、stdout JSON は汚さない）
     if record_all_deprecated:
@@ -345,6 +367,9 @@ def test_cmd(sv_files, filelist, top, spec, params, junit, json_out, vcd, seed,
             max_delta=max_delta,
             max_loop=max_loop,
         )
+        # §18.2: W_FILELIST_OPT を TestResult.warnings に追加（JSON 出力用）
+        if _fl_warnings:
+            result.warnings = list(result.warnings) + _fl_warnings
     except Exception as _unexpected:
         # §0.2.1: --json 付きのとき想定外例外でも JSON を出力する（E_INTERNAL）
         import traceback as _tb
@@ -404,7 +429,7 @@ def parse_cmd(sv_files, filelist):
     """
     import deltasim.api as ds
 
-    sv_files_list = _expand_files(sv_files, filelist)
+    sv_files_list, _fl = _expand_files(sv_files, filelist)
     di = ds.load(sv_files_list)
     if di.status != "PASS":
         for e in di.errors:

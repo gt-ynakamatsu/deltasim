@@ -169,7 +169,7 @@ class TestLoadFilelist:
         from deltasim.filelist import load_filelist
         fl = load_filelist(f)
         assert len(fl.errors) == 1
-        assert fl.errors[0].code == "E_FILE_NOT_FOUND"
+        assert fl.errors[0].code == "E001"
         assert str(f) in fl.errors[0].file
         assert fl.errors[0].line == 1
 
@@ -385,3 +385,104 @@ class TestFilelstE2E:
         Path(f_path).write_text(f"{sv_p}\n", encoding="utf-8")
         rc, out = self._run_cli(["parse", "-f", f_path])
         assert rc == 0, f"exit={rc}\n{out}"
+
+
+# ===========================================================================
+# 4. 追加テスト（修正対応分）
+# ===========================================================================
+
+class TestFilelistFixes:
+    """PR #22 レビュー指摘修正のテスト"""
+
+    # ---- JSON への W_FILELIST_OPT 出力 ----
+
+    def test_w_filelist_opt_in_json(self, tmp_path):
+        """`test --json` の出力に W_FILELIST_OPT が含まれること"""
+        sv_p = os.path.join(EXAMPLES, "counter.sv")
+        f_path = str(tmp_path / "files.f")
+        _write(f_path, f"{sv_p}\n-v unused.sv\n")
+        spec_p = os.path.join(EXAMPLES, "counter_spec.yaml")
+        json_p = str(tmp_path / "result.json")
+        result = _cli(["test", "-f", f_path, "--spec", spec_p, "--json", json_p])
+        assert result.exit_code == 0, f"exit={result.exit_code}\n{result.output}"
+        d = json.loads(Path(json_p).read_text(encoding="utf-8"))
+        warn_codes = [w.get("code") for w in d.get("warnings", [])]
+        assert "W_FILELIST_OPT" in warn_codes, \
+            f"W_FILELIST_OPT が JSON の warnings にない: {d.get('warnings', [])}"
+
+    def test_w_filelist_opt_warning_has_file_and_line(self, tmp_path):
+        """W_FILELIST_OPT の警告に file と line が含まれること"""
+        sv_p = os.path.join(EXAMPLES, "counter.sv")
+        f_path = str(tmp_path / "files.f")
+        _write(f_path, f"{sv_p}\n-y libdir\n")  # line 2: -y
+        spec_p = os.path.join(EXAMPLES, "counter_spec.yaml")
+        json_p = str(tmp_path / "result.json")
+        _cli(["test", "-f", f_path, "--spec", spec_p, "--json", json_p])
+        d = json.loads(Path(json_p).read_text(encoding="utf-8"))
+        w = next((w for w in d.get("warnings", []) if w.get("code") == "W_FILELIST_OPT"), None)
+        assert w is not None
+        assert w.get("line") == 2, f"line が 2 でない: {w}"
+        assert f_path in w.get("file", ""), f"file が .f パスでない: {w}"
+
+    def test_missing_file_in_json(self, tmp_path):
+        """存在しないファイルの場合 --json で errors[] に E001 が出ること"""
+        f_path = str(tmp_path / "files.f")
+        _write(f_path, "nonexistent_file.sv\n")
+        spec_p = os.path.join(EXAMPLES, "counter_spec.yaml")
+        json_p = str(tmp_path / "result.json")
+        # errors があるので非0終了するが、json は書かれるはず（E_INTERNAL で）
+        result = _cli(["test", "-f", f_path, "--spec", spec_p, "--json", json_p])
+        assert result.exit_code != 0
+
+    # ---- 重複除去（絶対パス比較）----
+
+    def test_dedup_same_file_direct_and_filelist(self, tmp_path):
+        """同じファイルを直接指定と .f 両方で指定しても1回だけ読み込まれること"""
+        import shutil
+        sv_p = str(tmp_path / "counter.sv")
+        shutil.copy(os.path.join(EXAMPLES, "counter.sv"), sv_p)
+        f_path = str(tmp_path / "files.f")
+        # .f には相対パスで counter.sv を書く
+        _write(f_path, "counter.sv\n")
+        spec_p = os.path.join(EXAMPLES, "counter_spec.yaml")
+        # 直接引数にも sv_p（絶対パス）を渡す → 重複になるはず
+        result = _cli(["test", sv_p, "-f", f_path, "--spec", spec_p])
+        # モジュール二重定義にならず PASS
+        assert result.exit_code == 0, \
+            f"重複で失敗: exit={result.exit_code}\n{result.output}"
+
+    def test_dedup_via_expand_filelist_args(self, tmp_path):
+        """expand_filelist_args で絶対パス比較の重複除去が動作すること"""
+        sv_p = str(tmp_path / "a.sv")
+        _write(sv_p, "module a; endmodule\n")
+        f_path = str(tmp_path / "files.f")
+        _write(f_path, "a.sv\n")
+        from deltasim.filelist import expand_filelist_args
+        # 直接引数に絶対パス sv_p、.f には相対 a.sv（同じファイル）
+        all_files, fl = expand_filelist_args([sv_p], [f_path])
+        assert len(all_files) == 1, f"重複が除去されていない: {all_files}"
+
+    # ---- 循環検出の行番号 ----
+
+    def test_circular_f_has_line_number(self, tmp_path):
+        """循環する -f の警告に元ファイルの行番号が含まれること"""
+        f1 = str(tmp_path / "f1.f"); _write(f1, "-f f2.f\n")
+        f2 = str(tmp_path / "f2.f"); _write(f2, "-f f1.f\n")
+        from deltasim.filelist import load_filelist
+        fl = load_filelist(f1)
+        circ_warns = [w for w in fl.warnings if "循環" in w.message]
+        assert circ_warns, f"循環検出警告がない: {fl.warnings}"
+        w = circ_warns[0]
+        assert w.line > 0, f"循環警告の line が 0: {w}"
+        assert w.file != "", f"循環警告の file が空: {w}"
+
+    # ---- E001 コードの統一 ----
+
+    def test_error_code_is_e001(self, tmp_path):
+        """存在しないファイルのエラーコードが E001（既存コードと統一）であること"""
+        f_path = str(tmp_path / "files.f")
+        _write(f_path, "nonexistent.sv\n")
+        from deltasim.filelist import load_filelist
+        fl = load_filelist(f_path)
+        assert fl.errors[0].code == "E001", \
+            f"エラーコードが E001 でない: {fl.errors[0].code}"

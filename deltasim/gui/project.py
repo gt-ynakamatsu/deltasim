@@ -93,9 +93,21 @@ def project_to_dict(proj: DeltaSimProject) -> dict:
 
 
 def resolve_paths_from_f_file(f_file: str | os.PathLike) -> List[str]:
-    """.f ファイルを読んで SV ファイルのリストを返す。
+    """.f ファイルを読んで SV ファイルのリストを返す（後方互換ラッパー）。
 
     §18.2: deltasim.filelist.load_filelist を使って解析する。
+    この関数は戻り値を List[str]（ファイルリスト）のみとするため、
+    警告（W_FILELIST_OPT）とエラー（E001）は捨てられます。
+
+    警告やエラーも受け取りたい場合は、load_filelist を直接使ってください::
+
+        from deltasim.filelist import load_filelist
+        fl = load_filelist(f_file)
+        for w in fl.warnings:
+            print(f"W ({w.code}): {w.file}:{w.line}: {w.message}")
+        for e in fl.errors:
+            print(f"ERROR ({e.code}): {e.file}:{e.line}: {e.message}")
+        sv_files = fl.files
     """
     from deltasim.filelist import load_filelist
     fl = load_filelist(f_file)
