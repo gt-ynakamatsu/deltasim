@@ -161,11 +161,26 @@ class TestFourStateOps:
 # ---------------------------------------------------------------------------
 
 class TestExprXZIdentifier:
-    """§18.7.1: bare x/z は常に識別子。4値リテラルは基数つき形式のみ。"""
+    """§18.7.1: bare x/z は常に識別子 — コンテキストで値を引き、未定義のみエラー。
+
+    bare x/z に特別扱いはなく、他の識別子と完全に同じ振る舞い:
+      - env に存在 → その値を返す
+      - env に存在しない → ExprError("未定義のシンボル")
+    """
+
+    def test_bare_x_with_env_returns_value(self):
+        """§18.7.1(a): eval('x + 1', {'x': 3}) == 4"""
+        from deltasim.interp.expr import eval_expr
+        assert eval_expr("x + 1", {"x": 3}) == 4
+
+    def test_bare_z_with_env_returns_value(self):
+        """§18.7.1: eval('z > 0', {'z': 3}) == 1"""
+        from deltasim.interp.expr import eval_expr
+        assert eval_expr("z > 0", {"z": 3}) == 1
 
     def test_x_as_signal_name_not_literal(self):
         from deltasim.interp.expr import eval_expr
-        # env に 'x' があれば識別子として使う
+        # env に 'x' があれば識別子として使う（元のテスト維持）
         result = eval_expr("x + 1", {"x": 5})
         assert result == 6, f"x=5 なのに {result}"
 
@@ -174,14 +189,14 @@ class TestExprXZIdentifier:
         result = eval_expr("z > 0", {"z": 3})
         assert result == 1
 
-    def test_bare_x_without_env_is_error(self):
-        """§18.7.1: bare x（env なし）は ExprError"""
+    def test_bare_x_without_env_is_undefined_symbol_error(self):
+        """§18.7.1: bare x（env なし）は他の未定義識別子と同じく ExprError"""
         from deltasim.interp.expr import eval_expr, ExprError
         with pytest.raises(ExprError, match="未定義のシンボル"):
             eval_expr("x", {})
 
-    def test_bare_z_without_env_is_error(self):
-        """§18.7.1: bare z（env なし）は ExprError"""
+    def test_bare_z_without_env_is_undefined_symbol_error(self):
+        """§18.7.1: bare z（env なし）は他の未定義識別子と同じく ExprError"""
         from deltasim.interp.expr import eval_expr, ExprError
         with pytest.raises(ExprError, match="未定義のシンボル"):
             eval_expr("z", {})
@@ -393,6 +408,60 @@ endmodule
         codes = [e.code for e in result.errors] + [e.code for cr in result.cases for e in cr.errors]
         assert "E_CONSTRAINT" not in codes
         assert "E_CONSTRAINT_EXPR" not in codes
+
+    def test_port_named_x_yaml_set_and_check(self, tmp_path):
+        """§18.7.1(b): input ポート x を YAML で set x=3、check y=4 が PASS"""
+        sv_p = str(tmp_path / "m.sv")
+        Path(sv_p).write_text(
+            "module m(input logic clk, input logic [3:0] x, output logic [3:0] y);\n"
+            "  assign y = x + 4'b0001;\n"
+            "endmodule\n", encoding="utf-8"
+        )
+        spec = {
+            "version": 1, "top": "m",
+            "clock": {"signal": "clk", "period_ns": 10},
+            "reset": {"signal": "rst", "active_low": False, "duration_cycles": 1},
+            "sim": {"cycles": 3},
+            "cases": [{"name": "t",
+                       "stimulus": [{"at": 1, "set": {"x": 3}}],
+                       "expected": [{"at": 2, "check": {"y": 4}}]}],
+        }
+        yaml_p = str(tmp_path / "spec.yaml")
+        with open(yaml_p, "w", encoding="utf-8") as f:
+            yaml.dump(spec, f, allow_unicode=True)
+        result = ds.test([sv_p], spec=yaml_p)
+        assert result.status == "PASS", \
+            f"status={result.status} errors={[e.message for e in result.errors]}"
+        assert result.cases[0].status == "PASS"
+
+    def test_constraint_x_lt_4_all_values_pass(self, tmp_path):
+        """§18.7.1(c): constraint 'x < 4' 付き random x の全値が < 4"""
+        sv_p = str(tmp_path / "m.sv")
+        Path(sv_p).write_text(
+            "module m(input logic clk, input logic [3:0] x, output logic [3:0] y);\n"
+            "  assign y = x;\n"
+            "endmodule\n", encoding="utf-8"
+        )
+        spec = {
+            "version": 1, "top": "m",
+            "clock": {"signal": "clk", "period_ns": 10},
+            "reset": {"signal": "rst", "active_low": False, "duration_cycles": 1},
+            "sim": {"cycles": 5, "seed": 42},
+            "constraints": ["x < 4"],
+            "cases": [{"name": "t",
+                       "stimulus": [{"at": [1, 4], "random": {"x": {"range": [0, 15]}}}],
+                       "expected": [{"at": [1, 4], "check": {"y": "4'b????"}}]}],
+        }
+        yaml_p = str(tmp_path / "spec.yaml")
+        with open(yaml_p, "w", encoding="utf-8") as f:
+            yaml.dump(spec, f, allow_unicode=True)
+        result = ds.test([sv_p], spec=yaml_p)
+        errors = [e.code for e in result.errors] + [e.code for cr in result.cases for e in cr.errors]
+        assert "E_CONSTRAINT" not in errors
+        assert "E_CONSTRAINT_EXPR" not in errors
+        assert "E_UNKNOWN_PORT" not in errors, \
+            "bare 'x' in constraint should be treated as identifier (port name), not literal"
+        assert result.status == "PASS", f"status={result.status} errors={errors}"
 
 
 # ---------------------------------------------------------------------------
