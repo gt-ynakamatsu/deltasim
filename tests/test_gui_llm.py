@@ -965,6 +965,8 @@ class TestBugFixes:
     # (f) project_dir は提案時にサーバーで記録すること
     def test_project_dir_stored_at_suggest_time(self, client, mock_llm_config, tmp_path, monkeypatch):
         """(f) suggest/start で渡した project_dir が suggestion_id に紐づくこと"""
+        from deltasim.gui.filesec import add_extra_root
+        add_extra_root(tmp_path)  # tmp_path を filesec 許可ルートに追加
         monkeypatch.setattr("deltasim.llm.call_llm", _mock_llm_safe)
 
         # 提案時に project_dir を渡す
@@ -1048,3 +1050,140 @@ class TestBugFixes:
             "suggestion_id": sid,
         })
         assert res.status_code == 200, "run/start は project_dir なしでも動作すること"
+
+
+# ============================================================================
+# filesec 検証テスト（draft-spec・explain・suggest の project_dir）
+# ============================================================================
+
+class TestFilesecValidation:
+    """draft-spec/start・explain/start・suggest の project_dir が filesec で検証されること"""
+
+    @pytest.fixture
+    def client(self):
+        with TestClient(app, base_url="http://127.0.0.1") as c:
+            yield c
+
+    # draft-spec/start: sv_files が許可ルート外なら 403
+    def test_draft_spec_rejects_unsafe_sv_file(self, client, mock_llm_config):
+        """draft-spec/start: 許可ルート外の sv_files は 403 を返すこと"""
+        import os
+        home = Path(os.path.expanduser("~")).resolve()
+        cwd = Path.cwd().resolve()
+        # /etc/passwd はほぼ確実に許可ルート外
+        unsafe_path = "/etc/passwd"
+        p = Path(unsafe_path).resolve()
+        is_in_allowed = str(p).startswith(str(home)) or str(p).startswith(str(cwd))
+        if is_in_allowed:
+            pytest.skip("このパスは許可ルート内")
+
+        res = client.post("/api/llm/draft-spec/start", json={
+            "sv_files": [unsafe_path],
+        })
+        assert res.status_code == 403, f"許可ルート外は 403: {res.status_code}"
+
+    def test_draft_spec_accepts_safe_sv_file(self, client, mock_llm_config, monkeypatch, tmp_path):
+        """draft-spec/start: 許可ルート内の sv_files は受け付けること"""
+        from deltasim.gui.filesec import add_extra_root
+        add_extra_root(tmp_path)
+
+        # 存在するファイルを使う（COUNTER_SV はすでに許可済み）
+        res = client.post("/api/llm/draft-spec/start", json={
+            "sv_files": [COUNTER_SV],
+        })
+        assert res.status_code == 200, f"許可ルート内は 200: {res.text}"
+
+    def test_draft_spec_rejects_nonexistent_sv_file(self, client, mock_llm_config):
+        """draft-spec/start: 存在しない sv_files は 422 を返すこと（pydantic バリデーション）"""
+        res = client.post("/api/llm/draft-spec/start", json={
+            "sv_files": ["/nonexistent/file.sv"],
+        })
+        assert res.status_code == 422, "存在しないファイルは 422"
+
+    # explain/start: sv_files・spec が許可ルート外なら 403
+    def test_explain_rejects_unsafe_sv_file(self, client, mock_llm_config):
+        """explain/start: 許可ルート外の sv_files は 403"""
+        import os
+        home = Path(os.path.expanduser("~")).resolve()
+        cwd = Path.cwd().resolve()
+        unsafe_path = "/etc/passwd"
+        p = Path(unsafe_path).resolve()
+        is_in_allowed = str(p).startswith(str(home)) or str(p).startswith(str(cwd))
+        if is_in_allowed:
+            pytest.skip("このパスは許可ルート内")
+
+        res = client.post("/api/llm/explain/start", json={
+            "result": {"status": "FAIL", "cases": [], "errors": []},
+            "sv_files": [unsafe_path],
+        })
+        assert res.status_code == 403, f"許可ルート外の sv_files は 403: {res.status_code}"
+
+    def test_explain_rejects_unsafe_spec(self, client, mock_llm_config, tmp_path):
+        """explain/start: 許可ルート外の spec は 403"""
+        import os
+        home = Path(os.path.expanduser("~")).resolve()
+        cwd = Path.cwd().resolve()
+        unsafe_spec = "/etc/hosts"
+        p = Path(unsafe_spec).resolve()
+        is_in_allowed = str(p).startswith(str(home)) or str(p).startswith(str(cwd))
+        if is_in_allowed:
+            pytest.skip("このパスは許可ルート内")
+
+        res = client.post("/api/llm/explain/start", json={
+            "result": {"status": "FAIL", "cases": [], "errors": []},
+            "sv_files": [COUNTER_SV],
+            "spec": unsafe_spec,
+        })
+        assert res.status_code == 403, f"許可ルート外の spec は 403: {res.status_code}"
+
+    def test_explain_accepts_safe_paths(self, client, mock_llm_config):
+        """explain/start: 許可ルート内のパスは受け付けること"""
+        res = client.post("/api/llm/explain/start", json={
+            "result": {"status": "FAIL", "cases": [], "errors": []},
+            "sv_files": [COUNTER_SV],
+            "spec": COUNTER_SPEC,
+        })
+        assert res.status_code == 200, f"許可ルート内は 200: {res.text}"
+
+    # suggest/start: project_dir が許可ルート外なら 403
+    def test_suggest_rejects_unsafe_project_dir(self, client, mock_llm_config, monkeypatch):
+        """suggest/start: 許可ルート外の project_dir は 403"""
+        monkeypatch.setattr("deltasim.llm.call_llm", _mock_llm_safe)
+        import os
+        home = Path(os.path.expanduser("~")).resolve()
+        cwd = Path.cwd().resolve()
+        unsafe_dir = "/root"
+        p = Path(unsafe_dir).resolve()
+        is_in_allowed = str(p).startswith(str(home)) or str(p).startswith(str(cwd))
+        if is_in_allowed:
+            pytest.skip("このパスは許可ルート内")
+
+        res = client.post("/api/llm/suggest/start", json={
+            "text": "テスト",
+            "sv_files": [COUNTER_SV],
+            "project_dir": unsafe_dir,
+        })
+        assert res.status_code == 403, f"許可ルート外の project_dir は 403: {res.status_code}"
+
+    def test_suggest_accepts_safe_project_dir(self, client, mock_llm_config, monkeypatch, tmp_path):
+        """suggest/start: 許可ルート内の project_dir は受け付けること"""
+        from deltasim.gui.filesec import add_extra_root
+        add_extra_root(tmp_path)
+        monkeypatch.setattr("deltasim.llm.call_llm", _mock_llm_safe)
+
+        res = client.post("/api/llm/suggest/start", json={
+            "text": "テスト",
+            "sv_files": [COUNTER_SV],
+            "project_dir": str(tmp_path),
+        })
+        assert res.status_code == 200, f"許可ルート内の project_dir は 200: {res.text}"
+
+    def test_suggest_accepts_no_project_dir(self, client, mock_llm_config, monkeypatch):
+        """suggest/start: project_dir なしでも動作すること"""
+        monkeypatch.setattr("deltasim.llm.call_llm", _mock_llm_safe)
+
+        res = client.post("/api/llm/suggest/start", json={
+            "text": "テスト",
+            "sv_files": [COUNTER_SV],
+        })
+        assert res.status_code == 200, "project_dir なしは 200"

@@ -1282,6 +1282,16 @@ async def console_exec_events(session_id: str, job_id: str):
     """コンソールコマンドの進捗を SSE で配信する（§18.4）。"""
     from deltasim.gui.jobs import get_job, event_stream
 
+    job = get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"ジョブが見つかりません: {job_id}")
+    return StreamingResponse(
+        event_stream(job),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 # /api/llm — LLM 連携（§18.3）
 # ---------------------------------------------------------------------------
 
@@ -1319,16 +1329,25 @@ async def llm_suggest_start(req: LLMSuggestRequest):
     §18.3.2: ask コンテキストはファイル名+モジュール名+ポート一覧のみ（RTL 中身なし）。
     """
     from deltasim.gui.jobs import create_job, run_llm_suggest_job
+    from deltasim.gui.filesec import safe_path, PathSecurityError
+
+    # project_dir を filesec で検証（許可ルート外は 403）
+    validated_project_dir = None
+    if req.project_dir:
+        try:
+            safe_path(req.project_dir)
+            validated_project_dir = req.project_dir
+        except PathSecurityError as e:
+            raise HTTPException(status_code=403, detail=f"project_dir が許可範囲外です: {e}")
 
     job = create_job()
-    # §18.5.1 (f): project_dir をジョブに渡す（store_suggestion で suggestion_id に紐づける）
     job.task = asyncio.create_task(
         run_llm_suggest_job(
             job, req.text,
             sv_files=req.sv_files,
             spec_file=req.spec,
             module_info=req.module_info,
-            project_dir=req.project_dir,
+            project_dir=validated_project_dir,
         )
     )
     return {"job_id": job.job_id}
@@ -1398,6 +1417,9 @@ async def console_state(session_id: str):
             {"id": b.id, "label": b.label(), "hit_count": b.hit_count}
             for b in getattr(interp, "_whens", [])
         ],
+    }
+
+
 @app.post("/api/llm/suggest/{job_id}/cancel")
 async def llm_suggest_cancel(job_id: str):
     from deltasim.gui.jobs import cancel_job
@@ -1469,8 +1491,21 @@ class LLMDraftRequest(BaseModel):
 
 @app.post("/api/llm/draft-spec/start")
 async def llm_draft_spec_start(req: LLMDraftRequest):
-    """YAML スペック下書き生成を開始する（§18.3）。"""
+    """YAML スペック下書き生成を開始する（§18.3）。
+
+    sv_files は os.path.isfile + filesec.safe_path で検証する（許可ルート外は 403）。
+    """
     from deltasim.gui.jobs import create_job, run_llm_draft_job
+    from deltasim.gui.filesec import safe_path, PathSecurityError
+
+    # filesec でパスを検証（許可ルート外は 403）
+    for f in req.sv_files:
+        try:
+            safe_path(f, must_exist=True)
+        except PathSecurityError as e:
+            raise HTTPException(status_code=403, detail=str(e))
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail=f"ファイルが見つかりません: {f!r}")
 
     job = create_job()
     job.task = asyncio.create_task(
@@ -1508,8 +1543,30 @@ class LLMExplainRequest(BaseModel):
 
 @app.post("/api/llm/explain/start")
 async def llm_explain_start(req: LLMExplainRequest):
-    """テスト失敗の解析を開始する（§18.3）。"""
+    """テスト失敗の解析を開始する（§18.3）。
+
+    sv_files と spec は filesec.safe_path で検証する（許可ルート外は 403）。
+    """
     from deltasim.gui.jobs import create_job, run_llm_explain_job
+    from deltasim.gui.filesec import safe_path, PathSecurityError
+
+    # sv_files の検証
+    for f in req.sv_files:
+        try:
+            safe_path(f, must_exist=True)
+        except PathSecurityError as e:
+            raise HTTPException(status_code=403, detail=str(e))
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail=f"ファイルが見つかりません: {f!r}")
+
+    # spec の検証（指定された場合）
+    if req.spec:
+        try:
+            safe_path(req.spec, must_exist=True)
+        except PathSecurityError as e:
+            raise HTTPException(status_code=403, detail=str(e))
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail=f"スペックが見つかりません: {req.spec!r}")
 
     job = create_job()
     job.task = asyncio.create_task(
