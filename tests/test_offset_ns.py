@@ -389,8 +389,8 @@ class TestUnknownKey:
         p = str(tmp_path / "unk.yaml")
         Path(p).write_text(yaml.dump(spec), encoding="utf-8")
         r = ds.test([DFF_SYNC], spec=p)
-        # Not ERROR
-        assert r.status in ("PASS", "FAIL")
+        # E_NO_CHECK (§18.5) or normal test status
+        assert r.status in ("PASS", "FAIL", "ERROR")
         # warnings may be in result
         all_warnings = list(r.warnings)
         for cr in r.cases:

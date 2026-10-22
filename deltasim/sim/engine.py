@@ -466,7 +466,8 @@ class _Executor:
         ctx: Optional[EvalContext] = None,
         max_loop: int = MAX_FOREVER_TICKS,
         time_ns: int = 0,
-        bp_check=None,   # §18: Optional[Callable[[str, int], None]] — file, line
+        bp_check=None,      # §18: Optional[Callable[[str, int], None]] — file, line
+        monitor_state=None, # §18.5: shared dict for $monitor dedup across executors
     ):
         self.signals = dict(signals)
         self.widths = widths
@@ -475,9 +476,12 @@ class _Executor:
         self.max_loop = max_loop
         self.time_ns = time_ns
         self._bp_check = bp_check  # raises BreakpointHit if a bp is set
+        # §18.5: shared monitor state (mutable dict) for cross-executor dedup
+        self._monitor_state: dict = monitor_state if monitor_state is not None else {}
         # NBA items: (name, val) for signals, (arr_name, idx, val) for arrays
         self.nba_queue: List[tuple] = []
-        self.display_log: List[str] = []
+        self.display_log: List[str] = []    # $display/$write/$strobe
+        self.monitor_log: List[str] = []    # $monitor (deduplicated via _monitor_state)
 
     def execute(self, stmt) -> None:
         # §18.1.1: Check line breakpoints — deferred (does not raise, stores hit)
@@ -582,7 +586,7 @@ class _Executor:
         name = stmt.name
         if name in ("finish", "stop"):
             raise _FinishSignal()
-        if name in ("display", "write", "monitor", "strobe"):
+        if name in ("display", "write", "strobe"):
             args_vals = [eval_val(a, self.signals, self.widths, self.params, self.ctx)
                          for a in stmt.args]
             if stmt.args and isinstance(stmt.args[0], StringLiteral):
@@ -593,6 +597,35 @@ class _Executor:
             else:
                 line = " ".join(str(v) for v in args_vals)
             self.display_log.append(line)
+        elif name == "monitor":
+            # §18.5: $monitor — エンジン共有 _monitor_state で重複除去
+            # monitor_log に入れ、engine レベルで _engine_monitor_emit を通じて出力
+            args_vals = [eval_val(a, self.signals, self.widths, self.params, self.ctx)
+                         for a in stmt.args]
+            if stmt.args and isinstance(stmt.args[0], StringLiteral):
+                fmt = stmt.args[0].text
+                arg_vals2 = [eval_val(a, self.signals, self.widths, self.params, self.ctx)
+                              for a in stmt.args[1:]]
+                line = _format_display(fmt, arg_vals2)
+            else:
+                line = " ".join(str(v) for v in args_vals)
+            self.monitor_log.append(line)
+
+
+def _engine_monitor_emit(engine, line: str) -> None:
+    """§18.5: $monitor 出力をエンジンのログに追加する（重複除去）。
+
+    _monitor_state は _Executor と initial ブロック共有の dict。
+    """
+    mon_state = getattr(engine, "_monitor_state", None)
+    if mon_state is None:
+        engine._monitor_state = mon_state = {}
+    cur_key = (engine._time, line)
+    if mon_state.get("prev") != cur_key:
+        engine._result.log.append(line)
+        mon_state["prev"] = cur_key
+        if engine.verbose:
+            print(line)
 
 
 class _FinishSignal(Exception):
@@ -738,7 +771,7 @@ def _exec_initial_gen(stmt, engine: "SimEngine"):
         name = stmt.name
         if name in ("finish", "stop"):
             raise _FinishSignal()
-        if name in ("display", "write", "monitor", "strobe", "dumpfile", "dumpvars"):
+        if name in ("display", "write", "strobe", "dumpfile", "dumpvars"):
             args_vals = [eval_val(a, engine.signals, engine._widths, engine._params)
                          for a in stmt.args]
             if stmt.args and isinstance(stmt.args[0], StringLiteral):
@@ -752,6 +785,19 @@ def _exec_initial_gen(stmt, engine: "SimEngine"):
             engine._result.log.append(line)
             if engine.verbose:
                 print(line)
+        elif name == "monitor":
+            # §18.5: $monitor — 値変化時のみ出力・同一時刻内重複なし（エンジンレベル管理）
+            args_vals = [eval_val(a, engine.signals, engine._widths, engine._params)
+                         for a in stmt.args]
+            if stmt.args and isinstance(stmt.args[0], StringLiteral):
+                fmt = stmt.args[0].text
+                line = _format_display(fmt, [
+                    eval_val(a, engine.signals, engine._widths, engine._params)
+                    for a in stmt.args[1:]
+                ])
+            else:
+                line = " ".join(str(v) for v in args_vals)
+            _engine_monitor_emit(engine, line)
         yield 0
 
     elif isinstance(stmt, NullStmt):
@@ -974,6 +1020,8 @@ class SimEngine:
         self._deferred_bp_hit: Optional[tuple] = None  # (bp_id, file, line, time_ns)
         # active bp_check callable (set by Simulator.step_to_ns before each cycle)
         self._active_bp_check = None
+        # §18.5: shared $monitor state dict (prevents cross-executor duplicates)
+        self._monitor_state: dict = {}
 
     # ------------------------------------------------------------------
     # EvalContext builder  (M4)
@@ -1207,7 +1255,8 @@ class SimEngine:
             if self._is_triggered(proc.sensitivity, sig_name, old_val, new_val):
                 ex = _Executor(self.signals, self._widths, self._params, self._ctx,
                                max_loop=self.max_loop, time_ns=self._time,
-                               bp_check=getattr(self, "_active_bp_check", None))
+                               bp_check=getattr(self, "_active_bp_check", None),
+                                              monitor_state=getattr(self, "_monitor_state", {}))
                 try:
                     ex.execute(proc.body)
                 except _FinishSignal:
@@ -1224,6 +1273,8 @@ class SimEngine:
                     self._result.log.append(line)
                     if self.verbose:
                         print(line)
+                for line in ex.monitor_log:
+                    _engine_monitor_emit(self, line)
         return nba
 
     @staticmethod
@@ -1287,7 +1338,8 @@ class SimEngine:
             for proc in self.design.comb_procs:
                 ex = _Executor(self.signals, self._widths, self._params, self._ctx,
                                max_loop=self.max_loop, time_ns=self._time,
-                               bp_check=getattr(self, "_active_bp_check", None))
+                               bp_check=getattr(self, "_active_bp_check", None),
+                                              monitor_state=getattr(self, "_monitor_state", {}))
                 try:
                     ex.execute(proc.body)
                 except _FinishSignal:
@@ -1302,6 +1354,8 @@ class SimEngine:
                     self._result.log.append(line)
                     if self.verbose:
                         print(line)
+                for line in ex.monitor_log:
+                    _engine_monitor_emit(self, line)
 
             if not changed:
                 break
@@ -1326,7 +1380,8 @@ class SimEngine:
                     for proc in self.design.comb_procs:
                         ex = _Executor(self.signals, self._widths, self._params,
                                        self._ctx, max_loop=self.max_loop,
-                                       time_ns=self._time)
+                                       time_ns=self._time,
+                                                      monitor_state=getattr(self, "_monitor_state", {}))
                         try:
                             ex.execute(proc.body)
                         except Exception:

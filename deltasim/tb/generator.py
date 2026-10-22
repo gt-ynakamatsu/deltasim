@@ -45,9 +45,12 @@ def _build_tb_sv(design: ElabDesign) -> str:
     a(f"module {tb_name};")
     a("")
 
-    # ---------- DUT signals ----------
+    # ---------- DUT signals （ポートのみ宣言）----------
+    # §18.5: direction が None の内部信号は TB に不要なので含めない
     a("    // ---------- DUT signals ----------")
     for name, info in signals.items():
+        if info.direction is None:
+            continue  # 内部信号はスキップ
         if info.width == 1:
             a(f"    logic {name};")
         else:
@@ -56,6 +59,7 @@ def _build_tb_sv(design: ElabDesign) -> str:
     a("")
 
     # ---------- DUT instance ----------
+    # §18.5: ポート（direction あり）のみを接続する（内部信号は除外）
     a("    // ---------- DUT instance ----------")
     if params:
         a(f"    {mod} #(")
@@ -67,9 +71,10 @@ def _build_tb_sv(design: ElabDesign) -> str:
     else:
         a(f"    {mod} dut (")
 
-    sig_items = list(signals.keys())
-    for i, name in enumerate(sig_items):
-        comma = "," if i < len(sig_items) - 1 else ""
+    port_names = [name for name, info in signals.items()
+                  if info.direction is not None]
+    for i, name in enumerate(port_names):
+        comma = "," if i < len(port_names) - 1 else ""
         a(f"        .{name}({name}){comma}")
     a("    );")
     a("")

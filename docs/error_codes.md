@@ -122,3 +122,6 @@ E_LOOP_LIMIT: 5ns の for loop が 100 回を超えました
 **対応するオプション**: `+incdir+<dir>`、`+define+NAME[=VAL]`、`-f <nested.f>`  
 **未対応（スキップ）**: `-v`、`-y`、`+libext+`、その他 `-` または `+` で始まるオプション
 
+| `E_UNKNOWN_PORT` | テスト実行 | YAML スペックで指定した信号名がモジュールのポートに存在しない |
+| `E_NO_CHECK` | テスト実行 | スペックにチェックが0件（全ケース skip を除く） |
+| `E_AMBIGUOUS_TOP` | ロード | `--top` 省略時に top 候補が複数ある |

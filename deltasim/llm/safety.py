@@ -45,6 +45,18 @@ _WRITE_OPTS_LONG: Tuple[str, ...] = (
     "--tb",         # gen: TB SV 出力ファイル
     "--spec",       # gen: スペック YAML 出力ファイル（-s も）
     "--output",     # run: -o の別名
+    "--log",        # §18.5: run/test/gen/parse: ログ出力ファイル
+)
+
+# 読み取りオプション（パスを取るが書き込みでないもの）
+# テストで click のコマンド定義と照合する
+_READ_OPTS_LONG: Tuple[str, ...] = (
+    "--spec",       # test: スペック YAML 読み取り（-s も）
+    "--config",     # llm ask/draft-spec/explain: simconfig.yaml
+)
+_READ_OPTS_SHORT: Tuple[str, ...] = (
+    "-s",           # test: スペックファイル（--spec の短形式）
+    "-f",           # すべて: ファイルリスト .f（読み取り）
 )
 _WRITE_OPTS_SHORT: Tuple[str, ...] = (
     "-o",   # run: VCD 出力 (--vcd 相当)

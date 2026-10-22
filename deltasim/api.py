@@ -98,13 +98,14 @@ def load(
         result.errors.append(_exc_to_error(e, "E001"))
         return result
 
-    mod = _select_top(mods, top)
+    mod, top_err = _select_top(mods, top, catalog=cat)
+    if top_err is not None:
+        result.status = "ERROR"
+        result.errors.append(top_err)
+        return result
     if mod is None:
         result.status = "ERROR"
-        result.errors.append(ErrorInfo(
-            message=f"Top module {top!r} not found in {[m.name for m in mods]}",
-            code="E002",
-        ))
+        result.errors.append(ErrorInfo(message="No module found", code="E002"))
         return result
 
     try:
@@ -381,6 +382,19 @@ def test(
               message=case_result.message,
               cancelled=case_result.cancelled)
 
+    # §18.5 E_NO_CHECK: チェックが0件で全ケースが skip でない場合はエラー
+    non_skip_cases = [cr for cr in result.cases if cr.status != "SKIP"]
+    if non_skip_cases and all_checks == [] and overall_status == "PASS":
+        overall_status = "ERROR"
+        result.errors.append(ErrorInfo(
+            code="E_NO_CHECK",
+            message=(
+                "テストにチェックが0件です。"
+                "YAML スペックに expected/check を追加してください。"
+            ),
+            severity="error",
+        ))
+
     result.status = overall_status
     result.checks = all_checks
     # Propagate cancelled flag from any case
@@ -449,6 +463,37 @@ def _run_one_case(
     eff_model_spec = case.model or scenario.model
 
     cr.seed = eff_seed
+
+    # §18.5 E_UNKNOWN_PORT: YAML に書かれた信号名がポートに存在するか検査
+    known_ports = set(design.signals.keys())
+    for entry in eff_inputs:
+        for sig in (entry.set_values or {}):
+            if sig not in known_ports:
+                err = ErrorInfo(
+                    code="E_UNKNOWN_PORT",
+                    message=f"ポート '{sig}' はモジュールに存在しません。"
+                            f"既知のポート: {sorted(known_ports)}",
+                    severity="error",
+                )
+                cr.status = "ERROR"
+                cr.errors.append(err)
+                cr.message = err.message
+                cr.elapsed_ms = (time.time() - case_t0) * 1000
+                return cr
+    for entry in eff_expected:
+        for sig in (entry.check or {}):
+            if sig not in known_ports:
+                err = ErrorInfo(
+                    code="E_UNKNOWN_PORT",
+                    message=f"ポート '{sig}' はモジュールに存在しません。"
+                            f"既知のポート: {sorted(known_ports)}",
+                    severity="error",
+                )
+                cr.status = "ERROR"
+                cr.errors.append(err)
+                cr.message = err.message
+                cr.elapsed_ms = (time.time() - case_t0) * 1000
+                return cr
 
     period_ns = eff_clock.period_ns       # §15.2 effective period
     hp = period_ns // 2                   # half-period (posedge→negedge)
@@ -1349,15 +1394,57 @@ def _parse_files(files):
     return mods, cat
 
 
-def _select_top(mods, top):
-    if not mods:
-        return None
-    if top is None:
-        return mods[0]
+def find_top_candidates(mods: list, catalog: dict = None) -> list:
+    """§18.5: どこからもインスタンスされていないモジュール名のリストを返す。
+
+    GUI から使う公開 API。catalog が None なら mods 同士で判定する。
+
+    Returns:
+        インスタンスされていないモジュール名のリスト（候補）
+    """
+    from deltasim.parser.ast_nodes import InstDecl
+
+    all_names = {m.name for m in mods}
+    if not all_names:
+        return []
+
+    # instanced_by: どのモジュールからインスタンスされているか
+    instanced: set = set()
     for m in mods:
-        if m.name == top:
-            return m
-    return None
+        for item in m.items:
+            if isinstance(item, InstDecl):
+                instanced.add(item.module_name)
+    return sorted(all_names - instanced)
+
+
+def _select_top(mods, top, catalog=None):
+    if not mods:
+        return None, None
+    if top is not None:
+        for m in mods:
+            if m.name == top:
+                return m, None
+        return None, ErrorInfo(
+            message=f"Top module {top!r} not found in {sorted(m.name for m in mods)}",
+            code="E002",
+        )
+    # §18.5: どこからもインスタンスされていないモジュールを候補にする
+    candidates = find_top_candidates(mods, catalog)
+    if not candidates:
+        # フォールバック: 先頭
+        return mods[0], None
+    if len(candidates) == 1:
+        for m in mods:
+            if m.name == candidates[0]:
+                return m, None
+        return mods[0], None
+    # 複数候補 → E_AMBIGUOUS_TOP
+    msg = (
+        f"トップモジュールが一意に決まりません。"
+        f"候補: {candidates}。"
+        f"--top で明示してください。"
+    )
+    return None, ErrorInfo(message=msg, code="E_AMBIGUOUS_TOP")
 
 
 def _exc_to_error(exc: Exception, code: str, severity: str = "error") -> ErrorInfo:
