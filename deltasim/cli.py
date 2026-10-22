@@ -561,6 +561,12 @@ def gui_cmd(paths, host, port, no_browser, reload):
         deltasim gui files.f\n
         deltasim gui deltasim.project.yaml
     """
+    # §17.2: ループバック以外のホストは拒否（終了コード 2）
+    _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
+    if host not in _LOOPBACK_HOSTS:
+        click.echo("GUIは127.0.0.1でのみ起動できます", err=True)
+        sys.exit(2)
+
     try:
         import uvicorn  # noqa: F401
         from deltasim.gui.server import app  # noqa: F401
