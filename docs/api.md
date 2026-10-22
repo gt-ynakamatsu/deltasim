@@ -129,7 +129,7 @@ for ev in ds.test_events(["counter.sv"], "spec.yaml"):
 ```json
 {
   "schema_version": "2",
-  "deltasim_version": "0.2.0",
+  "deltasim_version": "0.3.0",
   "module": "counter",
   "status": "PASS",
   "seed": 42,
@@ -932,7 +932,7 @@ cases:
 ```json
 {
   "schema_version": "2",
-  "deltasim_version": "0.2.0"
+  "deltasim_version": "0.3.0"
 }
 ```
 

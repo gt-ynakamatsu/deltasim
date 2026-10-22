@@ -66,18 +66,61 @@ RTL (.sv)
 
 ## インストール
 
+> **注意**: PyPI には公開していません。Git リポジトリから直接インストールしてください。
+> Git（[git-scm.com](https://git-scm.com/)）と Python 3.10 以上が必要です。
+
+### Linux / macOS
+
 ```bash
-# CLI のみ（最小構成）
-pip install -e "."
+# 仮想環境を作成（推奨）
+python3 -m venv .venv
+source .venv/bin/activate
 
-# CLI + GUI（ローカル Web ブラウザ UI）
-pip install -e ".[gui]"
+# CLI + GUI をインストール
+pip install "deltasim[gui] @ git+https://github.com/gt-ynakamatsu/deltasim.git@v0.3.0"
 
-# CLI + GUI + 開発ツール
-pip install -e ".[gui,dev]"
+# CLI のみ（GUI 不要の場合）
+pip install "git+https://github.com/gt-ynakamatsu/deltasim.git@v0.3.0"
 ```
 
-Python 3.10 以上が必要です。依存パッケージ: `click`, `pyyaml`（GUI は `fastapi`, `uvicorn` が追加で必要）
+### Windows（PowerShell）
+
+```powershell
+# 仮想環境を作成（推奨）
+py -m venv .venv
+.venv\Scripts\Activate.ps1
+
+# CLI + GUI をインストール
+# PowerShell では外側をダブルクォートで囲む
+py -m pip install "deltasim[gui] @ git+https://github.com/gt-ynakamatsu/deltasim.git@v0.3.0"
+
+# CLI のみ
+py -m pip install "git+https://github.com/gt-ynakamatsu/deltasim.git@v0.3.0"
+```
+
+### Windows（コマンドプロンプト / cmd）
+
+```cmd
+:: 仮想環境を作成（推奨）
+py -m venv .venv
+.venv\Scripts\activate.bat
+
+:: CLI + GUI をインストール
+:: cmd では外側をダブルクォートで囲む
+py -m pip install "deltasim[gui] @ git+https://github.com/gt-ynakamatsu/deltasim.git@v0.3.0"
+```
+
+依存パッケージ: `click`, `pyyaml`（GUI 追加時は `fastapi`, `uvicorn[standard]`, `httpx` も必要）
+
+### 開発者向け（リポジトリをクローンして editable インストール）
+
+```bash
+git clone https://github.com/gt-ynakamatsu/deltasim.git
+cd deltasim
+python3 -m venv .venv
+source .venv/bin/activate       # Windows: .venv\Scripts\Activate.ps1
+pip install -e ".[gui,dev]"
+```
 
 ---
 
@@ -85,8 +128,14 @@ Python 3.10 以上が必要です。依存パッケージ: `click`, `pyyaml`（G
 
 ### インストール
 
+> v0.3.0 から `deltasim gui` コマンドが利用できます。
+
 ```bash
-pip install "deltasim[gui]"
+# Linux / macOS
+pip install "deltasim[gui] @ git+https://github.com/gt-ynakamatsu/deltasim.git@v0.3.0"
+
+# Windows PowerShell
+py -m pip install "deltasim[gui] @ git+https://github.com/gt-ynakamatsu/deltasim.git@v0.3.0"
 ```
 
 ### 起動
