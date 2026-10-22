@@ -42,6 +42,10 @@
     <button id="btn-debug" class="btn btn-secondary" title="対話デバッグ（§8 Simulator API）">
       🔬 デバッグ
     </button>
+    <button id="btn-llm-open" class="btn btn-secondary" title="LLM 連携（§18.3）" style="position:relative;">
+      🤖 LLM
+      <span id="llm-status-dot" style="position:absolute;top:2px;right:2px;width:6px;height:6px;border-radius:50%;background:#555566;"></span>
+    </button>
 
     <label style="font-size:11px; color:#8888aa; margin-left:8px;">シード:</label>
     <input id="seed-input" type="text" placeholder="ランダム" title="乱数シード（空 = ランダム）">
@@ -362,6 +366,78 @@
         <!-- §18.4.2: フォルダ選択モード用ボタン（通常は非表示） -->
         <button class="btn btn-secondary" id="btn-browser-select-folder" style="display:none;">このフォルダを選択</button>
         <button class="btn btn-primary" id="btn-browser-open">開く</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== LLM 連携パネル（§18.3）===== -->
+  <div id="llm-overlay" class="dialog-overlay" style="display:none;">
+    <div class="dialog-box" style="width:640px;max-height:90vh;overflow-y:auto;">
+      <div class="dialog-header">
+        <span>🤖 LLM 連携（§18.3）</span>
+        <div id="llm-config-badge" style="font-size:10px;padding:2px 8px;border-radius:10px;background:#2d2d44;color:#8888aa;"></div>
+        <button class="dialog-close" id="btn-llm-close">✕</button>
+      </div>
+
+      <!-- 未設定メッセージ -->
+      <div id="llm-not-configured-msg" style="display:none;padding:16px;text-align:center;">
+        <div style="font-size:14px;color:#fbbf24;margin-bottom:8px;">⚠ LLM が未設定です</div>
+        <div style="font-size:12px;color:#a3a3b4;">
+          <code style="background:#1e1e2e;padding:2px 6px;border-radius:3px;">simconfig.yaml</code>
+          に LLM 設定を追加してください。<br>
+          詳しくは <code>docs/llm.md</code> を参照してください。
+        </div>
+      </div>
+
+      <!-- コマンド提案 -->
+      <div id="llm-suggest-section" style="padding:12px;border-bottom:1px solid #3d3d5c;">
+        <div style="font-size:12px;color:#a3a3b4;margin-bottom:6px;font-weight:600;">💬 コマンド提案</div>
+        <div style="display:flex;gap:6px;align-items:center;">
+          <input id="llm-ask-input" type="text" placeholder="例: counter をテストして、カウンタのスペックを作って"
+                 style="flex:1;padding:6px 10px;background:#1e1e2e;border:1px solid #3d3d5c;color:#e2e2f0;font-size:12px;border-radius:4px;">
+          <button id="btn-llm-ask" class="btn btn-primary" style="padding:5px 14px;font-size:12px;">提案</button>
+          <button id="btn-llm-ask-cancel" class="btn btn-danger" style="padding:5px 10px;font-size:12px;display:none;">■</button>
+        </div>
+        <!-- 提案結果 -->
+        <div id="llm-suggestion-area" style="display:none;margin-top:10px;padding:10px;background:#1a1a2e;border-radius:6px;border:1px solid #3d3d5c;">
+          <div style="font-size:11px;color:#8888aa;margin-bottom:4px;">提案コマンド:</div>
+          <code id="llm-suggestion-cmd" style="font-size:12px;color:#7c6af7;word-break:break-all;"></code>
+          <div id="llm-suggestion-files" style="font-size:10px;color:#fbbf24;margin-top:4px;"></div>
+          <div id="llm-suggestion-reason" style="font-size:11px;color:#f87171;margin-top:4px;display:none;"></div>
+          <div style="margin-top:8px;display:flex;gap:6px;">
+            <button id="btn-llm-run" class="btn btn-primary" style="font-size:11px;padding:3px 12px;" disabled>▶ 実行</button>
+            <button id="btn-llm-run-cancel" class="btn btn-secondary" style="font-size:11px;padding:3px 10px;display:none;">■ 中断</button>
+          </div>
+        </div>
+        <!-- 実行結果 -->
+        <div id="llm-run-result" style="display:none;margin-top:8px;padding:8px;background:#0d0d1a;border-radius:4px;font-family:monospace;font-size:10px;max-height:120px;overflow-y:auto;">
+          <div id="llm-run-exit-code" style="color:#8888aa;"></div>
+          <pre id="llm-run-stdout" style="color:#c9c9de;margin:0;white-space:pre-wrap;"></pre>
+          <pre id="llm-run-stderr" style="color:#f87171;margin:0;white-space:pre-wrap;"></pre>
+        </div>
+      </div>
+
+      <!-- YAML 下書き生成 -->
+      <div id="llm-draft-section" style="padding:12px;border-bottom:1px solid #3d3d5c;">
+        <div style="font-size:12px;color:#a3a3b4;margin-bottom:6px;font-weight:600;">📝 スペック YAML 下書き生成</div>
+        <div style="display:flex;gap:6px;align-items:center;">
+          <span style="font-size:11px;color:#8888aa;">RTL: </span>
+          <span id="llm-draft-files-label" style="font-size:11px;color:#e2e2f0;flex:1;">（SV ファイルを読み込んでください）</span>
+          <button id="btn-llm-draft" class="btn btn-secondary" style="font-size:11px;padding:4px 12px;">下書き生成</button>
+          <button id="btn-llm-draft-cancel" class="btn btn-danger" style="font-size:11px;padding:4px 10px;display:none;">■</button>
+        </div>
+        <div id="llm-draft-errors" style="display:none;margin-top:4px;font-size:11px;color:#fbbf24;"></div>
+      </div>
+
+      <!-- 失敗の解析 -->
+      <div id="llm-explain-section" style="padding:12px;">
+        <div style="font-size:12px;color:#a3a3b4;margin-bottom:6px;font-weight:600;">🔍 テスト失敗の解析</div>
+        <div style="display:flex;gap:6px;align-items:center;">
+          <span id="llm-explain-status" style="font-size:11px;color:#8888aa;flex:1;">（テスト結果がありません）</span>
+          <button id="btn-llm-explain" class="btn btn-secondary" style="font-size:11px;padding:4px 12px;" disabled>解析</button>
+          <button id="btn-llm-explain-cancel" class="btn btn-danger" style="font-size:11px;padding:4px 10px;display:none;">■</button>
+        </div>
+        <div id="llm-explain-result" style="display:none;margin-top:8px;padding:10px;background:#1a1a2e;border-radius:6px;font-size:12px;color:#c9c9de;white-space:pre-wrap;max-height:180px;overflow-y:auto;"></div>
       </div>
     </div>
   </div>

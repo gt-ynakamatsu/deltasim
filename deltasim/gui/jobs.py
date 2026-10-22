@@ -555,8 +555,176 @@ async def run_console_job(
         except Exception:
             pass
         raise
+# LLM ジョブ（§18.3 GUI LLM ボタン）
+# ---------------------------------------------------------------------------
+
+async def run_llm_suggest_job(
+    job: Job,
+    text: str,
+    sv_files: Optional[List[str]] = None,
+    spec_file: Optional[str] = None,
+    cfg=None,
+    llm_fn=None,
+) -> None:
+    """コマンド提案ジョブ（suggest_command を非同期実行）。"""
+    from deltasim.gui.llm_session import store_suggestion
+
+    context = ""
+    if sv_files:
+        context += f"RTL ファイル: {', '.join(sv_files)}\n"
+    if spec_file:
+        context += f"スペック: {spec_file}\n"
+
+    def _suggest():
+        from deltasim.llm import suggest_command, load_llm_config
+        effective_cfg = cfg if cfg is not None else load_llm_config()
+        if effective_cfg is None:
+            raise RuntimeError("LLM が未設定です（E_LLM_NOT_CONFIGURED）")
+        return suggest_command(text, cfg=effective_cfg, llm_fn=llm_fn, context=context)
+
+    try:
+        sug = await asyncio.to_thread(_suggest)
+        sug_id = store_suggestion(sug)
+        job.result = {"suggestion_id": sug_id, "safe": sug.safe, "command_line": sug.command_line}
+        await job.queue.put({
+            "event": "finish",
+            "suggestion_id": sug_id,
+            "command_line": sug.command_line,
+            "safe": sug.safe,
+            "reason": sug.reason,
+            "write_paths": sug.write_paths,
+        })
+    except asyncio.CancelledError:
+        try:
+            job.queue.put_nowait({"event": "finish", "suggestion_id": None, "cancelled": True})
+        except Exception:
+            pass
+        raise
+    except RuntimeError as e:
+        code = "E_LLM_NOT_CONFIGURED" if "未設定" in str(e) else "E_LLM_CONNECT"
+        msg = str(e)
+        job.result = {"error": msg, "code": code}
+        await job.queue.put({"event": "error", "code": code, "message": msg})
+    except Exception as e:
+        code = "E_LLM_CONNECT" if "connect" in str(e).lower() or "timeout" in str(e).lower() else "E_LLM_UNKNOWN"
+        msg = str(e)
+        job.result = {"error": msg}
+        await job.queue.put({"event": "error", "code": code, "message": msg})
+    finally:
+        job.done = True
+
+
+async def run_llm_run_job(
+    job: Job,
+    suggestion_id: str,
+) -> None:
+    """提案IDを元に deltasim サブコマンドを subprocess で実行するジョブ。
+
+    セキュリティ: suggestion_id はサーバーが発行したもので、任意コマンドは受け付けない。
+    """
+    import subprocess, sys as _sys
+    from deltasim.gui.llm_session import get_suggestion
+
+    sug = get_suggestion(suggestion_id)
+    if sug is None:
+        await job.queue.put({"event": "error", "code": "E_LLM_NO_SUGGESTION",
+                             "message": f"提案が見つかりません: {suggestion_id}"})
+        job.done = True
+        return
+    if not sug.safe:
+        await job.queue.put({"event": "error", "code": "E_LLM_UNSAFE_CMD",
+                             "message": f"安全でないコマンドです: {sug.reason}"})
+        job.done = True
+        return
+
+    def _run():
+        argv = [_sys.executable, "-m", "deltasim"] + sug.args
+        proc = subprocess.run(argv, shell=False, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        return proc.returncode, proc.stdout, proc.stderr
+
+    try:
+        rc, out, err = await asyncio.to_thread(_run)
+        job.result = {"exit_code": rc, "stdout": out, "stderr": err}
+        await job.queue.put({"event": "finish", "exit_code": rc, "stdout": out, "stderr": err})
     except Exception as e:
         job.result = {"error": str(e)}
+        await job.queue.put({"event": "error", "message": str(e)})
+    finally:
+        job.done = True
+
+
+async def run_llm_draft_job(
+    job: Job,
+    sv_files: List[str],
+    top: Optional[str] = None,
+    cfg=None,
+    llm_fn=None,
+) -> None:
+    """YAML スペック下書き生成ジョブ（draft_spec を非同期実行）。"""
+
+    def _draft():
+        from deltasim.llm import draft_spec, load_llm_config
+        effective_cfg = cfg if cfg is not None else load_llm_config()
+        if effective_cfg is None:
+            raise RuntimeError("LLM が未設定です（E_LLM_NOT_CONFIGURED）")
+        return draft_spec(sv_files, top=top, cfg=effective_cfg, llm_fn=llm_fn)
+
+    try:
+        result = await asyncio.to_thread(_draft)
+        job.result = {"yaml_text": result.yaml_text, "valid": result.valid, "errors": result.errors}
+        await job.queue.put({
+            "event": "finish",
+            "yaml_text": result.yaml_text,
+            "valid": result.valid,
+            "errors": result.errors,
+        })
+    except asyncio.CancelledError:
+        try:
+            job.queue.put_nowait({"event": "finish", "yaml_text": "", "cancelled": True})
+        except Exception:
+            pass
+        raise
+    except RuntimeError as e:
+        code = "E_LLM_NOT_CONFIGURED" if "未設定" in str(e) else "E_LLM_CONNECT"
+        await job.queue.put({"event": "error", "code": code, "message": str(e)})
+    except Exception as e:
+        await job.queue.put({"event": "error", "message": str(e)})
+    finally:
+        job.done = True
+
+
+async def run_llm_explain_job(
+    job: Job,
+    result_data: dict,
+    sv_files: Optional[List[str]] = None,
+    spec_file: Optional[str] = None,
+    cfg=None,
+    llm_fn=None,
+) -> None:
+    """失敗解析ジョブ（explain_result を非同期実行）。"""
+
+    def _explain():
+        from deltasim.llm import explain_result, load_llm_config
+        effective_cfg = cfg if cfg is not None else load_llm_config()
+        if effective_cfg is None:
+            raise RuntimeError("LLM が未設定です（E_LLM_NOT_CONFIGURED）")
+        return explain_result(result_data, rtl_files=sv_files, spec_file=spec_file,
+                              cfg=effective_cfg, llm_fn=llm_fn)
+
+    try:
+        text = await asyncio.to_thread(_explain)
+        job.result = {"explanation": text}
+        await job.queue.put({"event": "finish", "explanation": text})
+    except asyncio.CancelledError:
+        try:
+            job.queue.put_nowait({"event": "finish", "explanation": "", "cancelled": True})
+        except Exception:
+            pass
+        raise
+    except RuntimeError as e:
+        code = "E_LLM_NOT_CONFIGURED" if "未設定" in str(e) else "E_LLM_CONNECT"
+        await job.queue.put({"event": "error", "code": code, "message": str(e)})
+    except Exception as e:
         await job.queue.put({"event": "error", "message": str(e)})
     finally:
         job.done = True

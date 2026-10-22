@@ -53,6 +53,13 @@ const state = {
   consoleHistIdx: -1,       // 履歴カーソル位置
   consoleRunning: false,    // コマンド実行中フラグ
   consoleCurrentJob: null,  // 実行中ジョブID
+  // §18.3 LLM
+  llmConfigured: false,
+  llmCurrentSuggestJob: null,
+  llmCurrentRunJob: null,
+  llmCurrentDraftJob: null,
+  llmCurrentExplainJob: null,
+  llmCurrentSuggestionId: null,  // サーバーが発行した提案 ID
 };
 
 // =========================================================================
@@ -181,6 +188,37 @@ const dom = {
   btnConsoleSend: $("btn-console-send"),
   btnConsoleStop: $("btn-console-stop"),
   consoleSessionIndicator: $("console-session-indicator"),
+  // §18.3 LLM パネル
+  btnLlmOpen: $("btn-llm-open"),
+  llmStatusDot: $("llm-status-dot"),
+  llmOverlay: $("llm-overlay"),
+  llmConfigBadge: $("llm-config-badge"),
+  llmNotConfiguredMsg: $("llm-not-configured-msg"),
+  btnLlmClose: $("btn-llm-close"),
+  llmSuggestSection: $("llm-suggest-section"),
+  llmDraftSection: $("llm-draft-section"),
+  llmExplainSection: $("llm-explain-section"),
+  llmAskInput: $("llm-ask-input"),
+  btnLlmAsk: $("btn-llm-ask"),
+  btnLlmAskCancel: $("btn-llm-ask-cancel"),
+  llmSuggestionArea: $("llm-suggestion-area"),
+  llmSuggestionCmd: $("llm-suggestion-cmd"),
+  llmSuggestionFiles: $("llm-suggestion-files"),
+  llmSuggestionReason: $("llm-suggestion-reason"),
+  btnLlmRun: $("btn-llm-run"),
+  btnLlmRunCancel: $("btn-llm-run-cancel"),
+  llmRunResult: $("llm-run-result"),
+  llmRunExitCode: $("llm-run-exit-code"),
+  llmRunStdout: $("llm-run-stdout"),
+  llmRunStderr: $("llm-run-stderr"),
+  llmDraftFilesLabel: $("llm-draft-files-label"),
+  btnLlmDraft: $("btn-llm-draft"),
+  btnLlmDraftCancel: $("btn-llm-draft-cancel"),
+  llmDraftErrors: $("llm-draft-errors"),
+  llmExplainStatus: $("llm-explain-status"),
+  btnLlmExplain: $("btn-llm-explain"),
+  btnLlmExplainCancel: $("btn-llm-explain-cancel"),
+  llmExplainResult: $("llm-explain-result"),
 };
 
 // =========================================================================
@@ -313,6 +351,21 @@ const api = {
   projectSave:  (path, data)        => apiFetch("POST", "/api/project", { path, ...data }),
   recentProjects: ()                => apiFetch("GET", "/api/recent-projects"),
   recentAdd:    (entry)             => apiFetch("POST", "/api/recent-projects/add", entry),
+  // §18.3 LLM API
+  llmStatus:    ()                  => apiFetch("GET", "/api/llm/status"),
+  llmSuggestStart: (text, svFiles, spec) => apiFetch("POST", "/api/llm/suggest/start", {
+    text, sv_files: svFiles ?? [], spec: spec ?? null,
+  }),
+  llmSuggestCancel: (jid)          => apiFetch("POST", `/api/llm/suggest/${jid}/cancel`, {}),
+  llmRunStart:  (suggestionId)     => apiFetch("POST", "/api/llm/run/start", { suggestion_id: suggestionId }),
+  llmDraftStart:(svFiles, top)     => apiFetch("POST", "/api/llm/draft-spec/start", { sv_files: svFiles, top: top ?? null }),
+  llmDraftCancel:(jid)             => apiFetch("POST", `/api/llm/draft-spec/${jid}/cancel`, {}),
+  llmExplainStart:(result, svFiles, spec) => apiFetch("POST", "/api/llm/explain/start", {
+    result, sv_files: svFiles ?? [], spec: spec ?? null,
+  }),
+  llmExplainCancel:(jid)           => apiFetch("POST", `/api/llm/explain/${jid}/cancel`, {}),
+  // §18.2 filelist API
+  filelistLoad: (path)             => apiFetch("POST", "/api/filelist/load", { path }),
   runStart:     (sv, top, cycles)   => apiFetch("POST", "/api/run/start", {
     sv_files: sv, top: top ?? null, cycles: cycles ?? 100,
   }),
@@ -1237,6 +1290,13 @@ function _renderCaseDetail(c) {
         onclick="rerunWithSeed(${c.seed})">↺ このシードで再実行 (seed=${c.seed})</button>
     </div>`;
   }
+  // §18.3 LLM: FAIL/ERROR の場合に「解析」ボタン
+  if ((c.status === "FAIL" || c.status === "ERROR") && state.llmConfigured) {
+    html += `<div style="padding:2px 4px;margin-bottom:4px;">
+      <button class="btn btn-secondary" style="font-size:10px;padding:2px 8px;color:#7c6af7;"
+        onclick="llmExplainCase()">🤖 失敗を解析</button>
+    </div>`;
+  }
 
   // message フィールド（あれば表示、なければ省略）
   if (c.message) {
@@ -1969,6 +2029,10 @@ async function confirmBrowserOpen() {
     state.project.specFile = { path: p };
     renderFileList();
     await openFileInEditor(p);
+  } else if (ext === ".f") {
+    // §18.2: .f ファイルは load_filelist を使い警告/エラーを表示する
+    await loadFilelistWithWarnings(p);
+    return;
   } else {
     await openFileInEditor(p);
   }
@@ -2437,6 +2501,307 @@ function escHtml(s) {
 }
 
 // =========================================================================
+// §18.3 LLM 連携
+// =========================================================================
+
+async function llmCheckStatus() {
+  try {
+    const data = await api.llmStatus();
+    state.llmConfigured = data.configured;
+    if (dom.llmStatusDot) {
+      dom.llmStatusDot.style.background = data.configured ? "#4ade80" : "#555566";
+      dom.llmStatusDot.title = data.configured ? `LLM: ${data.model}` : "LLM未設定";
+    }
+    return data;
+  } catch (e) {
+    state.llmConfigured = false;
+    return { configured: false };
+  }
+}
+
+async function openLlmPanel() {
+  if (!dom.llmOverlay) return;
+  dom.llmOverlay.style.display = "flex";
+
+  const status = await llmCheckStatus();
+  if (dom.llmConfigBadge) {
+    dom.llmConfigBadge.textContent = status.configured ? `✅ ${status.model}` : "❌ 未設定";
+    dom.llmConfigBadge.style.color = status.configured ? "#4ade80" : "#f87171";
+  }
+  if (dom.llmNotConfiguredMsg) {
+    dom.llmNotConfiguredMsg.style.display = status.configured ? "none" : "block";
+  }
+  const sections = [dom.llmSuggestSection, dom.llmDraftSection, dom.llmExplainSection];
+  sections.forEach(s => { if (s) s.style.opacity = status.configured ? "1" : "0.4"; });
+
+  // 状態を更新
+  const svPaths = state.project.svFiles.map(f => f.path);
+  if (dom.llmDraftFilesLabel) {
+    dom.llmDraftFilesLabel.textContent = svPaths.length
+      ? svPaths.map(p => p.split(/[\\/]/).pop()).join(", ")
+      : "（SV ファイルを読み込んでください）";
+  }
+  const hasResult = !!state.testResult;
+  const hasFail = hasResult && state.testResult.summary?.fail > 0;
+  if (dom.llmExplainStatus) {
+    dom.llmExplainStatus.textContent = hasResult
+      ? (hasFail ? `FAIL ${state.testResult.summary.fail}件 — 解析可能` : "失敗なし（解析不要）")
+      : "（テスト結果がありません）";
+  }
+  if (dom.btnLlmExplain) dom.btnLlmExplain.disabled = !hasResult;
+}
+
+// コマンド提案
+async function llmAsk() {
+  if (!state.llmConfigured) return;
+  const text = dom.llmAskInput?.value?.trim();
+  if (!text) return;
+
+  if (dom.btnLlmAsk) dom.btnLlmAsk.disabled = true;
+  if (dom.btnLlmAskCancel) dom.btnLlmAskCancel.style.display = "";
+  if (dom.llmSuggestionArea) dom.llmSuggestionArea.style.display = "none";
+  if (dom.llmRunResult) dom.llmRunResult.style.display = "none";
+
+  try {
+    const svPaths = state.project.svFiles.map(f => f.path);
+    const { job_id } = await api.llmSuggestStart(text, svPaths, state.project.specFile?.path);
+    state.llmCurrentSuggestJob = job_id;
+    const result = await _llmConsumeSSE(`/api/llm/suggest/${job_id}/events`);
+
+    if (result.event === "finish" && result.suggestion_id) {
+      state.llmCurrentSuggestionId = result.suggestion_id;
+      _llmShowSuggestion(result);
+    } else if (result.event === "error") {
+      _llmShowError(result.code, result.message);
+    }
+  } catch (e) {
+    log(`LLM エラー: ${e.message}`, "log-error");
+  } finally {
+    state.llmCurrentSuggestJob = null;
+    if (dom.btnLlmAsk) dom.btnLlmAsk.disabled = false;
+    if (dom.btnLlmAskCancel) dom.btnLlmAskCancel.style.display = "none";
+  }
+}
+
+function _llmShowSuggestion(data) {
+  if (!dom.llmSuggestionArea) return;
+  dom.llmSuggestionArea.style.display = "block";
+  if (dom.llmSuggestionCmd) dom.llmSuggestionCmd.textContent = data.command_line || "";
+  if (dom.llmSuggestionFiles) {
+    const files = data.write_paths ?? [];
+    dom.llmSuggestionFiles.textContent = files.length
+      ? `書き込みファイル: ${files.join(", ")}`
+      : "";
+  }
+  const safe = data.safe !== false;
+  if (dom.llmSuggestionReason) {
+    dom.llmSuggestionReason.style.display = safe ? "none" : "block";
+    dom.llmSuggestionReason.textContent = safe ? "" : `安全でないコマンドです: ${data.reason || ""}`;
+  }
+  if (dom.btnLlmRun) {
+    dom.btnLlmRun.disabled = !safe;
+    dom.btnLlmRun.title = safe ? "" : data.reason;
+  }
+}
+
+function _llmShowError(code, message) {
+  const labels = {
+    "E_LLM_NOT_CONFIGURED": "LLM が未設定です",
+    "E_LLM_CONNECT": "LLM サーバーへの接続に失敗しました",
+    "E_LLM_UNSAFE_CMD": "安全でないコマンドです",
+  };
+  const label = labels[code] || "LLM エラー";
+  log(`${label}: ${message}`, "log-error");
+}
+
+// 提案を実行（suggestion_id のみ受け付け）
+async function llmRunSuggestion() {
+  const sid = state.llmCurrentSuggestionId;
+  if (!sid) return;
+
+  if (dom.btnLlmRun) dom.btnLlmRun.disabled = true;
+  if (dom.btnLlmRunCancel) dom.btnLlmRunCancel.style.display = "";
+  if (dom.llmRunResult) dom.llmRunResult.style.display = "none";
+
+  try {
+    const { job_id } = await api.llmRunStart(sid);
+    state.llmCurrentRunJob = job_id;
+    const result = await _llmConsumeSSE(`/api/llm/run/${job_id}/events`);
+
+    if (dom.llmRunResult) dom.llmRunResult.style.display = "block";
+    if (dom.llmRunExitCode) dom.llmRunExitCode.textContent = `終了コード: ${result.exit_code ?? "?"}`;
+    if (dom.llmRunStdout) dom.llmRunStdout.textContent = result.stdout ?? "";
+    if (dom.llmRunStderr) dom.llmRunStderr.textContent = result.stderr ?? "";
+  } catch (e) {
+    if (e.message?.includes("404") || e.message?.includes("400")) {
+      log(`LLM 実行エラー: ${e.message}`, "log-error");
+    } else {
+      log(`LLM 実行エラー: ${e.message}`, "log-error");
+    }
+  } finally {
+    state.llmCurrentRunJob = null;
+    if (dom.btnLlmRun) dom.btnLlmRun.disabled = false;
+    if (dom.btnLlmRunCancel) dom.btnLlmRunCancel.style.display = "none";
+  }
+}
+
+// YAML 下書き生成
+async function llmDraftSpec() {
+  if (!state.llmConfigured) return;
+  const svPaths = state.project.svFiles.map(f => f.path);
+  if (!svPaths.length) { log("SV ファイルを選択してください", "log-error"); return; }
+
+  if (dom.btnLlmDraft) dom.btnLlmDraft.disabled = true;
+  if (dom.btnLlmDraftCancel) dom.btnLlmDraftCancel.style.display = "";
+  if (dom.llmDraftErrors) dom.llmDraftErrors.style.display = "none";
+
+  try {
+    const { job_id } = await api.llmDraftStart(svPaths, state.project.top);
+    state.llmCurrentDraftJob = job_id;
+    const result = await _llmConsumeSSE(`/api/llm/draft-spec/${job_id}/events`);
+
+    if (result.yaml_text) {
+      setEditorContent(result.yaml_text, "yaml");
+      log(`✓ LLM が YAML スペックの下書きを生成しました`, "log-info");
+      if (!result.valid && dom.llmDraftErrors) {
+        dom.llmDraftErrors.style.display = "block";
+        dom.llmDraftErrors.textContent = `⚠ 検証警告: ${(result.errors ?? []).join("; ")}`;
+      }
+      // 生成保存ダイアログを開く
+      state.genResult = { module: state.project.top || "module", spec_yaml: result.yaml_text };
+      openGenSaveDialog(state.genResult);
+    } else if (result.event === "error") {
+      _llmShowError(result.code, result.message);
+    }
+  } catch (e) {
+    log(`LLM 下書きエラー: ${e.message}`, "log-error");
+  } finally {
+    state.llmCurrentDraftJob = null;
+    if (dom.btnLlmDraft) dom.btnLlmDraft.disabled = false;
+    if (dom.btnLlmDraftCancel) dom.btnLlmDraftCancel.style.display = "none";
+  }
+}
+
+// 失敗の解析（LLM パネルから / ケース詳細パネルから）
+async function llmExplainCase() {
+  if (!state.llmConfigured || !state.testResult) return;
+  openLlmPanel();
+  await llmExplain();
+}
+
+async function llmExplain() {
+  if (!state.llmConfigured || !state.testResult) return;
+
+  if (dom.btnLlmExplain) dom.btnLlmExplain.disabled = true;
+  if (dom.btnLlmExplainCancel) dom.btnLlmExplainCancel.style.display = "";
+  if (dom.llmExplainResult) {
+    dom.llmExplainResult.style.display = "none";
+    dom.llmExplainResult.textContent = "";
+  }
+
+  const svPaths = state.project.svFiles.map(f => f.path);
+  const spec = state.project.specFile?.path ?? null;
+
+  try {
+    const { job_id } = await api.llmExplainStart(state.testResult, svPaths, spec);
+    state.llmCurrentExplainJob = job_id;
+    const result = await _llmConsumeSSE(`/api/llm/explain/${job_id}/events`);
+
+    if (result.explanation != null && dom.llmExplainResult) {
+      dom.llmExplainResult.style.display = "block";
+      // セキュリティ: textContent を使い innerHTML には入れない
+      dom.llmExplainResult.textContent = result.explanation;
+    } else if (result.event === "error") {
+      _llmShowError(result.code, result.message);
+    }
+  } catch (e) {
+    log(`LLM 解析エラー: ${e.message}`, "log-error");
+  } finally {
+    state.llmCurrentExplainJob = null;
+    if (dom.btnLlmExplain) dom.btnLlmExplain.disabled = !state.testResult;
+    if (dom.btnLlmExplainCancel) dom.btnLlmExplainCancel.style.display = "none";
+  }
+}
+
+async function _llmConsumeSSE(url) {
+  return new Promise((resolve, reject) => {
+    const es = new EventSource(url);
+    es.onmessage = e => {
+      try {
+        const ev = JSON.parse(e.data);
+        const evType = ev.event ?? ev.type;
+        if (evType === "finish" || evType === "error") {
+          es.close();
+          resolve(ev);
+        }
+      } catch (_) {}
+    };
+    es.onerror = () => { es.close(); resolve({ event: "error", message: "SSE エラー" }); };
+  });
+}
+
+// =========================================================================
+// §18.2 .f ファイルリスト読み込み（警告表示）
+// =========================================================================
+
+async function loadFilelistWithWarnings(path) {
+  try {
+    const data = await api.filelistLoad(path);
+    // SV ファイルを追加
+    const newFiles = data.files ?? [];
+    const existing = new Set(state.project.svFiles.map(f => f.path));
+    for (const f of newFiles) {
+      if (!existing.has(f)) {
+        state.project.svFiles.push({ path: f });
+        existing.add(f);
+      }
+    }
+    renderFileList();
+    if (newFiles.length) await loadModule(newFiles, state.project.top);
+    log(`✓ .f ファイル読み込み: ${newFiles.length} ファイル`, "log-info");
+
+    // 警告・エラーを既存バナーに表示
+    const warnings = data.warnings ?? [];
+    const errors = data.errors ?? [];
+    if (warnings.length || errors.length) {
+      _showFilelistBanner([...warnings, ...errors]);
+    }
+    return data;
+  } catch (e) {
+    log(`.f ファイル読み込みエラー: ${e.message}`, "log-error");
+    return null;
+  }
+}
+
+function _showFilelistBanner(items) {
+  // 既存の警告バナー構造を再利用
+  const existingBanner = document.getElementById("filelist-warnings-banner");
+  if (existingBanner) existingBanner.remove();
+
+  if (!items.length) return;
+  const banner = document.createElement("div");
+  banner.id = "filelist-warnings-banner";
+  banner.className = "top-warnings-block";
+  banner.innerHTML = items.map(w => {
+    const sev = w.severity ?? "warning";
+    const code = escHtml(w.code ?? "");
+    const msg = escHtml(w.message ?? "");
+    const loc = w.file ? ` (${escHtml(w.file)}${w.line > 0 ? `:${w.line}` : ""})` : "";
+    const icon = sev === "error" ? "❌" : "⚠";
+    return `<div class="top-warn-item">
+      <span class="warn-icon">${icon}</span>
+      <span class="warn-code">[${code}]</span>
+      <span class="warn-msg">${msg}${escHtml(loc)}</span>
+    </div>`;
+  }).join("");
+
+  const resultPanel = document.getElementById("result-panel");
+  if (resultPanel) {
+    resultPanel.insertBefore(banner, resultPanel.firstChild);
+  }
+}
+
+// =========================================================================
 // イベント接続
 // =========================================================================
 
@@ -2525,6 +2890,24 @@ if (dom.btnConsoleToggle) dom.btnConsoleToggle.addEventListener("click", toggleC
 if (dom.btnConsoleSend)   dom.btnConsoleSend.addEventListener("click", consoleSendCommand);
 if (dom.btnConsoleStop)   dom.btnConsoleStop.addEventListener("click", consoleStop);
 if (dom.consoleInput)     dom.consoleInput.addEventListener("keydown", _consoleHandleKeydown);
+// §18.3 LLM パネルイベント
+if (dom.btnLlmOpen) dom.btnLlmOpen.addEventListener("click", openLlmPanel);
+if (dom.btnLlmClose) dom.btnLlmClose.addEventListener("click", () => { dom.llmOverlay.style.display = "none"; });
+if (dom.llmOverlay) dom.llmOverlay.addEventListener("click", e => { if (e.target === dom.llmOverlay) dom.llmOverlay.style.display = "none"; });
+if (dom.btnLlmAsk) dom.btnLlmAsk.addEventListener("click", llmAsk);
+if (dom.llmAskInput) dom.llmAskInput.addEventListener("keydown", e => { if (e.key === "Enter") llmAsk(); });
+if (dom.btnLlmAskCancel) dom.btnLlmAskCancel.addEventListener("click", () => {
+  if (state.llmCurrentSuggestJob) api.llmSuggestCancel(state.llmCurrentSuggestJob).catch(() => {});
+});
+if (dom.btnLlmRun) dom.btnLlmRun.addEventListener("click", llmRunSuggestion);
+if (dom.btnLlmDraft) dom.btnLlmDraft.addEventListener("click", llmDraftSpec);
+if (dom.btnLlmDraftCancel) dom.btnLlmDraftCancel.addEventListener("click", () => {
+  if (state.llmCurrentDraftJob) api.llmDraftCancel(state.llmCurrentDraftJob).catch(() => {});
+});
+if (dom.btnLlmExplain) dom.btnLlmExplain.addEventListener("click", llmExplain);
+if (dom.btnLlmExplainCancel) dom.btnLlmExplainCancel.addEventListener("click", () => {
+  if (state.llmCurrentExplainJob) api.llmExplainCancel(state.llmCurrentExplainJob).catch(() => {});
+});
 
 // =========================================================================
 // 初期化
@@ -2534,9 +2917,9 @@ if (dom.consoleInput)     dom.consoleInput.addEventListener("keydown", _consoleH
   initEditor();
   setStatus("ready", "idle");
   dom.btnStop.disabled = true;
-  log("deltasim GUI v3 起動（M5 API + §12/§18.4 対応）", "log-info");
+  log("deltasim GUI v3 起動（M5 API + §12/§18.3/§18.4 対応）", "log-info");
   log("サンプルを読み込むか、「📂 開く」でファイルを選択してください。", "log-line");
-  await Promise.all([loadExamplesList(), loadRecentProjects()]);
+  await Promise.all([loadExamplesList(), loadRecentProjects(), llmCheckStatus()]);
 
   // CLI 引数からの初期プロジェクト（環境変数経由）
   try {
