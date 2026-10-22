@@ -7,6 +7,23 @@
 
 ## [0.3.0+] — 開発中（§18.2 -f ファイルリスト + §18 対話デバッグ）
 
+### 修正（hotfix2: always_comb / always_ff 内 while ループが E_INTERNAL になる退行）
+
+- **`always_comb` 内の while ループが `E_INTERNAL` を返す退行を修正**
+  - 症状: `deltasim test --json` の結果が `code=E_INTERNAL` になる（正しくは `E_LOOP_LIMIT`）
+  - 原因: `SimEngine.__init__` 内の `_eval_comb_loop()` が `LoopLimitError` を投げた際、
+    `__init__` が `DeltaLimitError` しか捕捉していなかった。
+    `LoopLimitError` が `__init__` を抜けて `test_cmd` の `except Exception: E_INTERNAL` に捕まっていた。
+  - 修正箇所:
+    1. `SimEngine.__init__`: `except (DeltaLimitError, LoopLimitError): pass` に拡張
+    2. `_run_one_case`: `engine = SimEngine(...)` 構築を `try-except (DeltaLimitError, LoopLimitError)` でラップ
+    3. `Simulator.__init__`: 追加の `_eval_comb_loop()` 呼び出しを同様にラップ
+    4. `run()` API: `engine = SimEngine(...)` を同様にラップ
+  - 対象ケース: `always_comb`・`always_ff`・`initial` の3箇所 × while ループ（全部 E_LOOP_LIMIT）
+  - `always_ff` の E_DELTA_LIMIT は構造上発生しない（デルタサイクルは組み合わせループのみ）
+- **退行テスト追加** (`tests/test_error_codes.py`):
+  - wloop（ユーザー報告の再現コード）/ always_comb / always_ff × CLI + API = 6件追加
+
 ### 修正（hotfix: E_LOOP_LIMIT 退行）
 
 - **`initial` ブロック内の無限 while ループが `E_INTERNAL` を返す退行を修正**

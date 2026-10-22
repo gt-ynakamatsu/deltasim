@@ -1442,10 +1442,11 @@ class SimEngine:
         self._dumpfile_path: Optional[str] = None
 
         # §18.7: 初期コンビナショナル評価（assign/always_comb の初期値を解決）
-        # DeltaLimitError はコンビナショナルループを示す—run() 時に改めて検出される
+        # DeltaLimitError / LoopLimitError はコンビナショナルループを示す。
+        # __init__ ではスキップして run() 時のメインループ内で再度検出される。
         try:
             self._eval_comb_loop()
-        except DeltaLimitError:
+        except (DeltaLimitError, LoopLimitError):
             pass
 
     # ------------------------------------------------------------------

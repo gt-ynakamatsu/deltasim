@@ -44,13 +44,13 @@ def _write(tmp: Path, name: str, content: str) -> str:
     return str(p)
 
 
-def _cli_test(sv_p: str, spec_p: str, tmp: Path, extra_args=()) -> dict:
+def _cli_test(sv_p: str, spec_p: str, tmp: Path, extra_args=(), timeout: int = 30) -> dict:
     """CLI で `deltasim test --json` を実行して JSON 結果 dict を返す。"""
     json_p = str(tmp / "out.json")
     subprocess.run(
         [sys.executable, "-m", "deltasim", "test",
          str(sv_p), "--spec", str(spec_p), "--json", json_p, *extra_args],
-        capture_output=True, text=True, encoding="utf-8", timeout=30,
+        capture_output=True, text=True, encoding="utf-8", timeout=timeout,
     )
     # Windows では open() のデフォルトエンコーディングが cp932/cp1252 になるため
     # 明示的に utf-8 を指定する
@@ -184,6 +184,269 @@ endmodule
         result = _api_test(sv_p, spec_p)
         codes = _all_codes(result)
         assert "E_LOOP_LIMIT" in codes
+        assert "E_INTERNAL" not in codes
+
+
+# ===========================================================================
+# 1b. E_LOOP_LIMIT 追加テスト（§18.9 退行修正: always_comb / always_ff / wloop）
+# ===========================================================================
+
+# wloop: 再現コードをそのまま使う（ユーザー報告の退行ケース）
+_WLOOP_SV = """\
+module wloop(input logic clk, input logic a, output logic [31:0] y);
+  logic [31:0] count;
+  always_comb begin
+    count = 0;
+    while (count < 32'hFFFFFFFF) count = count + 1;
+    y = count & {32{a}};
+  end
+endmodule
+"""
+# max_loop は YAML キーでなく ds.test() / --max-loop で渡す
+_WLOOP_SPEC = {
+    "version": 1, "top": "wloop",
+    "clock": {"signal": "clk", "period_ns": 10},
+    "reset": {"signal": "rst", "active_low": False, "duration_cycles": 1},
+    "sim": {"cycles": 2},
+    "cases": [{"name": "t", "expected": [{"at": 1, "check": {"y": 0}}]}],
+}
+
+_ALWAYS_COMB_WHILE_SV = """\
+module m(input logic clk, input logic a, output logic [31:0] y);
+  logic [31:0] cnt;
+  always_comb begin
+    cnt = 0;
+    while (cnt < 32'hFFFFFFF) cnt = cnt + 1;
+    y = cnt;
+  end
+endmodule
+"""
+
+_ALWAYS_FF_WHILE_SV = """\
+module m(input logic clk, output logic [31:0] y);
+  integer i;
+  always_ff @(posedge clk) begin
+    i = 0;
+    while (i < 2000000) begin i = i + 1; end
+    y <= i[31:0];
+  end
+endmodule
+"""
+
+# always_comb self-reference → E_DELTA_LIMIT
+_ALWAYS_COMB_SELF_SV = """\
+module m(input logic clk, output logic y);
+  always_comb y = ~y;
+endmodule
+"""
+
+_LOOP_SPEC_TMPL = {
+    "version": 1,
+    "clock": {"signal": "clk", "period_ns": 10},
+    "reset": {"signal": "rst", "active_low": False, "duration_cycles": 1},
+    "sim": {"cycles": 2},
+    "cases": [{"name": "t", "expected": [{"at": 1, "check": {"y": 0}}]}],
+}
+# CLI 引数: --max-loop 10 でループ上限を小さくし Windows CI でもタイムアウトしない
+_LOOP_MAX_LOOP_ARGS = ("--max-loop", "10")
+
+
+class TestLoopLimitAlwaysComb:
+    """always_comb 内の while ループが E_LOOP_LIMIT を返すこと（新退行）"""
+
+    def test_wloop_cli(self, tmp_path):
+        """CLI: wloop（ユーザー報告の再現コード）→ E_LOOP_LIMIT  --max-loop 10 で高速化"""
+        sv_p = _write(tmp_path, "wloop.sv", _WLOOP_SV)
+        spec_p = str(tmp_path / "spec.yaml")
+        with open(spec_p, "w", encoding="utf-8") as f:
+            yaml.dump(_WLOOP_SPEC, f)
+        out = _cli_test(sv_p, spec_p, tmp_path, extra_args=_LOOP_MAX_LOOP_ARGS)
+        codes = _all_codes(out)
+        assert "E_LOOP_LIMIT" in codes, \
+            f"E_LOOP_LIMIT expected (wloop CLI), got: {codes}"
+        assert "E_INTERNAL" not in codes
+
+    def test_wloop_api(self, tmp_path):
+        """API: wloop → E_LOOP_LIMIT  max_loop=10 で高速化"""
+        sv_p = _write(tmp_path, "wloop.sv", _WLOOP_SV)
+        spec_p = str(tmp_path / "spec.yaml")
+        with open(spec_p, "w", encoding="utf-8") as f:
+            yaml.dump(_WLOOP_SPEC, f)
+        result = _api_test(sv_p, spec_p, max_loop=10)
+        codes = _all_codes(result)
+        assert "E_LOOP_LIMIT" in codes, \
+            f"E_LOOP_LIMIT expected (wloop API), got: {codes}"
+        assert "E_INTERNAL" not in codes
+
+    def test_always_comb_while_cli(self, tmp_path):
+        """CLI: always_comb 内 while → E_LOOP_LIMIT"""
+        sv_p = _write(tmp_path, "m.sv", _ALWAYS_COMB_WHILE_SV)
+        spec = {**_LOOP_SPEC_TMPL, "top": "m"}
+        spec_p = str(tmp_path / "spec.yaml")
+        with open(spec_p, "w", encoding="utf-8") as f:
+            yaml.dump(spec, f)
+        out = _cli_test(sv_p, spec_p, tmp_path, extra_args=_LOOP_MAX_LOOP_ARGS)
+        codes = _all_codes(out)
+        assert "E_LOOP_LIMIT" in codes
+        assert "E_INTERNAL" not in codes
+
+    def test_always_comb_while_api(self, tmp_path):
+        """API: always_comb 内 while → E_LOOP_LIMIT"""
+        sv_p = _write(tmp_path, "m.sv", _ALWAYS_COMB_WHILE_SV)
+        spec = {**_LOOP_SPEC_TMPL, "top": "m"}
+        spec_p = str(tmp_path / "spec.yaml")
+        with open(spec_p, "w", encoding="utf-8") as f:
+            yaml.dump(spec, f)
+        result = _api_test(sv_p, spec_p, max_loop=10)
+        codes = _all_codes(result)
+        assert "E_LOOP_LIMIT" in codes
+        assert "E_INTERNAL" not in codes
+
+    def test_always_ff_while_cli(self, tmp_path):
+        """CLI: always_ff 内 while → E_LOOP_LIMIT"""
+        sv_p = _write(tmp_path, "m.sv", _ALWAYS_FF_WHILE_SV)
+        spec = {**_LOOP_SPEC_TMPL, "top": "m"}
+        spec_p = str(tmp_path / "spec.yaml")
+        with open(spec_p, "w", encoding="utf-8") as f:
+            yaml.dump(spec, f)
+        out = _cli_test(sv_p, spec_p, tmp_path, extra_args=_LOOP_MAX_LOOP_ARGS)
+        codes = _all_codes(out)
+        assert "E_LOOP_LIMIT" in codes
+        assert "E_INTERNAL" not in codes
+
+    def test_always_ff_while_api(self, tmp_path):
+        """API: always_ff 内 while → E_LOOP_LIMIT"""
+        sv_p = _write(tmp_path, "m.sv", _ALWAYS_FF_WHILE_SV)
+        spec = {**_LOOP_SPEC_TMPL, "top": "m"}
+        spec_p = str(tmp_path / "spec.yaml")
+        with open(spec_p, "w", encoding="utf-8") as f:
+            yaml.dump(spec, f)
+        result = _api_test(sv_p, spec_p, max_loop=10)
+        codes = _all_codes(result)
+        assert "E_LOOP_LIMIT" in codes
+        assert "E_INTERNAL" not in codes
+
+
+# ===========================================================================
+# 1c. always_comb E_DELTA_LIMIT（自己依存ループ）とデフォルト max_loop のテスト
+# ===========================================================================
+
+class TestAlwaysCombDeltaLimit:
+    """always_comb の自己参照ループが E_DELTA_LIMIT を返すこと（CLI + API）。
+    初期ブロックは delta-cycle メカニズムに参加しないため initial → E_DELTA_LIMIT は不可能:
+    DeltaLimitError は _eval_comb_loop() 内の assign/always_comb 収束ループでのみ発生する。
+    """
+
+    _DELTA_SPEC = {
+        "version": 1, "top": "m",
+        "clock": {"signal": "clk", "period_ns": 10},
+        "reset": {"signal": "rst", "active_low": False, "duration_cycles": 1},
+        "sim": {"cycles": 1},
+        "cases": [{"name": "t", "expected": [{"at": 1, "check": {"y": 0}}]}],
+    }
+
+    def test_always_comb_self_ref_cli(self, tmp_path):
+        """CLI: always_comb y = ~y（自己参照） → E_DELTA_LIMIT"""
+        sv_p = _write(tmp_path, "m.sv", _ALWAYS_COMB_SELF_SV)
+        spec_p = str(tmp_path / "spec.yaml")
+        with open(spec_p, "w", encoding="utf-8") as f:
+            yaml.dump(self._DELTA_SPEC, f)
+        out = _cli_test(sv_p, spec_p, tmp_path)
+        codes = _all_codes(out)
+        assert "E_DELTA_LIMIT" in codes, \
+            f"E_DELTA_LIMIT expected (always_comb self-ref CLI), got: {codes}"
+        assert "E_INTERNAL" not in codes
+
+    def test_always_comb_self_ref_api(self, tmp_path):
+        """API: always_comb y = ~y（自己参照） → E_DELTA_LIMIT"""
+        sv_p = _write(tmp_path, "m.sv", _ALWAYS_COMB_SELF_SV)
+        spec_p = str(tmp_path / "spec.yaml")
+        with open(spec_p, "w", encoding="utf-8") as f:
+            yaml.dump(self._DELTA_SPEC, f)
+        result = _api_test(sv_p, spec_p)
+        codes = _all_codes(result)
+        assert "E_DELTA_LIMIT" in codes
+        assert "E_INTERNAL" not in codes
+
+
+class TestWloopDefaultMaxLoop:
+    """wloop をデフォルト max_loop（1M）で実行してもタイムアウトせず E_LOOP_LIMIT を返すこと。
+
+    SimEngine.__init__ で LoopLimitError を pass した後、
+    main try の _eval_comb_loop() で必ず再検出されることを担保する。
+
+    Windows では 1M×2 反復が遅い（~30s）ためスキップ。
+    学習アプリは Ubuntu CI と同等の環境で動作するため Ubuntu 版で十分。
+    """
+
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="wloop with default max_loop (2M iterations) exceeds 30s on Windows Python"
+    )
+    def test_wloop_default_max_loop_cli(self, tmp_path):
+        """CLI (Ubuntu): wloop をデフォルト max_loop で → E_LOOP_LIMIT（タイムアウトなし）"""
+        sv_p = _write(tmp_path, "wloop.sv", _WLOOP_SV)
+        spec_p = str(tmp_path / "spec.yaml")
+        with open(spec_p, "w", encoding="utf-8") as f:
+            yaml.dump(_WLOOP_SPEC, f)
+        # --max-loop なし = デフォルト 1,000,000
+        out = _cli_test(sv_p, spec_p, tmp_path, timeout=90)
+        codes = _all_codes(out)
+        assert "E_LOOP_LIMIT" in codes, \
+            f"E_LOOP_LIMIT expected (default max_loop CLI), got: {codes}"
+        assert "E_INTERNAL" not in codes
+
+
+# ===========================================================================
+# 1d. LoopLimitError が pass 後に必ず再検出されることの担保テスト
+# ===========================================================================
+
+class TestLoopLimitRedetection:
+    """SimEngine.__init__ と Simulator.__init__ が LoopLimitError を pass した後、
+    run()/step() 系で必ず検出されることを担保するテスト。
+    cycles=0 でも検出できること（メインループ前の _eval_comb_loop で検出）。
+    """
+
+    def test_ds_run_wloop_api(self, tmp_path):
+        """ds.run() で wloop → E_LOOP_LIMIT（run() 内の try で検出）"""
+        sv_p = _write(tmp_path, "wloop.sv", _WLOOP_SV)
+        result = ds.run([sv_p], cycles=2, max_loop=10)
+        codes = [e.code for e in result.errors]
+        assert "E_LOOP_LIMIT" in codes, \
+            f"E_LOOP_LIMIT expected from ds.run(), got: {codes}"
+        assert "E_INTERNAL" not in codes
+
+    def test_simulator_step_wloop(self, tmp_path):
+        """Simulator.step() で wloop → LoopLimitError が伝播（GUI 入口の確認）。
+        Simulator は __init__ で LoopLimitError を pass するが、step() 内で再検出される。
+        """
+        from deltasim.sim.engine import LoopLimitError as _LLE
+        sv_p = _write(tmp_path, "wloop.sv", _WLOOP_SV)
+        sim = ds.Simulator([sv_p])
+        sim._engine.max_loop = 10  # 高速化
+        # step() → step_to_ns() → _run_cycle() → _eval_comb_loop() → LoopLimitError
+        with pytest.raises(_LLE) as exc_info:
+            sim.step(2)
+        assert "E_LOOP_LIMIT" in str(exc_info.value), \
+            f"LoopLimitError expected: {exc_info.value}"
+
+    def test_cycles_zero_still_detects_wloop(self, tmp_path):
+        """cycles=0 でも wloop は検出される（メインループ前の初期 _eval_comb_loop で検出）"""
+        sv_p = _write(tmp_path, "wloop.sv", _WLOOP_SV)
+        spec = {
+            "version": 1, "top": "wloop",
+            "clock": {"signal": "clk", "period_ns": 10},
+            "reset": {"signal": "rst", "active_low": False, "duration_cycles": 1},
+            "sim": {"cycles": 0},
+            "cases": [{"name": "t", "expected": []}],  # no checks
+        }
+        spec_p = str(tmp_path / "spec.yaml")
+        with open(spec_p, "w", encoding="utf-8") as f:
+            yaml.dump(spec, f)
+        result = _api_test(sv_p, spec_p, max_loop=10)
+        codes = _all_codes(result)
+        assert "E_LOOP_LIMIT" in codes, \
+            f"E_LOOP_LIMIT expected even with cycles=0, got: {codes}"
         assert "E_INTERNAL" not in codes
 
 
@@ -621,7 +884,48 @@ endmodule
         "E_CONSTRAINT_EXPR",
         id="E_CONSTRAINT_EXPR",
     ),
+    # always_comb 自己参照 → E_DELTA_LIMIT
+    pytest.param(
+        "E_DELTA_LIMIT_always_comb",
+        _ALWAYS_COMB_SELF_SV,
+        {"version": 1, "top": "m",
+         "clock": {"signal": "clk", "period_ns": 10},
+         "reset": {"signal": "rst", "active_low": False, "duration_cycles": 1},
+         "sim": {"cycles": 1},
+         "cases": [{"name": "t", "expected": [{"at": 1, "check": {"y": 0}}]}]},
+        "E_DELTA_LIMIT",
+        id="E_DELTA_LIMIT_always_comb",
+    ),
+    # wloop (always_comb while) — 新退行ケース（max_loop=10 で高速化）
+    pytest.param(
+        "E_LOOP_LIMIT_always_comb_wloop",
+        _WLOOP_SV,
+        _WLOOP_SPEC,
+        "E_LOOP_LIMIT",
+        id="E_LOOP_LIMIT_always_comb_wloop",
+    ),
+    pytest.param(
+        "E_LOOP_LIMIT_always_comb",
+        _ALWAYS_COMB_WHILE_SV,
+        {**_LOOP_SPEC_TMPL, "top": "m"},
+        "E_LOOP_LIMIT",
+        id="E_LOOP_LIMIT_always_comb",
+    ),
+    pytest.param(
+        "E_LOOP_LIMIT_always_ff",
+        _ALWAYS_FF_WHILE_SV,
+        {**_LOOP_SPEC_TMPL, "top": "m"},
+        "E_LOOP_LIMIT",
+        id="E_LOOP_LIMIT_always_ff",
+    ),
 ]
+
+# max_loop=10 を必要とするパラメータ化テスト ID のセット
+_NEEDS_SMALL_MAX_LOOP = frozenset({
+    "E_LOOP_LIMIT_always_comb_wloop",
+    "E_LOOP_LIMIT_always_comb",
+    "E_LOOP_LIMIT_always_ff",
+})
 
 
 @pytest.mark.parametrize("name,sv_code,spec_dict,expected_code", _PARAM_CASES)
@@ -631,15 +935,16 @@ def test_error_code_cli(name, sv_code, spec_dict, expected_code, tmp_path):
     Path(sv_p).write_text(sv_code, encoding="utf-8")
     spec_p = str(tmp_path / "spec.yaml")
 
-    extra = {}
+    extra_args: list = []
     if expected_code == "E_NO_CASE":
-        extra["extra_args"] = ["--case", "nonexistent_case"]
+        extra_args = ["--case", "nonexistent_case"]
+    if name in _NEEDS_SMALL_MAX_LOOP:
+        extra_args = list(extra_args) + list(_LOOP_MAX_LOOP_ARGS)
 
     with open(spec_p, "w", encoding="utf-8") as f:
         yaml.dump(spec_dict, f, allow_unicode=True)
 
-    out = _cli_test(sv_p, spec_p, tmp_path,
-                    extra_args=extra.get("extra_args", ()))
+    out = _cli_test(sv_p, spec_p, tmp_path, extra_args=tuple(extra_args))
     codes = _all_codes(out)
 
     assert "E_INTERNAL" not in codes, \
@@ -660,6 +965,8 @@ def test_error_code_api(name, sv_code, spec_dict, expected_code, tmp_path):
     kw = {}
     if expected_code == "E_NO_CASE":
         kw["filter_cases"] = ["nonexistent_case"]
+    if name in _NEEDS_SMALL_MAX_LOOP:
+        kw["max_loop"] = 10
 
     result = _api_test(sv_p, spec_p, **kw)
     codes = _all_codes(result)
