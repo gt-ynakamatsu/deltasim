@@ -111,13 +111,20 @@ when {rst_n == 0} {puts "reset asserted!"}
 
 ---
 
-## 行ブレークポイントの動作方針（§18.1.1 実装メモ）
+## 行ブレークポイントの動作方針（§18.1.1 確定）
 
-### 停止タイミング: deferred（その時刻の処理を完了してから停止）
+### 停止タイミング: deferred（その時刻の処理をすべて終えてから停止）
 
 行ブレークポイント (`bp file:line`) は、その文を含む時刻の処理（posedge → NBA 適用 → 組み合わせループ → negedge → VCD 記録）をすべて完了してから停止します。
 
-**理由**: `execute()` の途中で即時例外を発生させると、NBA キューが不完全なまま negedge や VCD 記録がスキップされ、シミュレーション結果が壊れるため。
+> **Questa との違い**: Questa は文を実行する前に止まります（pre-execution 方式）。  
+> deltasim は **post-execution 方式（deferred）** を採用しているため、止まった時点で `examine` すると、  
+> その文や NBA が反映された後の値が見えます。
+
+**この方式を採用した理由**:  
+「bp を置いても置かなくても、シミュレーション結果（信号値と VCD の値変化）が完全に一致すること」を優先しました。  
+即時停止方式では NBA キューが不完全なまま negedge や VCD 記録がスキップされ、  
+bp の有無で結果が変わってしまいます。
 
 **動作例**:
 ```
@@ -125,12 +132,13 @@ vsim> bp counter.sv:7   # q <= q + d が line 7
 vsim> run -all
 # t=10ns  cycle=1
 # t=20ns  cycle=2
-# bp [1] counter.sv:7 t=25ns   ← t=25 の全処理完了後に停止（NBA・negedge 込み）
+# bp [1] counter.sv:7 t=25ns
+            ↑ t=25 の posedge + NBA + negedge + VCD 記録がすべて完了してから停止
 vsim> examine q
-q = 01         ← NBA が正しく適用されている
+q = 01      ← この文（q <= q + d）の NBA が反映された後の値
 ```
 
-`run -continue` で次の実行まで進みます。
+`run -continue` で次にその行を実行するところまで進みます。
 
 ```tcl
 step [N]          # N サイクル進める（デフォルト 1）
