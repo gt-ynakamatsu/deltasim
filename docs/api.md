@@ -1248,3 +1248,23 @@ CLI の `-D`/`-I` は YAML の値の後に追加されます（CLI 後勝ち）�
 |---|---|
 | `E_INCLUDE_LOOP` | 循環 include を検出（A → B → A など） |
 | `E001` | `include ファイルが見つからない / 未定義マクロ / 引数数不一致 |
+
+### プリプロセッサ警告と `warnings[]`
+
+`W_TIMESCALE` と `W_UNKNOWN_DIRECTIVE` は `deltasim test --json` の `warnings[]` に追加されます（§18.9.1）。要素の形式は既存の `W_FILELIST_OPT`/`W_UNKNOWN_KEY` と同じです。
+
+```json
+{
+  "warnings": [
+    {
+      "code":    "W_TIMESCALE",
+      "message": "`timescale 1ns/1ps — 時間単位への反映は未対応",
+      "file":    "/path/to/m.sv",
+      "line":    1,
+      "column":  0
+    }
+  ]
+}
+```
+
+Python API でも `TestResult.warnings` に同じ内容が入ります。

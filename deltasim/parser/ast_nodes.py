@@ -25,6 +25,8 @@ class Module:
     ports: List[PortDecl]
     items: List[ModuleItem]
     source_file: str = ""
+    # §18.9: プリプロセッサ警告（W_TIMESCALE 等）
+    preproc_warnings: List = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
