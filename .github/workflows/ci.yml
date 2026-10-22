@@ -101,6 +101,8 @@ jobs:
       - name: Smoke — deltasim gui --help (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
+        env:
+          PYTHONUTF8: "1"
         run: |
           smoke_venv\Scripts\deltasim gui --help
           if ($LASTEXITCODE -ne 0) { Write-Error "gui --help failed: $LASTEXITCODE"; exit 1 }
