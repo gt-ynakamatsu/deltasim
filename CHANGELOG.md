@@ -5,6 +5,28 @@
 
 ---
 
+## [0.3.0+] — 開発中（§18 対話デバッグ）
+
+### 互換性のない変更（§18.1.1）
+
+- **`set <信号名> <値>` の挙動変更**: `set` は常に Tcl 変数への代入になりました。信号に値を入れるには **`force <信号名> <値>`** を使ってください。
+  - 旧: `set clk 1` → clk 信号を 1 に強制
+  - 新: `set clk 1` → Tcl 変数 `clk` に `"1"` を代入（信号は変わらない）。信号名と同じ変数名を使うと警告が1回表示されます。
+
+### 追加（§18 対話デバッグ）
+
+- `deltasim run -i` / `deltasim sim` で Questa 風対話デバッグコマンドを利用可能
+- `run [N[ns|ps|us]]`・`run -all`・`run -continue`（ns 精度で停止）
+- `examine [-radix hex|bin|dec] SIGNAL`
+- `force SIGNAL VALUE`・`noforce SIGNAL`
+- `bp FILE:LINE`（行ブレークポイント、文のない行は次の行に自動調整）・`bp -time Tns`・`bp -list`・`bp -delete ID`
+- `when {COND} {CMDS}`（False→True 遷移で発火、信号名のみは変化ごとに発火）
+- ミニ Tcl インタープリタ（`set`/`if`/`for`/`foreach`/`while`/`proc`/`expr`/`puts` など）
+- SV 式サブセットの自前パーサ（Python `eval/exec` 不使用）
+- docs 追加: `docs/interactive.md`・`docs/expr_syntax.md`・`docs/error_codes.md`・`docs/json_schema.md`・`docs/spec_format.md`
+
+---
+
 ## [0.3.0] — 2026-10-22
 
 ### 追加

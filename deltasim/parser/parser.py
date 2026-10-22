@@ -567,12 +567,13 @@ class Parser:
         return ImportDecl(pkg=pkg, item=item)
 
     def _parse_assign_item(self) -> AssignItem:
+        _line = self._peek().line
         self._consume("assign")
         lhs = self._parse_lvalue()
         self._consume("=")
         rhs = self._parse_expression()
         self._consume(";")
-        return AssignItem(lhs=lhs, rhs=rhs)
+        return AssignItem(lhs=lhs, rhs=rhs, source_line=_line, source_file=self._filename)
 
     def _parse_always_item(self) -> AlwaysItem:
         keyword = self._consume().value
@@ -667,15 +668,17 @@ class Parser:
     # ------------------------------------------------------------------
 
     def _parse_statement(self) -> "Stmt":
+        _line = self._peek().line  # §18: ソース行番号を記録
+        _file = self._filename
         if self._at("begin"):
-            return self._parse_block()
+            return self._parse_block(_line, _file)
         if self._at("if"):
-            return self._parse_if()
+            return self._parse_if(_line, _file)
         if self._at("case", "casex", "casez"):
-            return self._parse_case()
+            return self._parse_case(_line, _file)
         if self._at(";"):
             self._consume()
-            return NullStmt()
+            return NullStmt(source_line=_line, source_file=_file)
         # System task statement: $display, $monitor, $finish, …
         if self._at_type("SYSID"):
             return self._parse_sys_task_stmt()
@@ -688,13 +691,13 @@ class Parser:
         if self._at("repeat"):
             return self._parse_repeat()
         if self._at("for"):
-            return self._parse_for_stmt()
+            return self._parse_for_stmt(_line, _file)
         if self._at("while"):
-            return self._parse_while_stmt()
+            return self._parse_while_stmt(_line, _file)
         if self._peek().value == "@":
             return self._parse_wait_event_stmt()
         # Assignment statement (blocking or non-blocking)
-        return self._parse_assign_stmt()
+        return self._parse_assign_stmt(_line, _file)
 
     def _parse_time_delay(self) -> "Stmt":
         self._consume("#")
@@ -727,7 +730,7 @@ class Parser:
         body = self._parse_statement()
         return RepeatStmt(count=count, body=body)
 
-    def _parse_for_stmt(self) -> "Stmt":
+    def _parse_for_stmt(self, source_line: int = 0, source_file: str = "") -> "Stmt":
         self._consume("for")
         self._consume("(")
         # Init: may include type declaration (int i = 0) or just assign
@@ -750,15 +753,17 @@ class Parser:
             update = NullStmt()
         self._consume(")")
         body = self._parse_statement()
-        return ForStmt(init=init, cond=cond, update=update, body=body)
+        return ForStmt(init=init, cond=cond, update=update, body=body,
+                       source_line=source_line, source_file=source_file)
 
-    def _parse_while_stmt(self) -> "Stmt":
+    def _parse_while_stmt(self, source_line: int = 0, source_file: str = "") -> "Stmt":
         self._consume("while")
         self._consume("(")
         cond = self._parse_expression()
         self._consume(")")
         body = self._parse_statement()
-        return WhileStmt(cond=cond, body=body)
+        return WhileStmt(cond=cond, body=body,
+                         source_line=source_line, source_file=source_file)
 
     def _parse_wait_event_stmt(self) -> "Stmt":
         """@(sensitivity_list) [statement]"""
@@ -799,7 +804,7 @@ class Parser:
             self._consume()
         return WaitEventStmt(sensitivity=sens, body=body)
 
-    def _parse_block(self) -> Block:
+    def _parse_block(self, source_line: int = 0, source_file: str = "") -> Block:
         self._consume("begin")
         stmts = []
         while not self._at("end"):
@@ -807,9 +812,9 @@ class Parser:
                 self._error("unexpected EOF inside begin…end block")
             stmts.append(self._parse_statement())
         self._consume("end")
-        return Block(stmts=stmts)
+        return Block(stmts=stmts, source_line=source_line, source_file=source_file)
 
-    def _parse_if(self) -> IfStmt:
+    def _parse_if(self, source_line: int = 0, source_file: str = "") -> IfStmt:
         self._consume("if")
         self._consume("(")
         cond = self._parse_expression()
@@ -818,9 +823,10 @@ class Parser:
         else_body: Optional["Stmt"] = None
         if self._try_consume("else"):
             else_body = self._parse_statement()
-        return IfStmt(cond=cond, then_body=then_body, else_body=else_body)
+        return IfStmt(cond=cond, then_body=then_body, else_body=else_body,
+                      source_line=source_line, source_file=source_file)
 
-    def _parse_case(self) -> CaseStmt:
+    def _parse_case(self, source_line: int = 0, source_file: str = "") -> CaseStmt:
         keyword = self._consume().value
         self._consume("(")
         expr = self._parse_expression()
@@ -831,7 +837,8 @@ class Parser:
                 self._error("unexpected EOF inside case statement")
             items.append(self._parse_case_item())
         self._consume("endcase")
-        return CaseStmt(keyword=keyword, expr=expr, items=items)
+        return CaseStmt(keyword=keyword, expr=expr, items=items,
+                        source_line=source_line, source_file=source_file)
 
     def _parse_case_item(self) -> CaseItem:
         if self._at("default"):
@@ -858,19 +865,24 @@ class Parser:
         self._consume(";")
         return SysTaskStmt(name=name, args=args)
 
-    def _parse_assign_stmt(self) -> "Stmt":
+    def _parse_assign_stmt(self, source_line: int = 0, source_file: str = "") -> "Stmt":
         """Parse a blocking (=) or non-blocking (<=) assignment statement."""
+        if source_line == 0:
+            source_line = self._peek().line
+            source_file = self._filename
         lhs = self._parse_lvalue()
         if self._at("="):
             self._consume()
             rhs = self._parse_expression()
             self._consume(";")
-            return BlockingAssign(lhs=lhs, rhs=rhs)
+            return BlockingAssign(lhs=lhs, rhs=rhs,
+                                  source_line=source_line, source_file=source_file)
         if self._at("<="):
             self._consume()
             rhs = self._parse_expression()
             self._consume(";")
-            return NonBlockingAssign(lhs=lhs, rhs=rhs)
+            return NonBlockingAssign(lhs=lhs, rhs=rhs,
+                                     source_line=source_line, source_file=source_file)
         self._error(
             f"expected '=' or '<=' after lvalue, got {self._peek().value!r}"
         )

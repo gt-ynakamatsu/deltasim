@@ -104,5 +104,6 @@ jobs:
         env:
           PYTHONUTF8: "1"
         run: |
+          $env:PYTHONUTF8 = "1"
           smoke_venv\Scripts\deltasim gui --help
           if ($LASTEXITCODE -ne 0) { Write-Error "gui --help failed: $LASTEXITCODE"; exit 1 }

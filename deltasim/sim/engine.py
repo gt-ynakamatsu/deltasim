@@ -72,6 +72,21 @@ class SimError(Exception):
     pass
 
 
+class BreakpointHit(Exception):
+    """Raised after a time step completes when a line breakpoint fired (§18.1.1).
+
+    Deferred approach: the executor records hits without raising immediately.
+    After the full time step (posedge + NBA + negedge + VCD) the hit is raised.
+    This ensures NBA, negedge, and VCD recording are never skipped.
+    """
+    def __init__(self, bp_id: int, source_file: str, source_line: int, time_ns: int):
+        self.bp_id       = bp_id
+        self.source_file = source_file
+        self.source_line = source_line
+        self.time_ns     = time_ns
+        super().__init__(f"bp [{bp_id}] {source_file}:{source_line} @ {time_ns}ns")
+
+
 class DeltaLimitError(SimError):
     """Raised when delta-cycle convergence exceeds max_delta (E_DELTA_LIMIT)."""
     def __init__(self, time_ns: int, signal_hint: str = "", max_delta: int = MAX_DELTA):
@@ -451,6 +466,7 @@ class _Executor:
         ctx: Optional[EvalContext] = None,
         max_loop: int = MAX_FOREVER_TICKS,
         time_ns: int = 0,
+        bp_check=None,   # §18: Optional[Callable[[str, int], None]] — file, line
     ):
         self.signals = dict(signals)
         self.widths = widths
@@ -458,11 +474,19 @@ class _Executor:
         self.ctx = ctx or _EMPTY_CTX
         self.max_loop = max_loop
         self.time_ns = time_ns
+        self._bp_check = bp_check  # raises BreakpointHit if a bp is set
         # NBA items: (name, val) for signals, (arr_name, idx, val) for arrays
         self.nba_queue: List[tuple] = []
         self.display_log: List[str] = []
 
     def execute(self, stmt) -> None:
+        # §18.1.1: Check line breakpoints — deferred (does not raise, stores hit)
+        if self._bp_check is not None:
+            sl = getattr(stmt, "source_line", 0)
+            sf = getattr(stmt, "source_file", "")
+            if sl:
+                self._bp_check(sf, sl)  # records hit in engine._deferred_bp_hit, no raise
+
         if isinstance(stmt, Block):
             for s in stmt.stmts:
                 self.execute(s)
@@ -945,6 +969,12 @@ class SimEngine:
         # until the force is released.  Populated by Simulator.force().
         self._force_overrides: Dict[str, int] = {}
 
+        # §18.1.1 deferred breakpoint: set by bp_check callback (not raised immediately)
+        # checked in Simulator.step_to_ns() after each full time step
+        self._deferred_bp_hit: Optional[tuple] = None  # (bp_id, file, line, time_ns)
+        # active bp_check callable (set by Simulator.step_to_ns before each cycle)
+        self._active_bp_check = None
+
     # ------------------------------------------------------------------
     # EvalContext builder  (M4)
     # ------------------------------------------------------------------
@@ -1046,12 +1076,39 @@ class SimEngine:
         cycle_idx: int,
         pre_posedge_hook: Optional[Callable] = None,
         post_posedge_hook: Optional[Callable] = None,
-    ) -> None:
+        posedge_only: bool = False,   # §18: stop after posedge (sub-cycle timing)
+        negedge_only: bool = False,   # §18: skip posedge, only run negedge (resume)
+    ) -> bool:
+        """Run one clock cycle.  Returns True if both posedge and negedge ran."""
         hp = self.half_period
         cycle_num = cycle_idx + 1
 
         # --- Run initial blocks up to posedge time ---
         posedge_time = cycle_idx * 2 * hp + hp
+
+        # §18.1.1 negedge_only: skip posedge phase entirely (resuming mid-cycle)
+        if negedge_only:
+            negedge_time = (cycle_idx + 1) * 2 * hp
+            if self._initial_scheduler:
+                self._initial_scheduler.advance_to(negedge_time - 1, self)
+            if self._clk is not None:
+                prev_clk = self.signals.get(self._clk, 0)
+                self._prev[self._clk] = prev_clk
+                self._time = negedge_time
+                self._write(self._clk, 0)
+                if self._initial_scheduler:
+                    self._initial_scheduler.notify_edge(
+                        self._clk, prev_clk, 0, self._time, self
+                    )
+                nba = self._collect_nba_for_edge(self._clk, 1, 0)
+                self._apply_nba(nba)
+                self._eval_comb_loop()
+            else:
+                self._time = negedge_time
+            if self.vcd_writer:
+                self.vcd_writer.record(self._time, self.signals)
+            return True  # both phases done (posedge was done in previous call)
+
         if self._initial_scheduler:
             self._initial_scheduler.advance_to(posedge_time - 1, self)
 
@@ -1109,6 +1166,10 @@ class SimEngine:
         if post_posedge_hook:
             post_posedge_hook(cycle_num, dict(self.signals))
 
+        # §18: Stop after posedge if requested (sub-cycle timing)
+        if posedge_only:
+            return False  # negedge not yet run
+
         # --- Run initial blocks between posedge and negedge ---
         negedge_time = (cycle_idx + 1) * 2 * hp
         if self._initial_scheduler:
@@ -1132,6 +1193,7 @@ class SimEngine:
 
         if self.vcd_writer:
             self.vcd_writer.record(self._time, self.signals)
+        return True  # both posedge and negedge ran
 
     # ------------------------------------------------------------------
     # Internal: NBA collection for a single edge event
@@ -1144,7 +1206,8 @@ class SimEngine:
         for proc in self.design.seq_procs:
             if self._is_triggered(proc.sensitivity, sig_name, old_val, new_val):
                 ex = _Executor(self.signals, self._widths, self._params, self._ctx,
-                               max_loop=self.max_loop, time_ns=self._time)
+                               max_loop=self.max_loop, time_ns=self._time,
+                               bp_check=getattr(self, "_active_bp_check", None))
                 try:
                     ex.execute(proc.body)
                 except _FinishSignal:
@@ -1211,12 +1274,20 @@ class SimEngine:
             changed = False
 
             for proc in self.design.assign_procs:
+                # §18: bp_check for assign lines (deferred, fires after delta settles)
+                _bp = getattr(self, "_active_bp_check", None)
+                if _bp is not None:
+                    sl = getattr(proc, "source_line", 0)
+                    sf = getattr(proc, "source_file", "")
+                    if sl:
+                        _bp(sf, sl)
                 v, w = eval_expr(proc.rhs, self.signals, self._widths, self._params, self._ctx)
                 changed |= _assign_to_lhs(proc.lhs, v, w, self.signals, self._widths, self._ctx)
 
             for proc in self.design.comb_procs:
                 ex = _Executor(self.signals, self._widths, self._params, self._ctx,
-                               max_loop=self.max_loop, time_ns=self._time)
+                               max_loop=self.max_loop, time_ns=self._time,
+                               bp_check=getattr(self, "_active_bp_check", None))
                 try:
                     ex.execute(proc.body)
                 except _FinishSignal:

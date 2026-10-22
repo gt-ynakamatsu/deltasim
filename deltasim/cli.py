@@ -69,6 +69,8 @@ def _emit_json_event(event: dict, json_events: bool) -> None:
 @click.option("--clk", default=None, help="クロック信号名")
 @click.option("--rst", default=None, help="リセット信号名")
 @click.option("--rst-active-high", is_flag=True, default=False)
+@click.option("-i", "--interactive", is_flag=True, default=False,
+              help="対話モードで起動（deltasim sim と同じ）")
 @click.option("--param", "-p", "params", multiple=True, metavar="NAME=VALUE")
 @click.option("--verbose", "-v", is_flag=True, default=False)
 @click.option("--json", "json_out", default=None, metavar="PATH", help="結果を JSON 出力")
@@ -80,9 +82,19 @@ def _emit_json_event(event: dict, json_events: bool) -> None:
               help="ループ反復上限（既定1000000）。超えると E_LOOP_LIMIT。")
 def run_cmd(sv_files, top, cycles, vcd, reset_cycles, half_period,
             clk, rst, rst_active_high, params, verbose, json_out, json_events,
-            max_delta, max_loop):
-    """SystemVerilog ファイルをシミュレートして VCD を出力する。"""
+            max_delta, max_loop, interactive):
+    """SystemVerilog ファイルをシミュレートして VCD を出力する。
+
+    -i / --interactive を指定すると対話モードで起動します（deltasim sim と同じ）。
+    """
     import deltasim.api as ds
+
+    if interactive:
+        # 対話モード: deltasim sim と同じ処理に委譲
+        _run_interactive(list(sv_files), top=top,
+                         params=_parse_params(params),
+                         reset_cycles=reset_cycles)
+        return
 
     param_overrides = _parse_params(params)
 
@@ -375,146 +387,27 @@ def parse_cmd(sv_file: str):
 @click.option("--param", "-p", "params", multiple=True, metavar="NAME=VALUE")
 @click.option("--reset-cycles", default=10, show_default=True, type=int)
 def sim_cmd(sv_files, top, params, reset_cycles):
-    """対話デバッグ Simulator を起動する（REPL モード）。
+    """対話デバッグ Simulator を起動する（REPL モード）。§18 Questa 風コマンド対応。
 
     コマンド例:\n
-      step [N]         — N サイクル進める\n
-      until TIME_NS    — 指定時刻まで実行\n
-      get SIGNAL       — 信号値を表示\n
-      set SIGNAL VALUE — 信号を設定\n
-      force SIGNAL VAL — 信号を強制固定\n
-      release SIGNAL   — force を解除\n
-      signals          — 信号一覧\n
-      bp EXPR          — ブレークポイント追加\n
-      bp list          — ブレークポイント一覧\n
-      bp del ID        — ブレークポイント削除\n
-      reset            — シミュレーションをリセット\n
-      quit / exit      — 終了
+      run [N[ns|ps|us]]  — シミュレーションを進める\n
+      run -all           — 終了まで実行\n
+      examine [-radix bin|hex|dec] SIGNAL — 信号値を表示\n
+      force SIGNAL VAL   — 信号を強制固定\n
+      noforce SIGNAL     — force を解除\n
+      bp FILE:LINE       — 行ブレークポイント\n
+      bp -time 100ns     — 時刻ブレークポイント\n
+      bp -list           — ブレークポイント一覧\n
+      when {COND} {CMDS} — 条件付きアクション\n
+      restart            — リセット\n
+      do FILE            — スクリプトファイル実行\n
+      quit / exit        — 終了\n
+      --- 後方互換 ---\n
+      step [N]  until T  get SIG  set SIG VAL  signals
     """
-    import deltasim.api as ds
-
-    param_overrides = _parse_params(params)
-
-    click.echo("[deltasim sim] シミュレータを起動中...", err=True)
-    try:
-        sim = ds.Simulator(list(sv_files), top=top, params=param_overrides,
-                           reset_cycles=reset_cycles)
-    except Exception as e:
-        click.echo(f"ERROR: {e}", err=True)
-        sys.exit(1)
-
-    click.echo(f"[deltasim sim] モジュール: {sim._di.module}  "
-               f"signals: {len(sim.list_signals())}  t=0ns\n"
-               "Type 'help' for commands, 'quit' to exit.", err=True)
-
-    while True:
-        try:
-            line = click.prompt("sim> ", prompt_suffix="", default="", show_default=False)
-        except (EOFError, KeyboardInterrupt):
-            click.echo("\n[終了]")
-            break
-
-        line = line.strip()
-        if not line:
-            continue
-        tokens = line.split()
-        cmd = tokens[0].lower()
-
-        if cmd in ("quit", "exit", "q"):
-            break
-
-        elif cmd == "help":
-            click.echo(
-                "step [N] | until TIME_NS | get SIG | set SIG VAL | "
-                "force SIG VAL | release SIG | signals | "
-                "bp EXPR | bp list | bp del ID | reset"
-            )
-
-        elif cmd == "step":
-            n = int(tokens[1]) if len(tokens) > 1 else 1
-            try:
-                snap = sim.step(n)
-            except Exception as _e:
-                click.echo(f"ERROR: {type(_e).__name__}: {_e}", err=True)
-                continue
-            if snap.breakpoint_hit is not None:
-                click.echo(f"[bp {snap.breakpoint_hit} hit]  t={snap.time_ns}ns")
-            else:
-                click.echo(f"t={snap.time_ns}ns  cycle={sim.cycle}")
-
-        elif cmd == "until":
-            if len(tokens) < 2:
-                click.echo("使い方: until TIME_NS")
-                continue
-            try:
-                snap = sim.run_until(int(tokens[1]))
-            except Exception as _e:
-                click.echo(f"ERROR: {type(_e).__name__}: {_e}", err=True)
-                continue
-            click.echo(f"t={snap.time_ns}ns  cycle={sim.cycle}")
-
-        elif cmd == "get":
-            if len(tokens) < 2:
-                click.echo("使い方: get SIGNAL_NAME")
-                continue
-            sig = tokens[1]
-            val = sim.get(sig)
-            w = sim._design.signals.get(sig)
-            w_bits = w.width if w else 1
-            click.echo(f"{sig} = {_fmt_val(val, w_bits)}")
-
-        elif cmd == "set":
-            if len(tokens) < 3:
-                click.echo("使い方: set SIGNAL VALUE")
-                continue
-            sim.set(tokens[1], int(tokens[2], 0))
-            click.echo(f"{tokens[1]} = {tokens[2]}")
-
-        elif cmd == "force":
-            if len(tokens) < 3:
-                click.echo("使い方: force SIGNAL VALUE")
-                continue
-            sim.force(tokens[1], int(tokens[2], 0))
-            click.echo(f"force {tokens[1]} = {tokens[2]}")
-
-        elif cmd == "release":
-            if len(tokens) < 2:
-                click.echo("使い方: release SIGNAL")
-                continue
-            sim.release(tokens[1])
-            click.echo(f"release {tokens[1]}")
-
-        elif cmd == "signals":
-            for s in sim.list_signals():
-                direction = f"({s['direction']})" if s["direction"] else ""
-                click.echo(f"  {s['name']:<30} {s['width']:3}b {direction:10} = {s['value']}")
-
-        elif cmd == "bp":
-            if len(tokens) == 1:
-                click.echo("使い方: bp EXPR | bp list | bp del ID")
-            elif tokens[1].lower() == "list":
-                bps = sim.list_breakpoints()
-                if not bps:
-                    click.echo("(ブレークポイントなし)")
-                for bp in bps:
-                    click.echo(f"  [{bp['id']}] {bp['condition']}")
-            elif tokens[1].lower() == "del":
-                if len(tokens) < 3:
-                    click.echo("使い方: bp del ID")
-                else:
-                    sim.remove_breakpoint(int(tokens[2]))
-                    click.echo(f"bp {tokens[2]} 削除")
-            else:
-                expr = " ".join(tokens[1:])
-                bp_id = sim.add_breakpoint(expr)
-                click.echo(f"bp [{bp_id}] 追加: {expr}")
-
-        elif cmd == "reset":
-            sim.reset()
-            click.echo("シミュレーションをリセットしました")
-
-        else:
-            click.echo(f"不明なコマンド: {cmd!r}  (help で一覧表示)")
+    _run_interactive(list(sv_files), top=top,
+                     params=_parse_params(params),
+                     reset_cycles=reset_cycles)
 
 
 def _fmt_val(val, width: int) -> str:
@@ -528,6 +421,29 @@ def _fmt_val(val, width: int) -> str:
         return f"{val}  (0x{val:X})  ({bs})"
     except Exception:
         return bs
+
+
+def _run_interactive(sv_files, top=None, params=None, reset_cycles=10):
+    """§18 対話セッションを起動するヘルパー（run -i / sim コマンドから使用）。"""
+    import deltasim.api as ds
+    from deltasim.interp.session import SimSession
+
+    click.echo("[deltasim] シミュレータを起動中...", err=True)
+    try:
+        sim = ds.Simulator(sv_files, top=top, params=params or {},
+                           reset_cycles=reset_cycles)
+    except Exception as e:
+        click.echo(f"ERROR: {e}", err=True)
+        sys.exit(1)
+
+    click.echo(
+        f"[deltasim] モジュール: {sim._di.module}  "
+        f"signals: {len(sim.list_signals())}  t=0ns\n"
+        "Type 'help' for commands, 'quit' to exit.",
+        err=True,
+    )
+    session = SimSession(sim)
+    session.run_repl(prompt="vsim> ")
 
 
 # ---------------------------------------------------------------------------

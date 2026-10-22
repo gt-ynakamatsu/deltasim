@@ -1,8 +1,7 @@
 # deltasim 公開 API 仕様 (docs/api.md)
 
-> **注意**: このドキュメントは GUI 仕様書 v0.1 §2「インターフェース契約」に忠実に基づきます。  
-> 独自拡張は行いません。変更時は仕様担当に相談のうえ両係へ周知してください。  
-> `docs/api.md` は契約の内容を忠実に記述し、独自拡張しません。
+> このドキュメントは GUI 仕様書 v0.1 §2「インターフェース契約」に基づく公開 API の仕様書です。  
+> 変更時は仕様担当に相談のうえ両係へ周知してください。
 
 ---
 
@@ -706,7 +705,7 @@ deltasim test counter.sv --spec spec.yaml --case a --case b  # 複数指定
 | `errors[].code` | `"E_NO_CASE"` |
 | `errors[].message` | 指定パターンを含む |
 | CLI 終了コード | 非 0 |
-| `--json` | 正しい JSON を stdout に出力（stderr で非 0 終了）|
+| `--json` | 正しい JSON を指定ファイルに出力（非 0 終了）|
 | 戻り値型 | `TestResult`（`None` にはならない）|
 
 CIで「何も実行されずにPASS」を防ぐための仕様です。
@@ -995,7 +994,7 @@ endmodule
 #### エラー時の動作
 
 - `status = "ERROR"`, `errors[]` に `code` と `message` を含む `ErrorInfo` が入ります。
-- 该当ケース (`cases[].status`) も `"ERROR"` になり `cases[].errors[]` にも入ります。
+- 該当ケース (`cases[].status`) も `"ERROR"` になり `cases[].errors[]` にも入ります。
 - トップレベル `errors[]` にも伝播します。
 - **他のケースは続行します**（最初のエラーケースで中断しません）。
 - VCD はエラー発生時点までを正しく閉じます。

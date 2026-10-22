@@ -596,7 +596,8 @@ def _run_one_case(
             elif exp.expr:
                 ns_ctx = dict(engine.signals); ns_ctx["_cycle"] = cycle_num
                 try:
-                    passed = bool(eval(exp.expr, {"__builtins__": {}}, ns_ctx))
+                    from deltasim.interp.expr import eval_bool as _eval_bool_sv
+                    passed = _eval_bool_sv(exp.expr, ns_ctx)
                 except Exception:
                     passed = False
                 st = "PASS" if passed else "FAIL"
@@ -908,6 +909,7 @@ class Simulator:
         self._change_db: SignalChangeDB = SignalChangeDB()
         self._keep_changes: bool = keep_changes
         self._prev_signals: Dict[str, Optional[int]] = dict(self._engine.signals)
+        self._pending_negedge_for: int = -1  # §18: cycle_idx of pending negedge (-1 = none)
 
     # ------------------------------------------------------------------
     # Core step operations
@@ -954,7 +956,8 @@ class Simulator:
             ns = dict(cur)
             for bp_id, cond in list(self._breakpoints.items()):
                 try:
-                    if eval(cond, {"__builtins__": {}}, ns):
+                    from deltasim.interp.expr import eval_bool as _eval_bool_sv
+                    if _eval_bool_sv(cond, ns):
                         bp_hit = bp_id
                         break
                 except Exception:
@@ -985,14 +988,124 @@ class Simulator:
         )
 
     def run_until(self, time_ns: int) -> SimSnapshot:
-        """Run the simulation until *time_ns* (approximate, clock-cycle granularity)."""
+        """Run the simulation until *time_ns* (approximate, clock-cycle granularity).
+        For exact ns stopping use step_to_ns().
+        """
+        return self.step_to_ns(time_ns)
+
+    def step_to_ns(self, target_ns: int, bp_check=None) -> SimSnapshot:
+        """Advance simulation to exactly *target_ns* (arbitrary ns precision).
+
+        §18.1.1 revised design:
+        - Stops at posedge / negedge that equals target_ns.
+        - If target_ns is between clock edges, sets _time directly (no logic runs).
+        - Uses deferred breakpoints: bp_check stores hit in engine._deferred_bp_hit
+          so the full time step (NBA + negedge + VCD) always completes.
+        - After each time step, checks for deferred bp hit and raises BreakpointHit.
+        - Handles pending negedge (if previous call stopped after posedge only).
+        """
+        from deltasim.sim.engine import BreakpointHit as _BPHit
+
         hp = self._engine.half_period
-        cycle_period = 2 * hp
-        target_cycle = time_ns // cycle_period
-        n_to_run = max(0, target_cycle - self._cycle)
-        if n_to_run == 0:
-            return self.step(1)
-        return self.step(n_to_run)
+        changes_acc: list = []
+
+        def _collect_changes():
+            cur = self._engine.signals
+            for sname in self._design.signals:
+                nv = cur.get(sname)
+                ov = self._prev_signals.get(sname)
+                if nv != ov:
+                    changes_acc.append((sname, nv))
+                    self._prev_signals[sname] = nv
+
+        def _check_deferred_bp():
+            hit = self._engine._deferred_bp_hit
+            if hit:
+                self._engine._deferred_bp_hit = None
+                raise _BPHit(hit[0], hit[1], hit[2], hit[3])
+
+        # Setup deferred bp_check (stores hit instead of raising)
+        if bp_check is not None:
+            engine = self._engine
+            original_bp_check = bp_check
+
+            def _deferred_check(sf, sl):
+                if engine._deferred_bp_hit is None:
+                    original_bp_check(sf, sl)  # this sets engine._deferred_bp_hit
+
+            self._engine._active_bp_check = _deferred_check
+        else:
+            self._engine._active_bp_check = None
+
+        try:
+            # 1. Complete any pending negedge from a previous posedge-only run
+            if self._pending_negedge_for >= 0:
+                cycle_idx = self._pending_negedge_for
+                negedge_time = (cycle_idx + 1) * 2 * hp
+                if negedge_time <= target_ns:
+                    self._engine._run_cycle(cycle_idx, negedge_only=True)
+                    self._cycle += 1
+                    self._pending_negedge_for = -1
+                    _collect_changes()
+                    _check_deferred_bp()
+                    if self._engine._time >= target_ns:
+                        return SimSnapshot(time_ns=self._engine._time,
+                                           signals=dict(self._engine.signals),
+                                           changes=list(changes_acc))
+                elif target_ns < negedge_time:
+                    # Target is between posedge and negedge — just advance time
+                    self._engine._time = target_ns
+                    return SimSnapshot(time_ns=target_ns,
+                                       signals=dict(self._engine.signals),
+                                       changes=list(changes_acc))
+
+            # 2. Run cycles until we reach target_ns
+            while self._engine._time < target_ns:
+                cycle_idx = self._cycle
+                posedge_time = cycle_idx * 2 * hp + hp
+                negedge_time = (cycle_idx + 1) * 2 * hp
+
+                if posedge_time > target_ns:
+                    # No clock edge before target → advance time (no logic)
+                    self._engine._time = target_ns
+                    break
+
+                if posedge_time == target_ns:
+                    # Run posedge only, set pending negedge
+                    self._engine._run_cycle(cycle_idx, posedge_only=True)
+                    self._pending_negedge_for = cycle_idx
+                    _collect_changes()
+                    _check_deferred_bp()
+                    break
+
+                # posedge_time < target_ns
+                if negedge_time <= target_ns:
+                    # Run full cycle
+                    self._engine._run_cycle(cycle_idx)
+                    self._cycle += 1
+                    _collect_changes()
+                    _check_deferred_bp()
+                    if self._engine._time >= target_ns:
+                        break
+                else:
+                    # negedge_time > target_ns: run posedge then advance time
+                    self._engine._run_cycle(cycle_idx, posedge_only=True)
+                    self._pending_negedge_for = cycle_idx
+                    # Advance time beyond posedge to the exact target
+                    self._engine._time = target_ns
+                    _collect_changes()
+                    _check_deferred_bp()
+                    break
+
+        finally:
+            self._engine._active_bp_check = None
+
+        return SimSnapshot(
+            time_ns=self._engine._time,
+            signals=dict(self._engine.signals),
+            changes=list(changes_acc),
+            breakpoint_hit=None,
+        )
 
     # ------------------------------------------------------------------
     # Signal access
@@ -1097,6 +1210,10 @@ class Simulator:
         """List all active breakpoints."""
         return [{"id": k, "condition": v} for k, v in self._breakpoints.items()]
 
+    def list_signals_dict(self) -> Dict[str, dict]:
+        """Return signal info as {name: info_dict} for quick lookup."""
+        return {s["name"]: s for s in self.list_signals()}
+
     # ------------------------------------------------------------------
     # State management
     # ------------------------------------------------------------------
@@ -1111,6 +1228,7 @@ class Simulator:
         )
         self._engine._eval_comb_loop()
         self._cycle = 0
+        self._pending_negedge_for = -1
         self._prev_signals = dict(self._engine.signals)
         self._forced.clear()
         if self._keep_changes:
