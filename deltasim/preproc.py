@@ -219,14 +219,17 @@ class Preprocessor:
                 file=filepath, line=len(lines),
             )
 
-        # ソースマップを構築
+        # ソースマップを構築。
+        # マクロ展開が複数行になる場合（ボディに \n を含む）、
+        # すべての展開行を同一の元ソース行にマップする。
         source_map: Dict[int, SourceLoc] = {}
-        texts = []
-        for idx, (text, f, ln) in enumerate(out):
-            texts.append(text)
-            source_map[idx + 1] = SourceLoc(f, ln)
+        result_lines: List[str] = []
+        for text, f, ln in out:
+            for sub_line in text.split("\n"):
+                result_lines.append(sub_line)
+                source_map[len(result_lines)] = SourceLoc(f, ln)
 
-        expanded_text = "\n".join(texts)
+        expanded_text = "\n".join(result_lines)
         return expanded_text, source_map
 
     def _active(self, cond_stack: List[Tuple[bool, bool]]) -> bool:

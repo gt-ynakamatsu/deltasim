@@ -253,26 +253,63 @@ class TestPreprocSourceMap:
     """ソースマップ（元ファイル・元行対応）のテスト"""
 
     def test_sourcemap_simple(self, tmp_path):
+        """展開後の各行が元ファイルの正確な行番号にマップされること。
+
+        `define は展開後テキストに現れず、後続行の番号がその分ずれること。
+        """
         from deltasim.preproc import Preprocessor
         p = _write(tmp_path, "t.sv",
                    "logic a;\n`define X 1\nlogic b;\n")
         pp = Preprocessor()
         text, sm = pp.process_file(p)
-        # "logic a;" は1行目、"logic b;" は(define 除外後)2行目以降
-        lines = text.split("\n")
-        # ソースマップは展開後行1始まり → 元ファイルの行
-        for idx, loc in sm.items():
-            assert loc.file == p, f"file mismatch at line {idx}"
+        exp_lines = text.split("\n")
+
+        # 展開後行1: "logic a;" → 元 t.sv:1
+        assert exp_lines[0] == "logic a;", f"exp[0]={exp_lines[0]!r}"
+        assert sm[1].file == p and sm[1].line == 1, f"sm[1]={sm[1]}"
+
+        # 展開後行2: "logic b;" → 元 t.sv:3 (行2の define はスキップ)
+        assert exp_lines[1] == "logic b;", f"exp[1]={exp_lines[1]!r}"
+        assert sm[2].file == p and sm[2].line == 3, f"sm[2]={sm[2]}"
+
+    def test_sourcemap_multiline_define(self, tmp_path):
+        """行末バックスラッシュの複数行 define 後の行が正しくマップされること。"""
+        from deltasim.preproc import Preprocessor
+        # 3行でdefineを定義、4行目が通常テキスト
+        p = _write(tmp_path, "t.sv",
+                   "`define F(a) \\\n  a+1\nassign y = `F(x);\nlogic z;\n")
+        pp = Preprocessor()
+        text, sm = pp.process_file(p)
+        exp_lines = text.split("\n")
+
+        # "assign y = " は元 t.sv:3
+        assign_idx = next(i for i, l in enumerate(exp_lines, 1) if "assign y" in l)
+        assert sm[assign_idx].file == p
+        assert sm[assign_idx].line == 3, f"assign line: sm={sm[assign_idx]}"
+
+        # "logic z;" は元 t.sv:4
+        z_idx = next(i for i, l in enumerate(exp_lines, 1) if "logic z" in l)
+        assert sm[z_idx].file == p
+        assert sm[z_idx].line == 4, f"logic z: sm={sm[z_idx]}"
 
     def test_sourcemap_include(self, tmp_path):
+        """include 後の各行が元ファイル・元行を正確に指すこと。"""
         from deltasim.preproc import Preprocessor
         inc = _write(tmp_path, "inc.sv", "logic x;\n")
-        main = _write(tmp_path, "main.sv", f'`include "inc.sv"\nlogic y;\n')
+        main = _write(tmp_path, "main.sv", '`include "inc.sv"\nlogic y;\n')
         pp = Preprocessor()
         text, sm = pp.process_file(main)
-        # inc.sv からの行は loc.file == inc.sv を指す
-        inc_lines = [loc for loc in sm.values() if loc.file == inc]
-        assert len(inc_lines) >= 1, "inc.sv lines should appear in source map"
+        exp_lines = text.split("\n")
+
+        # 展開後行1: "logic x;" → inc.sv:1
+        assert exp_lines[0] == "logic x;", f"exp[0]={exp_lines[0]!r}"
+        assert sm[1].file == inc, f"sm[1].file={sm[1].file!r}"
+        assert sm[1].line == 1, f"sm[1].line={sm[1].line}"
+
+        # "logic y;" → main.sv:2
+        y_idx = next(i for i, l in enumerate(exp_lines, 1) if "logic y" in l)
+        assert sm[y_idx].file == main, f"sm[{y_idx}].file={sm[y_idx].file!r}"
+        assert sm[y_idx].line == 2, f"sm[{y_idx}].line={sm[y_idx].line}"
 
 
 # ---------------------------------------------------------------------------
@@ -381,20 +418,71 @@ class TestPreprocErrorLocation:
         assert e.line == 2   # 2行目
 
     def test_include_syntax_error_points_to_include_file(self, tmp_path):
-        """include 先の構文エラーが include 先ファイルの行を指すこと"""
+        """include 先の ParseError が include 先ファイルの行を指すこと（無条件 assert）。"""
         from deltasim.parser.parser import parse_file, ParseError
-        from deltasim.preproc import PreprocError
-        # `UNDEF_MACRO は未定義マクロ → PreprocError が include 先ファイルを指す
-        inc = _write(tmp_path, "bad.sv", "logic a;\n`UNDEFINED_IN_INC\n")
+        # bad.sv: 2行目に本当の構文エラー（ポートリストが閉じられない）
+        inc = _write(tmp_path, "bad.sv",
+                     "module bad(input logic d\n"  # missing ')' → ParseError at line 2
+                     "endmodule\n")
         main = _write(tmp_path, "main.sv",
-                      f'module m;\n`include "bad.sv"\nendmodule\n')
-        with pytest.raises((ParseError, PreprocError)) as exc_info:
+                      '`include "bad.sv"\nmodule m;\nendmodule\n')
+        with pytest.raises(ParseError) as exc_info:
             parse_file(main)
-        # エラーは include 先のファイルを指す
         e = exc_info.value
-        if isinstance(e, PreprocError):
-            assert "bad.sv" in e.file or "bad.sv" in str(e), \
-                f"error should point to bad.sv: file={e.file!r}, msg={str(e)!r}"
+        # エラーメッセージに bad.sv と行番号 2 が含まれること
+        assert "bad.sv" in str(e), f"error should point to bad.sv: {e}"
+        assert ":2:" in str(e), f"error should be on line 2: {e}"
+
+    def test_include_syntax_error_cli_json(self, tmp_path):
+        """include 先構文エラーが CLI --json の errors[].file/line でも元ファイルを指すこと。"""
+        import subprocess, sys, json as _json
+        inc = _write(tmp_path, "bad.sv",
+                     "module bad(input logic d\n"
+                     "endmodule\n")
+        main = _write(tmp_path, "main.sv",
+                      '`include "bad.sv"\nmodule m;\nendmodule\n')
+        spec = {
+            "version": 1, "top": "bad",
+            "clock": {"signal": "clk", "period_ns": 10},
+            "reset": {"signal": "rst", "active_low": False, "duration_cycles": 1},
+            "sim": {"cycles": 1},
+            "cases": [{"name": "t", "expected": [{"at": 1, "check": {"d": 0}}]}],
+        }
+        spec_p = str(tmp_path / "spec.yaml")
+        with open(spec_p, "w", encoding="utf-8") as f:
+            yaml.dump(spec, f)
+        json_p = str(tmp_path / "out.json")
+        subprocess.run(
+            [sys.executable, "-m", "deltasim", "test", main,
+             "--spec", spec_p, "--json", json_p],
+            capture_output=True, text=True, encoding="utf-8", timeout=15,
+        )
+        out = _json.loads(Path(json_p).read_text(encoding="utf-8"))
+        errors = out.get("errors", [])
+        assert errors, "errors should be non-empty"
+        e = errors[0]
+        assert "bad.sv" in e.get("file", ""), \
+            f"errors[0].file should contain bad.sv: {e}"
+        assert e.get("line") == 2, \
+            f"errors[0].line should be 2: {e}"
+
+    def test_main_file_syntax_error_points_to_main(self, tmp_path):
+        """include より後ろの main.sv 構文エラーが main.sv の元行を指すこと。"""
+        from deltasim.parser.parser import parse_file, ParseError
+        inc = _write(tmp_path, "ok.sv", "`define OK 1\n")
+        # main.sv の5行目に構文エラー（ポートリスト未完了）
+        main = _write(tmp_path, "main.sv",
+                      '`include "ok.sv"\n'        # line 1
+                      '// comment\n'               # line 2
+                      '// comment2\n'              # line 3
+                      '// comment3\n'              # line 4
+                      'module m(input logic d\n'   # line 5 - missing )
+                      'endmodule\n')               # line 6
+        with pytest.raises(ParseError) as exc_info:
+            parse_file(main)
+        e = exc_info.value
+        assert "main.sv" in str(e), f"error should point to main.sv: {e}"
+        assert ":6:" in str(e), f"error should be on line 6 (endmodule): {e}"
 
 
 # ---------------------------------------------------------------------------
@@ -513,29 +601,39 @@ endmodule
         assert w == 8
 
     def test_cli_define_option(self, tmp_path):
-        """CLI の -D オプションが機能すること"""
+        """-D あり/なしで出力が異なることを確認。"""
         sv = _write(tmp_path, "m.sv", """\
 `ifdef USE_CLK
-module m(input logic clk, input logic d, output logic q);
+module m(input logic clk, input logic [7:0] d, output logic [7:0] q);
   always_ff @(posedge clk) q <= d;
 endmodule
 `else
-module m(input logic d, output logic q);
+module m(input logic [7:0] d, output logic [7:0] q);
   assign q = d;
 endmodule
 `endif
 """)
-        # -D USE_CLK で FF モジュールになる
         import subprocess, sys
-        result = subprocess.run(
+        # -D USE_CLK: clk ポートがあること
+        r_with = subprocess.run(
             [sys.executable, "-m", "deltasim", "parse", sv, "-D", "USE_CLK"],
             capture_output=True, text=True, encoding="utf-8", timeout=15
         )
-        assert result.returncode == 0, result.stderr
-        assert "clk" in result.stdout
+        assert r_with.returncode == 0, r_with.stderr
+        assert "clk" in r_with.stdout, f"-D あり: clk が stdout にない: {r_with.stdout!r}"
+
+        # -D なし: clk ポートがないこと
+        r_without = subprocess.run(
+            [sys.executable, "-m", "deltasim", "parse", sv],
+            capture_output=True, text=True, encoding="utf-8", timeout=15
+        )
+        assert r_without.returncode == 0, r_without.stderr
+        assert "clk" not in r_without.stdout, \
+            f"-D なし: clk が stdout にある（意図しない）: {r_without.stdout!r}"
 
     def test_cli_incdir_option(self, tmp_path):
-        """CLI の -I オプションが機能すること"""
+        """-I でインクルードパスを追加し、ポート幅が PKG_W=4 になることを確認。
+        -I なしでは E001 + include ファイル名が stderr に出ること。"""
         sub = tmp_path / "inc"
         sub.mkdir()
         _write(sub, "pkg.sv", "`define PKG_W 4\n")
@@ -546,11 +644,22 @@ module m(input logic [`PKG_W-1:0] d, output logic [`PKG_W-1:0] q);
 endmodule
 """)
         import subprocess, sys
-        result = subprocess.run(
+        # -I あり: ポート幅 4 になること
+        r_with = subprocess.run(
             [sys.executable, "-m", "deltasim", "parse", sv, "-I", str(sub)],
             capture_output=True, text=True, encoding="utf-8", timeout=15
         )
-        assert result.returncode == 0, result.stderr
+        assert r_with.returncode == 0, r_with.stderr
+        assert "4" in r_with.stdout, f"-I あり: 幅4が stdout にない: {r_with.stdout!r}"
+
+        # -I なし: エラーになること（pkg.sv が見つからない）
+        r_without = subprocess.run(
+            [sys.executable, "-m", "deltasim", "parse", sv],
+            capture_output=True, text=True, encoding="utf-8", timeout=15
+        )
+        assert r_without.returncode != 0, "-I なし: エラーになるはず"
+        assert "pkg.sv" in r_without.stderr or "E001" in r_without.stderr, \
+            f"-I なし: pkg.sv または E001 が stderr にない: {r_without.stderr!r}"
 
     def test_yaml_defines_key(self, tmp_path):
         """YAML の defines キーが機能すること"""
@@ -684,26 +793,60 @@ endmodule
         assert di.status == "PASS"
 
     def test_cli_overrides_filelist(self, tmp_path):
-        """CLI の -D が .f の +define+ より後勝ちになること（追加として扱う）"""
+        """.f の +define+W=4 と CLI の -D W=8 で、CLI が後勝ちしてポート幅が 8 になること。"""
         sv = _write(tmp_path, "m.sv", """\
-`ifdef CLI_DEF
-module m(input logic d, output logic q);
+module m(input logic [`W-1:0] d, output logic [`W-1:0] q);
   assign q = d;
 endmodule
-`else
-module m(input logic d, output logic q);
-  assign q = 0;
-endmodule
-`endif
 """)
-        flist = _write(tmp_path, "files.f", f"{sv}\n")
-        # .f に CLI_DEF はない、CLI -D で追加
+        flist = _write(tmp_path, "files.f", f"{sv}\n+define+W=4\n")
         import subprocess, sys
-        result = subprocess.run(
+        # .f W=4, CLI -D W=8 → CLI 後勝ちで 8
+        r_cli_wins = subprocess.run(
             [sys.executable, "-m", "deltasim", "parse", sv,
-             "-f", flist, "-D", "CLI_DEF"],
+             "-f", flist, "-D", "W=8"],
             capture_output=True, text=True, encoding="utf-8", timeout=15
         )
-        assert result.returncode == 0, result.stderr
-        # d ポートがあること（CLI_DEF あり版のモジュールが選ばれた）
-        assert "d" in result.stdout
+        assert r_cli_wins.returncode == 0, r_cli_wins.stderr
+        # ポート幅 8 になること（"8" が stdout に含まれる）
+        assert "8" in r_cli_wins.stdout, \
+            f"CLI -D W=8 が後勝ちしてポート幅8にならない: {r_cli_wins.stdout!r}"
+
+        # .f のみ (W=4): ポート幅 4
+        r_flist_only = subprocess.run(
+            [sys.executable, "-m", "deltasim", "parse", sv, "-f", flist],
+            capture_output=True, text=True, encoding="utf-8", timeout=15
+        )
+        assert r_flist_only.returncode == 0, r_flist_only.stderr
+        assert "4" in r_flist_only.stdout, \
+            f".f のみ: ポート幅4にならない: {r_flist_only.stdout!r}"
+
+    def test_yaml_defines_overrides_cli(self, tmp_path):
+        """YAML defines と CLI -D の優先順位: CLI が後勝ちしてポート幅が変わること。"""
+        sv = _write(tmp_path, "m.sv", """\
+module m(input logic clk, rst_n, input logic [`W-1:0] d, output logic [`W-1:0] q);
+  always_ff @(posedge clk) if (!rst_n) q <= 0; else q <= d;
+endmodule
+""")
+        # YAML defines W=4
+        spec = {
+            "version": 1, "top": "m",
+            "clock": {"signal": "clk", "period_ns": 10},
+            "reset": {"signal": "rst_n", "active_low": True, "duration_cycles": 2},
+            "sim": {"cycles": 3},
+            "defines": ["+define+W=4"],
+            "cases": [{"name": "t", "expected": [{"at": 3, "check": {"q": 0}}]}],
+        }
+        spec_p = str(tmp_path / "spec.yaml")
+        with open(spec_p, "w", encoding="utf-8") as f:
+            yaml.dump(spec, f)
+
+        # YAML W=4 のみ → ポート幅 4
+        di_yaml = ds.load([sv], defines=["+define+W=4"])
+        w_yaml = next(p.width for p in di_yaml.ports if p.name == "d")
+        assert w_yaml == 4, f"YAML W=4 のみ: {w_yaml}"
+
+        # CLI W=8 が後から追加 → ポート幅は 8（後勝ち）
+        di_cli = ds.load([sv], defines=["+define+W=4", "+define+W=8"])
+        w_cli = next(p.width for p in di_cli.ports if p.name == "d")
+        assert w_cli == 8, f"CLI W=8 後勝ち: {w_cli}"

@@ -808,6 +808,74 @@ class TestE001:
 
 
 # ===========================================================================
+# 10b. E001 (§18.9) — プリプロセッサ: 未定義マクロ / include 未発見
+# ===========================================================================
+
+class TestE001Preproc:
+    """§18.9 プリプロセッサ由来の E001（CLI + API、1対1 assert）。"""
+
+    def test_undefined_macro_cli(self, tmp_path):
+        """CLI: 未定義マクロが E001 を返すこと"""
+        sv_p = _write(tmp_path, "m.sv",
+                      "module m;\nassign y = `UNDEFINED_MACRO;\nendmodule\n")
+        spec = {
+            "version": 1, "top": "m",
+            "clock": {"signal": "clk", "period_ns": 10},
+            "reset": {"signal": "rst", "active_low": False, "duration_cycles": 1},
+            "sim": {"cycles": 1},
+            "cases": [{"name": "t", "expected": [{"at": 1, "check": {"y": 0}}]}],
+        }
+        spec_p = str(tmp_path / "spec.yaml")
+        with open(spec_p, "w", encoding="utf-8") as f:
+            yaml.dump(spec, f)
+        out = _cli_test(sv_p, spec_p, tmp_path)
+        codes = _all_codes(out)
+        assert "E001" in codes, \
+            f"E001 expected (undefined macro CLI), got: {codes}"
+        assert "E_INTERNAL" not in codes
+
+    def test_undefined_macro_api(self, tmp_path):
+        """API: 未定義マクロが E001 を返すこと"""
+        sv_p = _write(tmp_path, "m.sv",
+                      "module m;\nassign y = `UNDEFINED_MACRO;\nendmodule\n")
+        di = ds.load([sv_p])
+        assert di.status == "ERROR"
+        codes = [e.code for e in di.errors]
+        assert "E001" in codes, f"E001 expected (undefined macro API): {codes}"
+        assert "E_INTERNAL" not in codes
+
+    def test_include_not_found_cli(self, tmp_path):
+        """CLI: include ファイル未発見が E001 を返すこと"""
+        sv_p = _write(tmp_path, "m.sv",
+                      '`include "nonexistent_file.sv"\nmodule m;\nendmodule\n')
+        spec = {
+            "version": 1, "top": "m",
+            "clock": {"signal": "clk", "period_ns": 10},
+            "reset": {"signal": "rst", "active_low": False, "duration_cycles": 1},
+            "sim": {"cycles": 1},
+            "cases": [{"name": "t", "expected": [{"at": 1, "check": {"y": 0}}]}],
+        }
+        spec_p = str(tmp_path / "spec.yaml")
+        with open(spec_p, "w", encoding="utf-8") as f:
+            yaml.dump(spec, f)
+        out = _cli_test(sv_p, spec_p, tmp_path)
+        codes = _all_codes(out)
+        assert "E001" in codes, \
+            f"E001 expected (include not found CLI), got: {codes}"
+        assert "E_INTERNAL" not in codes
+
+    def test_include_not_found_api(self, tmp_path):
+        """API: include ファイル未発見が E001 を返すこと"""
+        sv_p = _write(tmp_path, "m.sv",
+                      '`include "nonexistent_file.sv"\nmodule m;\nendmodule\n')
+        di = ds.load([sv_p])
+        assert di.status == "ERROR"
+        codes = [e.code for e in di.errors]
+        assert "E001" in codes, f"E001 expected (include not found API): {codes}"
+        assert "E_INTERNAL" not in codes
+
+
+# ===========================================================================
 # 11. E002 — モジュールが見つからない
 # ===========================================================================
 
