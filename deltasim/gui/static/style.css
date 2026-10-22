@@ -390,3 +390,23 @@ select.module-select { width: 100%; padding: 4px 6px; background: var(--surface2
 .sig-picker-row:hover { background: #2a2a40; }
 .sig-picker-row.selected { background: rgba(124,106,247,0.2); color: #c4b5fd; }
 .sig-picker-row.already-added { opacity: 0.5; }
+
+/* ===== §18.4.2: 波形セット読込ダイアログ ===== */
+.waveset-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border-bottom: 1px solid #2a2a40;
+  border-radius: 4px;
+}
+.waveset-item:hover { background: #1e1e2e; }
+.waveset-item-info { flex: 1; overflow: hidden; }
+.waveset-item-name { font-size: 13px; color: var(--text); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.waveset-item-meta { font-size: 10px; color: #8888aa; margin-top: 2px; }
+.waveset-item-actions { display: flex; gap: 4px; flex-shrink: 0; }
+
+/* §18.4.2: VCD に無い信号の灰色表示 */
+.sig-vcd-missing .sig-name-label { color: #55556a !important; font-style: italic; }
+.sig-vcd-missing .sig-btn { opacity: 0.4; }
+.sig-vcd-missing { opacity: 0.7; }
