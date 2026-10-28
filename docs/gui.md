@@ -856,3 +856,33 @@ GUI の LLM 機能でコマンド提案を実行する場合（`/api/llm/run/sta
 ```
 
 `project_dir` が指定されない場合は実行プロセスの現在ディレクトリで実行されます。
+
+---
+
+## §18.7 4値論理（x/z）の波形表示
+
+波形ビューアは x（不定）と z（ハイインピーダンス）を色で区別します:
+- **x（不定）**: 橙色（`#fb923c`）— `COLOR_X`
+- **z（高インピーダンス）**: 青色（`#60a5fa`）— `COLOR_Z`
+- 通常信号: 紫（`#7c6af7`）
+
+1ビット信号では x/z を中間の水平線で描画します。多ビット信号では表示基数に関わらず x/z が含まれる場合はそのまま文字列表示します（例: `1x01`）。
+
+`waveutil.fmt_value()` で符号付き変換する際も x/z を含む場合はそのまま返します。
+
+---
+
+## §18 PR#31: E_LOOP_LIMIT / E_DELTA_LIMIT の明示表示
+
+Simulator の `step()` / `run_until()` でループ上限・デルタサイクル上限に達した場合:
+
+**HTTP API** (`/api/simulator/{id}/step` 等):
+```json
+// 422 Unprocessable Entity
+{"code": "E_DELTA_LIMIT", "detail": "E_DELTA_LIMIT: ..."}
+{"code": "E_LOOP_LIMIT",  "detail": "E_LOOP_LIMIT: ..."}
+```
+
+汎用の例外は引き続き 500 を返します。
+
+**コンソール経路**: `run` / `run -all` 等のコマンドで限界に達すると、コンソール出力に `E_DELTA_LIMIT:` / `E_LOOP_LIMIT:` で始まるメッセージが表示され、finish イベントの `error_code` フィールドにコードが入ります。

@@ -2471,6 +2471,10 @@ async function _consoleConsumeSSE(sid, job_id) {
             state.cursorA = ev.paused_bp.time_ns;
             if (state.waveformData) drawWaveform();
           }
+          // §18 PR#31: E_DELTA_LIMIT / E_LOOP_LIMIT を赤色で強調表示
+          if (ev.error_code === "E_DELTA_LIMIT" || ev.error_code === "E_LOOP_LIMIT") {
+            _consoleOut(`[${ev.error_code}] シミュレーション上限に達しました。詳細は上記ログを確認してください。`, "con-error");
+          }
           if (ev.quit) {
             _consoleOut("# セッション終了（サーバーは継続中）", "con-warn");
             // セッションを削除
