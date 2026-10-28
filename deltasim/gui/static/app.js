@@ -267,15 +267,25 @@ function setEditorContent(content, lang) {
 function setEditorErrors(errors) {
   if (!cmEditor) return;
   clearEditorErrors();
-  state.errorLines = errors.filter(e => e.line > 0).map(e => e.line);
+  // 現在開いているファイルのエラーのみガター表示
+  const currentFile = state.editorPath ? state.editorPath.replace(/\\/g, "/") : "";
+  const localErrors = errors.filter(e => {
+    if (!e.line || e.line <= 0) return false;
+    if (!e.file) return true;  // ファイル指定なし → 現在ファイルに表示
+    return e.file.replace(/\\/g, "/").endsWith(currentFile) || currentFile.endsWith(e.file.replace(/\\/g, "/"));
+  });
+  state.errorLines = localErrors.map(e => e.line);
   for (const ln of state.errorLines) {
     const idx = ln - 1;
-    cmEditor.setGutterMarker(idx, "error-gutter", makeErrorMarker(errors.find(e => e.line === ln)));
+    cmEditor.setGutterMarker(idx, "error-gutter", makeErrorMarker(localErrors.find(e => e.line === ln)));
     cmEditor.addLineClass(idx, "background", "cm-error-line");
   }
-  if (state.errorLines.length > 0) {
+  // §18.9: include先など別ファイルのエラーをバッジに表示
+  const otherErrors = errors.filter(e => e.line > 0 && e.file && !localErrors.includes(e));
+  const total = state.errorLines.length + otherErrors.length;
+  if (total > 0) {
     dom.editorErrorsBadge.style.display = "";
-    dom.editorErrorsBadge.textContent = `⚠ ${state.errorLines.length} エラー行`;
+    dom.editorErrorsBadge.textContent = `⚠ ${total} エラー行`;
   }
 }
 
@@ -914,8 +924,13 @@ async function loadModule(svPaths, top) {
         };
         var prefix = prefixMap[e.code] || ("[" + e.severity + "]");
         var locSuffix = e.line ? " (行 " + e.line + ")" : "";
-        log(prefix + ": " + e.message + locSuffix,
-            e.severity === "error" ? "log-error" : "log-warn");
+        // §18.9: errors[].file が別ファイル（include先）を指す場合、リンクを追加
+        var fileSuffix = (e.file && e.line > 0) ? ` [${e.file.split(/[\\/]/).pop()}:${e.line}]` : "";
+        var fullMsg = prefix + ": " + e.message + (locSuffix || fileSuffix);
+        log(fullMsg, e.severity === "error" ? "log-error" : "log-warn");
+        if (e.file && e.line > 0) {
+          _logFileJumpHint(e.file, e.line, "エラー箇所を開く");
+        }
       });
     } else {
       clearEditorErrors();
@@ -1219,7 +1234,7 @@ function renderResults(result) {
   }
 
   if (cases.length === 0 && result.status === "ERROR") {
-    // パース失敗等: ケースなしでエラー表示
+    // パース失敗等: ケースなしでエラー表示（§18.9: file リンクつき）
     const errMsg = (result.errors ?? []).map(e => e.message).join("\n") || "エラーが発生しました";
     dom.resultList.innerHTML = `
       <div style="padding:10px 8px;">
@@ -1227,6 +1242,10 @@ function renderResults(result) {
         <span style="color:#fb923c;font-size:11px;">ERROR</span>
         <div style="color:#a3a3b4;font-size:10px;margin-top:4px;white-space:pre-wrap;">${escHtml(errMsg)}</div>
       </div>`;
+    // §18.9: errors[].file が include 先を指す場合はジャンプヒントをログに表示
+    (result.errors ?? []).filter(e => e.file && e.line > 0).forEach(e => {
+      _logFileJumpHint(e.file, e.line, "エラー箇所を開く");
+    });
     return;
   }
 
@@ -2547,6 +2566,47 @@ function _consoleHandleKeydown(e) {
 // =========================================================================
 // ユーティリティ
 // =========================================================================
+
+// =========================================================================
+// §18.9: include先ファイルへのジャンプ
+// =========================================================================
+
+/**
+ * ログパネルにファイルジャンプのヒントを表示する（クリックで開く）。
+ * @param {string} filePath - 開くファイルのパス
+ * @param {number} line - 行番号（1始まり）
+ * @param {string} label - 表示ラベル
+ */
+function _logFileJumpHint(filePath, line, label) {
+  if (!dom.logOutput) return;
+  const el = document.createElement("div");
+  el.className = "log-line log-file-jump";
+  el.style.cssText = "cursor:pointer;color:#7c6af7;text-decoration:underline;font-size:10px;padding-left:4px;";
+  el.textContent = `  → ${label}: ${filePath.split(/[\/]/).pop()}:${line}`;
+  el.title = filePath;
+  el.addEventListener("click", async () => {
+    try {
+      await openFileInEditor(filePath);
+      goToEditorLine(line);
+    } catch (e) {
+      log(`ファイルを開けませんでした: ${e.message}`, "log-error");
+    }
+  });
+  dom.logOutput.appendChild(el);
+  dom.logOutput.scrollTop = dom.logOutput.scrollHeight;
+}
+
+/**
+ * エディタの指定行へジャンプしてスクロールする。
+ * @param {number} line - 行番号（1始まり）
+ */
+function goToEditorLine(line) {
+  if (!cmEditor || !line || line <= 0) return;
+  const lineIdx = Math.max(0, line - 1);
+  cmEditor.setCursor({ line: lineIdx, ch: 0 });
+  cmEditor.scrollIntoView({ line: lineIdx, ch: 0 }, 100);
+  cmEditor.focus();
+}
 
 function escHtml(s) {
   return String(s)
