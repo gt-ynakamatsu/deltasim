@@ -671,6 +671,22 @@ class SimStepRequest(BaseModel):
     n: int = 1
 
 
+def _sim_limit_error_response(e: Exception):
+    """DeltaLimitError / LoopLimitError を 422 + code で返す（§18 PR#31）。"""
+    from deltasim.sim.engine import DeltaLimitError, LoopLimitError
+    if isinstance(e, DeltaLimitError):
+        return JSONResponse(
+            status_code=422,
+            content={"code": "E_DELTA_LIMIT", "detail": str(e)},
+        )
+    if isinstance(e, LoopLimitError):
+        return JSONResponse(
+            status_code=422,
+            content={"code": "E_LOOP_LIMIT", "detail": str(e)},
+        )
+    return None
+
+
 @app.post("/api/simulator/{session_id}/step")
 async def sim_step(session_id: str, req: SimStepRequest):
     """n サイクル進める（§8）。"""
@@ -683,6 +699,9 @@ async def sim_step(session_id: str, req: SimStepRequest):
     try:
         snap = await asyncio.to_thread(sess.sim.step, req.n)
     except Exception as e:
+        resp = _sim_limit_error_response(e)
+        if resp is not None:
+            return resp
         raise HTTPException(status_code=500, detail=str(e))
 
     return snap.to_dict()
@@ -704,6 +723,9 @@ async def sim_run_until(session_id: str, req: SimRunUntilRequest):
     try:
         snap = await asyncio.to_thread(sess.sim.run_until, req.time_ns)
     except Exception as e:
+        resp = _sim_limit_error_response(e)
+        if resp is not None:
+            return resp
         raise HTTPException(status_code=500, detail=str(e))
 
     return snap.to_dict()

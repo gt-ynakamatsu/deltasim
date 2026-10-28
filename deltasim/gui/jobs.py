@@ -501,7 +501,17 @@ async def run_console_job(
         except InterpSession._QuitSignal:
             quit_signal = True
         except Exception as e:
-            interp._out(f"ERROR: {e}")
+            # §18 PR#31: E_LOOP_LIMIT / E_DELTA_LIMIT を明示表示
+            try:
+                from deltasim.sim.engine import DeltaLimitError, LoopLimitError
+                if isinstance(e, DeltaLimitError):
+                    interp._out(f"E_DELTA_LIMIT: {e}")
+                elif isinstance(e, LoopLimitError):
+                    interp._out(f"E_LOOP_LIMIT: {e}")
+                else:
+                    interp._out(f"ERROR: {e}")
+            except ImportError:
+                interp._out(f"ERROR: {e}")
         finally:
             interp._output_callback = old_callback
 
@@ -518,12 +528,26 @@ async def run_console_job(
             }
             interp._paused_bp = None  # 消費
 
+        # §18 PR#31: 限界エラーのコードを結果に含める
+        error_code = None
+        if not quit_signal:
+            try:
+                from deltasim.sim.engine import DeltaLimitError, LoopLimitError
+                for line in interp._output_lines:
+                    if line.startswith("E_DELTA_LIMIT:"):
+                        error_code = "E_DELTA_LIMIT"; break
+                    if line.startswith("E_LOOP_LIMIT:"):
+                        error_code = "E_LOOP_LIMIT"; break
+            except ImportError:
+                pass
+
         return {
             "quit": quit_signal,
             "output": list(interp._output_lines),
             "time_ns": time_ns,
             "cycle": cycle,
             "paused_bp": paused_info,
+            "error_code": error_code,
         }
 
     try:
